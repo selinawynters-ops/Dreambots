@@ -303,6 +303,8 @@ async function createConnectionProfile(forceName = null) {
     }
 
     if (Array.isArray(profile.exclude)) {
+        // Never allow 'api' or 'model' to be excluded — they're essential for switching
+        profile.exclude = profile.exclude.filter(e => e !== 'api' && e !== 'model');
         for (const command of profile.exclude) {
             delete profile[command];
         }
@@ -397,9 +399,20 @@ async function applyConnectionProfile(profile) {
     const spinner = new ConnectionManagerSpinner();
     spinner.start();
 
+    // Commands that trigger async UI updates and need settling time:
+    // - /api: changes chat_completion_source, triggers model list reload + connection attempt
+    // - /api-url: changes endpoint, triggers reconnect + model list refresh
+    // - /preset: may override settings via async .finally() block
+    const COMMANDS_NEEDING_DELAY = ['api', 'api-url', 'preset'];
+    const LONG_DELAY = 500;  // ms — wait for async UI updates to settle
+    const SHORT_DELAY = 100; // ms — between normal commands
+    let modelRetryNeeded = false;
+
     for (const command of commands) {
         if (spinner.isAborted()) {
-            throw new Error('Profile application aborted');
+            spinner.stop();
+            console.warn('[ConnectionManager] Profile application aborted');
+            return;
         }
 
         const argument = profile[command];
@@ -409,9 +422,40 @@ async function applyConnectionProfile(profile) {
         }
         try {
             const args = getNamedArguments(allowEmpty ? { force: 'true' } : {});
-            await SlashCommandParser.commands[command].callback(args, argument);
+            const result = await SlashCommandParser.commands[command].callback(args, argument);
+
+            // Track if model command failed (returned empty or different value)
+            if (command === 'model' && result !== argument) {
+                modelRetryNeeded = true;
+            }
+
+            // After commands that trigger async UI updates, wait for them to settle.
+            // Without this delay:
+            //   /api sets source to 'custom' but /api-url fires before UI updates
+            //   /api-url sets URL but /model fires before model list loads from new endpoint
+            //   /preset applies settings async via .finally(), may override source after next /api checks
+            if (COMMANDS_NEEDING_DELAY.includes(command)) {
+                await new Promise(resolve => setTimeout(resolve, LONG_DELAY));
+            } else {
+                await new Promise(resolve => setTimeout(resolve, SHORT_DELAY));
+            }
         } catch (error) {
-            console.error(`Failed to execute command: ${command} ${argument}`, error);
+            console.error(`[ConnectionManager] Failed to execute command: ${command} ${argument}`, error);
+            if (command === 'model') {
+                modelRetryNeeded = true;
+            }
+        }
+    }
+
+    // If model didn't apply correctly, retry once after letting everything settle
+    if (modelRetryNeeded && profile['model'] && !spinner.isAborted()) {
+        console.log('[ConnectionManager] Model may not have applied correctly, retrying...');
+        await new Promise(resolve => setTimeout(resolve, LONG_DELAY));
+        try {
+            const args = getNamedArguments();
+            await SlashCommandParser.commands['model'].callback(args, profile['model']);
+        } catch (error) {
+            console.error('[ConnectionManager] Model retry also failed:', error);
         }
     }
 
@@ -480,6 +524,33 @@ async function renderDetailsContent(detailsContent) {
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
         if (extension_settings.connectionManager[key] === undefined) {
             extension_settings.connectionManager[key] = DEFAULT_SETTINGS[key];
+        }
+    }
+
+    // Auto-repair profiles: fix Custom source profiles with missing 'api' field
+    // and remove 'api'/'model' from exclude lists (these are essential fields)
+    if (Array.isArray(extension_settings.connectionManager.profiles)) {
+        let repaired = false;
+        for (const profile of extension_settings.connectionManager.profiles) {
+            // If profile has api-url but no api, it's a Custom (OpenAI-compatible) profile
+            if (profile['api-url'] && !profile.api) {
+                profile.api = 'custom';
+                repaired = true;
+                console.log(`[ConnectionManager] Auto-repaired profile "${profile.name}": set api to "custom"`);
+            }
+            // Never exclude 'api' — it's required for source switching
+            if (Array.isArray(profile.exclude)) {
+                const hadApi = profile.exclude.includes('api');
+                const hadModel = profile.exclude.includes('model');
+                profile.exclude = profile.exclude.filter(e => e !== 'api' && e !== 'model');
+                if (hadApi || hadModel) {
+                    repaired = true;
+                    console.log(`[ConnectionManager] Auto-repaired profile "${profile.name}": removed api/model from exclude list`);
+                }
+            }
+        }
+        if (repaired) {
+            saveSettingsDebounced();
         }
     }
 

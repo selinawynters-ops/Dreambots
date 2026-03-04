@@ -11,7 +11,11 @@ export function showLoader() {
 
     loaderPopup = new Popup(`
         <div id="loader">
-            <div id="load-spinner" class="fa-solid fa-gear fa-spin fa-3x"></div>
+            <div id="load-spinner" class="magic-orb-container">
+                <div class="magic-ring"></div>
+                <div class="magic-orb"></div>
+            </div>
+            <div class="loading-text">Loading DreamTavern...</div>
         </div>`, POPUP_TYPE.DISPLAY, null, { transparent: true, animation: 'none', wide: true, large: true });
 
     // No close button, loaders are not closable
@@ -61,7 +65,7 @@ export async function hideLoader() {
                 });
         }
 
-        // Apply the styles
+        // Apply the styles for fade out
         spinner.css({
             'filter': 'blur(15px)',
             'opacity': '0',

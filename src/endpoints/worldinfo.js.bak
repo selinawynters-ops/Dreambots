@@ -1,0 +1,345 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+import express from 'express';
+import sanitize from 'sanitize-filename';
+import _ from 'lodash';
+import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { tryParse } from '../util.js';
+import { getAllUserHandles, getUserDirectories, getAllEnabledUsers } from '../users.js';
+import { findCharactersByWorld } from './characters.js';
+import { read as readCharacterCard, write as writeCharacterCard } from '../character-card-parser.js';
+
+/**
+ * Reads a World Info file and returns its contents
+ * @param {import('../users.js').UserDirectoryList} directories User directories
+ * @param {string} worldInfoName Name of the World Info file
+ * @param {boolean} allowDummy If true, returns an empty object if the file doesn't exist
+ * @returns {object} World Info file contents
+ */
+export function readWorldInfoFile(directories, worldInfoName, allowDummy) {
+    const dummyObject = allowDummy ? { entries: {} } : null;
+
+    if (!worldInfoName) {
+        return dummyObject;
+    }
+
+    const filename = sanitize(`${worldInfoName}.json`);
+    const pathToWorldInfo = path.join(directories.worlds, filename);
+
+    if (!fs.existsSync(pathToWorldInfo)) {
+        console.error(`World info file ${filename} doesn't exist.`);
+        return dummyObject;
+    }
+
+    const worldInfoText = fs.readFileSync(pathToWorldInfo, 'utf8');
+    const worldInfo = JSON.parse(worldInfoText);
+    return worldInfo;
+}
+
+/**
+ * Checks if a lorebook is locked and the user lacks permission to modify it.
+ * @param {string} filePath Path to the world info JSON file
+ * @param {object} userProfile User profile object
+ * @returns {{ locked: boolean, reason?: string }}
+ */
+function checkLock(filePath, userProfile) {
+    if (!fs.existsSync(filePath)) return { locked: false };
+
+    try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const ext = data?.extensions || {};
+
+        if (!ext.dreamtavern_locked) return { locked: false };
+
+        // Admin can always edit
+        if (userProfile?.admin) return { locked: false };
+
+        // Creator can edit their own
+        if (ext.dreamtavern_creator === userProfile?.handle) return { locked: false };
+
+        return { locked: true, reason: 'This lorebook is locked. Only the creator or an admin can modify it.' };
+    } catch {
+        return { locked: false };
+    }
+}
+
+export const router = express.Router();
+
+router.post('/list', async (request, response) => {
+    try {
+        const data = [];
+        const jsonFiles = (await fs.promises.readdir(request.user.directories.worlds, { withFileTypes: true }))
+            .filter((file) => file.isFile() && path.extname(file.name).toLowerCase() === '.json')
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const file of jsonFiles) {
+            try {
+                const filePath = path.join(request.user.directories.worlds, file.name);
+                const fileContents = await fs.promises.readFile(filePath, 'utf8');
+                const fileContentsParsed = tryParse(fileContents) || {};
+                const fileExtensions = fileContentsParsed?.extensions || {};
+                const fileNameWithoutExt = path.parse(file.name).name;
+                const fileData = {
+                    file_id: fileNameWithoutExt,
+                    name: fileContentsParsed?.name || fileNameWithoutExt,
+                    extensions: _.isObjectLike(fileExtensions) ? fileExtensions : {},
+                };
+                data.push(fileData);
+            } catch (err) {
+                console.warn(`Error reading or parsing World Info file ${file.name}:`, err);
+            }
+        }
+
+        // Hide pushed lorebooks from non-admin/non-creator users
+        const isAdmin = request.user.profile?.admin;
+        const userHandle = request.user.profile?.handle;
+        const filtered = data.filter(entry => {
+            if (!entry.extensions?.dreamtavern_hidden) return true;
+            if (isAdmin) return true;
+            if (entry.extensions?.dreamtavern_creator === userHandle) return true;
+            return false;
+        });
+
+        return response.send(filtered);
+    } catch (err) {
+        console.error('Error reading World Info directory:', err);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/get', (request, response) => {
+    if (!request.body?.name) {
+        return response.sendStatus(400);
+    }
+
+    const file = readWorldInfoFile(request.user.directories, request.body.name, true);
+
+    return response.send(file);
+});
+
+router.post('/delete', (request, response) => {
+    if (!request.body?.name) {
+        return response.sendStatus(400);
+    }
+
+    const worldInfoName = request.body.name;
+    const filename = sanitize(`${worldInfoName}.json`);
+    const pathToWorldInfo = path.join(request.user.directories.worlds, filename);
+
+    if (!fs.existsSync(pathToWorldInfo)) {
+        throw new Error(`World info file ${filename} doesn't exist.`);
+    }
+
+    // Lock check
+    const lock = checkLock(pathToWorldInfo, request.user.profile);
+    if (lock.locked) {
+        return response.status(403).send(lock.reason);
+    }
+
+    fs.unlinkSync(pathToWorldInfo);
+
+    return response.sendStatus(200);
+});
+
+router.post('/import', (request, response) => {
+    if (!request.file) return response.sendStatus(400);
+
+    const filename = `${path.parse(sanitize(request.file.originalname)).name}.json`;
+
+    let fileContents = null;
+
+    if (request.body.convertedData) {
+        fileContents = request.body.convertedData;
+    } else {
+        const pathToUpload = path.join(request.file.destination, request.file.filename);
+        fileContents = fs.readFileSync(pathToUpload, 'utf8');
+        fs.unlinkSync(pathToUpload);
+    }
+
+    try {
+        const worldContent = JSON.parse(fileContents);
+        if (!('entries' in worldContent)) {
+            throw new Error('File must contain a world info entries list');
+        }
+    } catch (err) {
+        return response.status(400).send('Is not a valid world info file');
+    }
+
+    const pathToNewFile = path.join(request.user.directories.worlds, filename);
+    const worldName = path.parse(pathToNewFile).name;
+
+    if (!worldName) {
+        return response.status(400).send('World file must have a name');
+    }
+
+    writeFileAtomicSync(pathToNewFile, fileContents);
+    return response.send({ name: worldName });
+});
+
+router.post('/edit', (request, response) => {
+    if (!request.body) {
+        return response.sendStatus(400);
+    }
+
+    if (!request.body.name) {
+        return response.status(400).send('World file must have a name');
+    }
+
+    try {
+        if (!('entries' in request.body.data)) {
+            throw new Error('World info must contain an entries list');
+        }
+    } catch (err) {
+        return response.status(400).send('Is not a valid world info file');
+    }
+
+    const filename = sanitize(`${request.body.name}.json`);
+    const pathToFile = path.join(request.user.directories.worlds, filename);
+
+    // Lock check
+    const lock = checkLock(pathToFile, request.user.profile);
+    if (lock.locked) {
+        return response.status(403).send(lock.reason);
+    }
+
+    writeFileAtomicSync(pathToFile, JSON.stringify(request.body.data, null, 4));
+
+    return response.send({ ok: true });
+});
+
+// Push lorebook + associated character(s) to target users
+// Admin can push to anyone; regular users can only push to admin(s)
+router.post('/push', async (request, response) => {
+    const { name, targets, charLabel } = request.body;
+    const isAdmin = request.user.profile?.admin;
+
+    if (!name) {
+        return response.status(400).send('Lorebook name is required');
+    }
+
+    // Read source lorebook
+    const sourceFilename = sanitize(`${name}.json`);
+    const sourcePath = path.join(request.user.directories.worlds, sourceFilename);
+
+    if (!fs.existsSync(sourcePath)) {
+        return response.status(404).send('Lorebook not found in your collection');
+    }
+
+    // Parse lorebook and add lock metadata
+    const lorebookData = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+    if (!lorebookData.extensions) lorebookData.extensions = {};
+    lorebookData.extensions.dreamtavern_locked = true;
+    lorebookData.extensions.dreamtavern_hidden = true;
+    lorebookData.extensions.dreamtavern_creator = request.user.profile.handle;
+
+    // Find characters that reference this lorebook
+    const characterFiles = await findCharactersByWorld(request.user.directories, name);
+
+    // Build the new lorebook name: dd-{creator-handle}-{charLabel}
+    const creatorHandle = request.user.profile.handle;
+    const labelToUse = charLabel || name;
+    const newLorebookName = `dd-${creatorHandle}-${labelToUse}`;
+    const newLorebookFilename = sanitize(`${newLorebookName}.json`);
+    const lockedContents = JSON.stringify(lorebookData, null, 4);
+
+    // Determine target handles
+    let targetHandles;
+    if (targets === 'all') {
+        targetHandles = await getAllUserHandles();
+        targetHandles = targetHandles.filter(h => h !== request.user.profile.handle);
+    } else if (Array.isArray(targets)) {
+        targetHandles = targets;
+    } else {
+        return response.status(400).send('targets must be "all" or an array of handles');
+    }
+
+    // Non-admin users can ONLY push to admin accounts
+    if (!isAdmin) {
+        const allUsers = await getAllEnabledUsers();
+        const adminHandles = allUsers.filter(u => u.admin).map(u => u.handle);
+        const invalidTargets = targetHandles.filter(h => !adminHandles.includes(h));
+        if (invalidTargets.length > 0) {
+            return response.status(403).send('Non-admin users can only push to admin accounts');
+        }
+    }
+
+    const results = { pushed: [], skipped: [], failed: [], characters_pushed: [] };
+
+    for (const handle of targetHandles) {
+        try {
+            const userDirs = getUserDirectories(handle);
+
+            // Push lorebook with renamed filename
+            if (!fs.existsSync(userDirs.worlds)) {
+                fs.mkdirSync(userDirs.worlds, { recursive: true });
+            }
+            const destLorebook = path.join(userDirs.worlds, newLorebookFilename);
+            if (fs.existsSync(destLorebook)) {
+                results.skipped.push(handle);
+            } else {
+                writeFileAtomicSync(destLorebook, lockedContents);
+                results.pushed.push(handle);
+            }
+
+            // Push character(s) with updated world reference
+            if (characterFiles.length > 0) {
+                if (!fs.existsSync(userDirs.characters)) {
+                    fs.mkdirSync(userDirs.characters, { recursive: true });
+                }
+                for (const charFile of characterFiles) {
+                    const srcChar = path.join(request.user.directories.characters, charFile);
+                    const destChar = path.join(userDirs.characters, charFile);
+                    if (!fs.existsSync(destChar) && fs.existsSync(srcChar)) {
+                        try {
+                            // Read character, update world reference to new lorebook name, write modified PNG
+                            const pngBuffer = fs.readFileSync(srcChar);
+                            const charDataStr = readCharacterCard(pngBuffer);
+                            const charData = JSON.parse(charDataStr);
+                            if (charData?.data?.extensions) {
+                                charData.data.extensions.world = newLorebookName;
+                            }
+                            const modifiedPng = writeCharacterCard(pngBuffer, JSON.stringify(charData));
+                            fs.writeFileSync(destChar, modifiedPng);
+                        } catch (charErr) {
+                            console.warn(`[Push] Could not update world ref for ${charFile}, copying as-is:`, charErr.message);
+                            fs.copyFileSync(srcChar, destChar);
+                        }
+                        results.characters_pushed.push(`${handle}/${charFile}`);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error(`[Push] Failed to push "${name}" to ${handle}:`, err);
+            results.failed.push(handle);
+        }
+    }
+
+    console.log(`[Push] ${request.user.profile.handle} pushed "${name}" (+ ${characterFiles.length} character(s)) → ${results.pushed.length} users, ${results.skipped.length} skipped, ${results.failed.length} failed`);
+    return response.send(results);
+});
+
+// Find characters linked to a lorebook (any authenticated user)
+router.post('/find-characters', async (request, response) => {
+    const { name } = request.body;
+    if (!name) {
+        return response.status(400).send('Lorebook name is required');
+    }
+
+    const characters = await findCharactersByWorld(request.user.directories, name);
+    return response.send({ characters });
+});
+
+// Get admin user handles (for non-admin users to know who they can push to)
+router.post('/admin-handles', async (request, response) => {
+    try {
+        const allUsers = await getAllEnabledUsers();
+        const admins = allUsers
+            .filter(u => u.admin)
+            .map(u => ({ handle: u.handle, name: u.name, admin: true, enabled: true }));
+        return response.json(admins);
+    } catch (err) {
+        console.error('Failed to get admin handles:', err);
+        return response.sendStatus(500);
+    }
+});

@@ -1,0 +1,15 @@
+@font-face {
+      font-family: "Beau Rivage";
+        src: url('/fonts/Beau-Rivage-regular.woff') format('woff');
+        }
+
+        @font-face {
+          font-family: "Bilbo Swash";
+            src: url('/fonts/Bilbo-Swash-Caps-regular.woff') format('woff');
+            }
+
+            @font-face {
+              font-family: "Island Moments";
+                src: url('/fonts/Island-Moments-regular.woff') format('woff');
+                }
+}

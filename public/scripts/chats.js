@@ -691,7 +691,7 @@ export function formatCreatorNotes(text, avatarId) {
         RETURN_DOM_FRAGMENT: false,
         RETURN_TRUSTED_TYPE: false,
         MESSAGE_SANITIZE: true,
-        ADD_TAGS: ['custom-style'],
+        ADD_TAGS: ['custom-style', 'details', 'summary'],
     };
 
     let html = converter.makeHtml(substituteParams(text));
