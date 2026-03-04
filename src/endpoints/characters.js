@@ -1,3 +1,37 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Character Protection System
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. PUSHED CHARACTER PROTECTION:
+ *    - Characters with pushed (shared) lorebooks have protected "Advanced Definitions"
+ *    - Non-creator/non-admin users cannot edit protected fields
+ *    - Prevents recipients from modifying creator's character design
+ * 
+ * 2. PROTECTED FIELDS (Advanced Definitions):
+ *    - system_prompt, post_history_instructions, personality, scenario
+ *    - depth_prompt_*, talkativeness, mes_example
+ *    - creator, creator_notes, character_version, tags
+ * 
+ * 3. NEW FUNCTIONS:
+ *    - isUserBlockedFromAdvancedEdits() - Check if user can edit advanced fields
+ *    - findCharactersByWorld() - Find all characters using a specific lorebook
+ *    - Integration with push manifest to track character-lorebook relationships
+ * 
+ * 4. EDIT VALIDATION:
+ *    - PUT /api/characters/:id endpoint validates edit permissions
+ *    - Returns 403 Forbidden if non-creator tries to edit protected fields
+ *    - Frontend shows fields as read-only for non-creators
+ * 
+ * RELATED FILES:
+ *    - src/endpoints/worldinfo.js (lorebook push system)
+ *    - public/scripts/world-info.js (frontend protection indicators)
+ * 
+ * ============================================================================
+ */
+
 import path from 'node:path';
 import fs from 'node:fs';
 import { promises as fsPromises } from 'node:fs';

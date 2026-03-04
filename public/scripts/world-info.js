@@ -1,3 +1,39 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - World Info Frontend (Admin Controls & Hidden Lorebooks)
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. ADMIN-ONLY LOREBOOK PUSH/SHARE:
+ *    - Import getCurrentUserHandle() and isAdmin() from user.js
+ *    - Push/Share buttons only visible to admin users
+ *    - Non-admin users cannot push lorebooks to others
+ * 
+ * 2. HIDDEN LOREBOOK SUPPORT FOR NON-ADMINS:
+ *    - Non-admin users see hidden character-seeded lorebooks as "(hidden entries)"
+ *    - Prefix lorebook names with "9z" for WorldInfoInfo extension detection
+ *    - MutationObserver strips "9z" prefix from UI display
+ *    - Badge counts remain accurate (full array length preserved)
+ * 
+ * 3. WORLDINFOINFO EXTENSION INTEGRATION:
+ *    - ensureWiiPanelObserver() - Sets up mutation observer for panel changes
+ *    - Automatically strips "9z" prefix from lorebook headers in extension panel
+ *    - Seamless integration without modifying extension code
+ * 
+ * 4. PERMISSION-BASED UI:
+ *    - Admin users see all lorebooks with full edit access
+ *    - Non-admin users see pushed lorebooks as character-embedded (locked)
+ *    - Hidden lorebooks collapsed into single placeholder for privacy
+ * 
+ * RELATED FILES:
+ *    - src/endpoints/worldinfo.js (backend push system)
+ *    - src/endpoints/characters.js (character protection)
+ *    - public/index.html (push/share button UI)
+ * 
+ * ============================================================================
+ */
+
 import { Fuse } from '../lib.js';
 
 import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1 } from '../script.js';

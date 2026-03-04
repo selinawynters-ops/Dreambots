@@ -1,3 +1,25 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Settings Endpoint
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * Minor modifications to support multi-user environment and admin controls.
+ * Exact changes depend on integration with user-specific settings storage.
+ * 
+ * POTENTIAL MODIFICATIONS:
+ * - User-specific settings paths
+ * - Admin-only settings access controls
+ * - Integration with user.js authentication system
+ * 
+ * RELATED FILES:
+ *    - src/users.js (user authentication and directory management)
+ *    - src/endpoints/characters.js (character-specific settings protection)
+ * 
+ * ============================================================================
+ */
+
 import fs from 'node:fs';
 import path from 'node:path';
 

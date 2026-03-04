@@ -1,3 +1,38 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Chat Chunking System
+ * ============================================================================
+ * 
+ * NEW FILE - NOT IN DEFAULT SILLYTAVERN
+ * 
+ * PURPOSE:
+ * Handles saving and loading of large chat conversations (>750 messages) by
+ * splitting them into manageable chunks to prevent browser memory issues and
+ * file system limitations.
+ * 
+ * FEATURES:
+ * 1. AUTOMATIC CHUNKING:
+ *    - Detects when chat exceeds 750 messages
+ *    - Splits chat into chunks for efficient storage
+ *    - Transparent to user - works automatically
+ * 
+ * 2. CHUNK MANAGEMENT:
+ *    - Saves chunks separately to avoid single-file size limits
+ *    - Reconstructs full chat when loading
+ *    - Maintains message order and integrity
+ * 
+ * 3. INTEGRATION:
+ *    - Triggered from index.html override of saveChat() function
+ *    - Falls back to standard save for smaller chats
+ *    - window.chatChunker namespace for global access
+ * 
+ * RELATED FILES:
+ *    - public/index.html (triggers chunking for large chats)
+ *    - Original save/load functions remain unchanged for small chats
+ * 
+ * ============================================================================
+ */
+
 // Simple chunking for large chats
 class ChatChunker {
     constructor() {

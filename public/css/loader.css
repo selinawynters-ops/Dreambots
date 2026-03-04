@@ -1,3 +1,31 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Custom Loader (Magic Orb)
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. CUSTOM PRELOADER BACKGROUND:
+ *    - Changed from SmartTheme blur tint to dark gradient background
+ *    - Gradient: Deep navy (#1a1a2e) → darker blue (#16213e) → near-black (#0f0f23)
+ *    - Creates atmospheric, immersive loading experience
+ * 
+ * 2. MAGIC ORB SPINNER:
+ *    - Replaced default spinner with custom "magic orb" design
+ *    - Soft mauve/lavender color scheme for DreamTavern branding
+ *    - Animated pulsing glow effect
+ *    - Ethereal, fantasy-themed aesthetic
+ * 
+ * 3. RESPONSIVE LOADING ANIMATION:
+ *    - Smooth transitions and animations
+ *    - Maintains compatibility with existing JS (uses #load-spinner ID)
+ * 
+ * RELATED FILES:
+ *    - public/css/login.css (matching login page styling)
+ *    - public/css/fonts.css (custom font loading)
+ * 
+ * ============================================================================
+ */
 /* DreamTavern Preloader */
 #preloader {
     position: fixed;

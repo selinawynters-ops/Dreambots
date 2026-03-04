@@ -1,40 +1,6 @@
 <!DOCTYPE html>
 <html>
 
-<!--
- ============================================================================
- DREAMTAVERN CUSTOMIZATION - Main Application (index.html)
- ============================================================================
- 
- MODIFICATIONS FROM DEFAULT SILLYTAVERN:
- 
- 1. WORLD INFO PUSH/SHARE BUTTONS (Line ~4671):
-    - Added "Push to Users" button (#world_popup_share)
-    - Added "Bulk Push Characters" button (#world_bulk_push)
-    - Both buttons initially hidden (display:none) - shown only to admin users
-    - Allows admin to share lorebooks with specific users or all users
- 
- 2. CHAT CHUNKING SYSTEM (Line ~7975):
-    - Added <script> block to override saveChat() function
-    - Detects large chats (>750 messages) and uses chunking system
-    - Prevents browser crashes and file system issues with large conversations
-    - Falls back to standard save for smaller chats
-    - Integrates with public/scripts/chunking.js
- 
- 3. ADMIN CONTROLS:
-    - Push/share functionality restricted to admin users only
-    - Integration with user.js isAdmin() checks
-    - Non-admin users see pushed content as character-embedded (locked)
- 
- RELATED FILES:
-    - public/scripts/world-info.js (frontend push logic, admin UI)
-    - public/scripts/chunking.js (large chat handling)
-    - src/endpoints/worldinfo.js (backend push system)
-    - src/endpoints/characters.js (character protection system)
- 
- ============================================================================
--->
-
 <head>
     <title>SillyTavern</title>
     <base href="/">

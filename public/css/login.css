@@ -1,3 +1,25 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Custom Login Page
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. CUSTOM LOGIN STYLING:
+ *    - Modified login page appearance to match DreamTavern branding
+ *    - Coordinated with loader.css gradient background theme
+ *    - Enhanced visual consistency across authentication flows
+ * 
+ * 2. USER EXPERIENCE:
+ *    - Styled login forms for better usability
+ *    - Maintains responsive design for mobile/desktop
+ * 
+ * RELATED FILES:
+ *    - public/css/loader.css (matching preloader styling)
+ *    - public/login.html (login page structure)
+ * 
+ * ============================================================================
+ */
 /* =====================================================
    DreamTavern Login - Crystal Ball / Scrying Theme
    Based on original SillyTavern login.css

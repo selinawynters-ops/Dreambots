@@ -1,3 +1,26 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - Custom Fonts
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. CUSTOM WEB FONTS:
+ *    - "Beau Rivage" - Elegant script font (Beau-Rivage-regular.woff)
+ *    - "Bilbo Swash" - Decorative swash caps (Bilbo-Swash-Caps-regular.woff)
+ *    - "Island Moments" - Stylized display font (Island-Moments-regular.woff)
+ * 
+ * 2. FONT USAGE:
+ *    - Used for branding, headings, and thematic UI elements
+ *    - Enhances fantasy/dream aesthetic of DreamTavern
+ *    - Fonts stored in public/fonts/ directory
+ * 
+ * 3. INTEGRATION:
+ *    - Loaded via @font-face declarations
+ *    - Available throughout application via CSS
+ * 
+ * ============================================================================
+ */
 @font-face {
       font-family: "Beau Rivage";
         src: url('/fonts/Beau-Rivage-regular.woff') format('woff');

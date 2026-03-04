@@ -1,3 +1,38 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - World Info Push System
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. LOREBOOK PUSH/SHARE SYSTEM:
+ *    - Allows admin users to push (share) lorebooks to specific users or all users
+ *    - Tracks pushed lorebooks via push-manifest.json in each user's data folder
+ *    - Pushed lorebooks are automatically synced when the creator makes edits
+ *    - Recipients see pushed lorebooks as character-seeded (locked from editing)
+ * 
+ * 2. PUSH MANIFEST TRACKING:
+ *    - readPushManifest() - Read which lorebooks were pushed to whom
+ *    - writePushManifest() - Save push tracking data
+ *    - mergePushRecord() - Update manifest when new pushes occur
+ * 
+ * 3. NEW ENDPOINTS:
+ *    - POST /api/worldinfo/push - Push a lorebook to selected users
+ *    - GET /api/worldinfo/find-characters - Find characters using a specific lorebook
+ *    - Auto-embed pushed lorebooks in character cards for recipients
+ * 
+ * 4. AUTOMATIC SYNC:
+ *    - When creator edits a pushed lorebook, changes propagate to all recipients
+ *    - Recipients cannot edit pushed lorebooks (displayed as character-embedded)
+ * 
+ * RELATED FILES:
+ *    - src/endpoints/characters.js (character protection system)
+ *    - public/scripts/world-info.js (frontend push UI, admin checks)
+ *    - public/index.html (push/share buttons in world info panel)
+ * 
+ * ============================================================================
+ */
+
 import fs from 'node:fs';
 import path from 'node:path';
 
