@@ -39,7 +39,7 @@ import { Buffer } from 'node:buffer';
 
 import express from 'express';
 import sanitize from 'sanitize-filename';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import writeFileAtomic from 'write-file-atomic';
 import yaml from 'yaml';
 import _ from 'lodash';
 import mime from 'mime-types';
@@ -80,6 +80,88 @@ const ADVANCED_DEFINITION_FIELDS = [
     'tags',
 ];
 
+function getPushNamespace() {
+    const cfg = getConfigValue('push.namespace', null);
+    if (cfg) return cfg;
+    try {
+        const pkgPath = path.join(process.cwd(), 'package.json');
+        if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (pkg?.name) {
+                return pkg.name.replace(/\W+/g, '').toLowerCase();
+            }
+        }
+    } catch {
+        // silent
+    }
+    return 'dreamtavern';
+}
+
+const PUSH_NS = getPushNamespace();
+const NS = suffix => `${PUSH_NS}_${suffix}`;
+
+function normalizeHandle(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isPushedFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function isExplicitBooleanTrue(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function getPushExtensionBySuffix(extensions, suffix) {
+    if (!extensions || typeof extensions !== 'object') return undefined;
+
+    const exactKeys = [NS(suffix), `dreamtavern_${suffix}`, suffix];
+    for (const key of exactKeys) {
+        if (Object.prototype.hasOwnProperty.call(extensions, key)) {
+            return extensions[key];
+        }
+    }
+
+    for (const [key, value] of Object.entries(extensions)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
+function isWorldNameHiddenByConvention(worldName) {
+    const normalizedWorld = String(worldName || '').trim().toLowerCase();
+    return normalizedWorld.startsWith('admin-') || normalizedWorld.startsWith('dd-');
+}
+
+async function userOwnsDdWorld(worldName, userHandle) {
+    const normalizedHandle = normalizeHandle(userHandle);
+    const normalizedWorld = String(worldName || '').trim();
+    if (!normalizedHandle || !normalizedWorld) return false;
+    if (normalizedWorld.toLowerCase().startsWith(`dd-${normalizedHandle}-`)) return true;
+
+    try {
+        const userDirs = getUserDirectories(userHandle);
+        const worldData = readWorldInfoFile(userDirs, normalizedWorld, true);
+        const ext = worldData?.extensions || {};
+        const creator = normalizeHandle(getPushExtensionBySuffix(ext, 'creator'));
+        const originalCreator = normalizeHandle(getPushExtensionBySuffix(ext, 'original_creator') || creator);
+        return creator === normalizedHandle || originalCreator === normalizedHandle;
+    } catch {
+        return false;
+    }
+}
+
+function shouldPreservePushExtensionKey(key) {
+    if (!key) return false;
+    if (key.startsWith(`${PUSH_NS}_`) || key.startsWith('dreamtavern_')) return true;
+
+    const preservedSuffixes = ['pushed', 'creator', 'original_creator', 'symlink_mode', 'symlink_to', 'symlink_avatar', 'symlink_linked_at', 'master_id', 'source_lorebook', 'source_handle', 'pushed_lorebook_name'];
+    return preservedSuffixes.some(suffix => key === suffix || key.endsWith(`_${suffix}`));
+}
+
 /**
  * Checks whether the current user is blocked from editing
  * advanced definition fields on a pushed character.
@@ -92,11 +174,28 @@ async function isAdvancedLocked(avatarPath, userProfile) {
         const charDataStr = await readCharacterData(avatarPath);
         if (!charDataStr) return false;
         const charData = JSON.parse(charDataStr);
-        const ext = charData?.data?.extensions;
-        if (!ext?.dreamtavern_pushed) return false;
+        const ext = charData?.data?.extensions || {};
         if (userProfile?.admin) return false;
-        if (ext.dreamtavern_creator === userProfile?.handle) return false;
-        return true;
+
+        const userHandle = normalizeHandle(userProfile?.handle);
+        const creator = normalizeHandle(getPushExtensionBySuffix(ext, 'creator'));
+        const originalCreator = normalizeHandle(getPushExtensionBySuffix(ext, 'original_creator') || creator);
+        const worldName = String(ext?.world || '').trim();
+
+        if (!userHandle) {
+            return isPushedFlag(getPushExtensionBySuffix(ext, 'pushed')) || isWorldNameHiddenByConvention(worldName);
+        }
+
+        if (creator === userHandle || originalCreator === userHandle) return false;
+        if (isPushedFlag(getPushExtensionBySuffix(ext, 'pushed'))) return true;
+
+        if (String(worldName || '').trim().toLowerCase().startsWith('admin-')) return true;
+        if (String(worldName || '').trim().toLowerCase().startsWith('dd-')) {
+            const ownsDdWorld = await userOwnsDdWorld(worldName, userHandle);
+            return !ownsDdWorld;
+        }
+
+        return false;
     } catch {
         return false;
     }
@@ -295,17 +394,26 @@ async function readCharacterData(inputFile, inputFormat = 'png') {
  */
 async function writeCharacterData(inputFile, data, outputFile, request, crop = undefined) {
     try {
-        // Reset the cache
+        // Reset the cache for both the input file and the output file path.
+        // The output path must also be invalidated so that subsequent reads
+        // don't return stale data from the memory or disk cache.
+        const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
+        const pathsToInvalidate = Buffer.isBuffer(inputFile) ? [outputImagePath] : [inputFile, outputImagePath];
+
+        // Collect keys to delete first, then delete them (avoid modifying Map during iteration)
+        const keysToDelete = [];
         for (const key of memoryCache.keys()) {
-            if (Buffer.isBuffer(inputFile)) {
-                break;
-            }
-            if (key.startsWith(inputFile)) {
-                memoryCache.delete(key);
-                break;
+            for (const pathPrefix of pathsToInvalidate) {
+                if (key.startsWith(pathPrefix)) {
+                    keysToDelete.push(key);
+                    break;
+                }
             }
         }
-        if (useDiskCache && !Buffer.isBuffer(inputFile)) {
+        for (const key of keysToDelete) {
+            memoryCache.delete(key);
+        }
+        if (useDiskCache) {
             diskCache.syncQueue.add(request.user.profile.handle);
         }
         /**
@@ -330,9 +438,8 @@ async function writeCharacterData(inputFile, data, outputFile, request, crop = u
 
         // Get the chunks
         const outputImage = write(inputImage, data);
-        const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
 
-        writeFileAtomicSync(outputImagePath, outputImage);
+        await writeFileAtomic(outputImagePath, outputImage);
         return true;
     } catch (err) {
         console.error(err);
@@ -406,7 +513,7 @@ async function tryReadImage(imgPath, crop) {
     // If it's an unsupported type of image (APNG) - just read the file as buffer
     catch (error) {
         console.error(`Failed to read image: ${imgPath}`, error);
-        return fs.readFileSync(imgPath);
+        return await fs.promises.readFile(imgPath);
     }
 }
 
@@ -445,6 +552,27 @@ const calculateDataSize = (data) => {
  * @returns {{shallow: true, [key: string]: any}} Shallow character
  */
 const toShallow = (character) => {
+    // Preserve push/symlink-related extensions so the client can detect
+    // locked (pushed) characters even before fully unshallowing.
+    // Without these, isCharacterDefinitionLocked() returns false and
+    // debounced saves fall through to the normal edit path → 403.
+    const fullExtensions = _.get(character, 'data.extensions', {});
+    const pushExtensions = {};
+    for (const [key, value] of Object.entries(fullExtensions)) {
+        if (
+            key === 'world' ||
+            key === 'fav' ||
+            key.startsWith('dreamtavern_') ||
+            key.endsWith('_pushed') ||
+            key.endsWith('_symlink_mode') ||
+            key.endsWith('_symlink_to') ||
+            key.endsWith('_creator') ||
+            key.endsWith('_original_creator')
+        ) {
+            pushExtensions[key] = value;
+        }
+    }
+
     return {
         shallow: true,
         name: character.name,
@@ -463,9 +591,7 @@ const toShallow = (character) => {
             creator: _.get(character, 'data.creator', ''),
             creator_notes: _.get(character, 'data.creator_notes', ''),
             tags: _.get(character, 'data.tags', []),
-            extensions: {
-                fav: _.get(character, 'data.extensions.fav', false),
-            },
+            extensions: pushExtensions,
         },
     };
 };
@@ -486,6 +612,91 @@ const processCharacter = async (item, directories, { shallow }) => {
         if (imgData === undefined) throw new Error('Failed to read character file');
 
         let jsonObject = getCharaCardV2(JSON.parse(imgData), directories, false);
+
+        // ── True-Symlink resolution ──
+        // If the character has symlink_mode, resolve from the creator's master copy.
+        // The local PNG is just a pointer; all content comes from the master.
+        const ext = jsonObject?.data?.extensions;
+        const symlinkMode = isPushedFlag(getPushExtensionBySuffix(ext, 'symlink_mode'));
+        const symlinkTargetValue = getPushExtensionBySuffix(ext, 'symlink_to');
+        if (symlinkMode && symlinkTargetValue) {
+            try {
+                const symlinkTarget = String(symlinkTargetValue);
+                const slashIdx = symlinkTarget.indexOf('/');
+                if (slashIdx > 0) {
+                    const creatorHandle = symlinkTarget.substring(0, slashIdx);
+                    const masterFile = symlinkTarget.substring(slashIdx + 1);
+                    const creatorDirs = getUserDirectories(creatorHandle);
+                    const masterPath = path.join(creatorDirs.characters, masterFile);
+
+                    if (fs.existsSync(masterPath)) {
+                        const masterImgData = await readCharacterData(masterPath);
+                        if (masterImgData) {
+                            const masterJson = getCharaCardV2(JSON.parse(masterImgData), directories, false);
+
+                            const localWorld = ext?.world;
+                            const localChat = jsonObject?.chat;
+                            const localAlternateGreetings = jsonObject?.data?.alternate_greetings;
+                            const localFavorite = jsonObject?.fav;
+                            const localFavoriteExtension = jsonObject?.data?.extensions?.fav;
+                            const localPushExtensions = Object.fromEntries(Object.entries(ext || {}).filter(([key]) => shouldPreservePushExtensionKey(key)));
+                            if (!masterJson.data) masterJson.data = {};
+                            if (!masterJson.data.extensions) masterJson.data.extensions = {};
+
+                            Object.assign(masterJson.data.extensions, localPushExtensions);
+
+                            // Always preserve the recipient-local lorebook binding after resolving from master.
+                            if (localWorld) {
+                                masterJson.data.extensions.world = localWorld;
+                            }
+
+                            if (localChat) {
+                                masterJson.chat = localChat;
+                            }
+
+                            if (localAlternateGreetings !== undefined) {
+                                masterJson.data.alternate_greetings = JSON.parse(JSON.stringify(localAlternateGreetings));
+                            }
+
+                            if (localFavorite !== undefined) {
+                                masterJson.fav = localFavorite;
+                            }
+
+                            if (localFavoriteExtension !== undefined) {
+                                masterJson.data.extensions.fav = localFavoriteExtension;
+                            }
+
+                            // Stamp symlink flags so the client knows this is resolved
+                            masterJson.data.extensions.dreamtavern_pushed = true;
+                            masterJson.data.extensions.dreamtavern_symlink_mode = true;
+                            masterJson.data.extensions.dreamtavern_symlink_to = symlinkTarget;
+                            masterJson.data.extensions.dreamtavern_creator = getPushExtensionBySuffix(ext || {}, 'creator');
+                            masterJson.data.extensions.dreamtavern_original_creator = getPushExtensionBySuffix(ext || {}, 'original_creator');
+
+                            // Use the master's content but keep local metadata
+                            jsonObject = masterJson;
+                            jsonObject['_is_symlink'] = true;
+                            jsonObject['_symlink_to'] = symlinkTarget;
+                            jsonObject['_master_version'] = masterJson?.data?.extensions?.dreamtavern_version || null;
+
+                            console.debug(`[Symlink] Resolved ${item} → ${symlinkTarget}`);
+                        }
+                    } else {
+                        // Master file not found — broken symlink, fall back to local data
+                        jsonObject['_is_symlink'] = true;
+                        jsonObject['_symlink_broken'] = true;
+                        jsonObject['_symlink_to'] = symlinkTarget;
+                        console.warn(`[Symlink] Broken symlink for ${item}: master not found at ${masterPath}`);
+                    }
+                }
+            } catch (symlinkErr) {
+                // Symlink resolution failed — fall back to local data silently
+                jsonObject['_is_symlink'] = true;
+                jsonObject['_symlink_broken'] = true;
+                console.warn(`[Symlink] Resolution failed for ${item}:`, symlinkErr.message);
+            }
+        }
+
         jsonObject.avatar = item;
         const character = jsonObject;
         character['json_data'] = imgData;
@@ -737,9 +948,10 @@ function charaFormatData(data, directories) {
     // Tamper protection: re-assert push metadata from the original json_data
     // so a crafted client request cannot strip dreamtavern_pushed / creator.
     const origExt = tryParse(data.json_data)?.data?.extensions;
-    if (origExt?.dreamtavern_pushed) {
-        _.set(char, 'data.extensions.dreamtavern_pushed', true);
-        _.set(char, 'data.extensions.dreamtavern_creator', origExt.dreamtavern_creator);
+    if (isPushedFlag(getPushExtensionBySuffix(origExt, 'pushed'))) {
+        _.set(char, `data.extensions.${NS('pushed')}`, true);
+        _.set(char, `data.extensions.${NS('creator')}`, getPushExtensionBySuffix(origExt, 'creator'));
+        _.set(char, `data.extensions.${NS('original_creator')}`, getPushExtensionBySuffix(origExt, 'original_creator') || getPushExtensionBySuffix(origExt, 'creator'));
     }
 
     return char;
@@ -1220,6 +1432,30 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
         return;
     }
 
+    // ── True-Symlink edit guard ──
+    // If the character is a symlink pointer, block the entire edit for non-admin/non-creator.
+    // They must create an independent copy first.
+    try {
+        const symlinkGuardPath = path.join(request.user.directories.characters, request.body.avatar_url);
+        const symlinkGuardStr = await readCharacterData(symlinkGuardPath);
+        if (symlinkGuardStr) {
+            const symlinkGuardData = JSON.parse(symlinkGuardStr);
+            const symlinkExt = symlinkGuardData?.data?.extensions;
+            if (isPushedFlag(getPushExtensionBySuffix(symlinkExt, 'symlink_mode'))) {
+                const isAdmin = request.user.profile?.admin;
+                const isCreator = normalizeHandle(getPushExtensionBySuffix(symlinkExt, 'creator')) === normalizeHandle(request.user.profile?.handle);
+                if (!isAdmin && !isCreator) {
+                    return response.status(403).json({
+                        error: 'This character is synced from its creator and cannot be edited.',
+                        is_symlink: true,
+                    });
+                }
+            }
+        }
+    } catch (symlinkGuardErr) {
+        console.warn('[Characters] Symlink guard error (continuing):', symlinkGuardErr.message);
+    }
+
     let char = charaFormatData(request.body, request.user.directories);
     char.chat = request.body.chat;
     char.create_date = request.body.create_date;
@@ -1254,6 +1490,48 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
         }
     } catch (lockErr) {
         console.warn('[Characters] Advanced-lock guard error (continuing):', lockErr.message);
+    }
+
+    // Guard: preserve existing lorebook bindings unless unlink was explicitly requested.
+    // Hidden or non-visible lorebooks can be absent from the editor form during background saves,
+    // so an empty world field must not silently sever the character-lorebook relationship.
+    try {
+        const worldGuardPath = path.join(request.user.directories.characters, request.body.avatar_url);
+        const existingStr = await readCharacterData(worldGuardPath);
+        if (existingStr) {
+            const existing = JSON.parse(existingStr);
+            const isPushed = isPushedFlag(getPushExtensionBySuffix(existing?.data?.extensions || {}, 'pushed'));
+            const canEditAdvanced = !(await isAdvancedLocked(worldGuardPath, request.user.profile));
+            const existingWorld = String(existing?.data?.extensions?.world || '').trim();
+            const explicitUnlinkRequested = isExplicitBooleanTrue(request.body.unlink_world);
+            const charObj = JSON.parse(char);
+            const newWorld = String(charObj?.data?.extensions?.world || '').trim();
+
+            const shouldPreserveExistingWorld = existingWorld
+                && ((!newWorld && !explicitUnlinkRequested) || (explicitUnlinkRequested && !canEditAdvanced));
+
+            if (shouldPreserveExistingWorld) {
+                _.set(charObj, 'data.extensions.world', existingWorld);
+            }
+
+            if (isPushed) {
+                if (!newWorld && existingWorld) {
+                    _.set(charObj, 'data.extensions.world', existingWorld);
+                }
+                // Also preserve push/symlink metadata that the client may omit on save.
+                const existingExt = existing?.data?.extensions || {};
+                const charExt = charObj?.data?.extensions || {};
+                for (const key of Object.keys(existingExt)) {
+                    if (shouldPreservePushExtensionKey(key) && charExt[key] === undefined) {
+                        _.set(charObj, `data.extensions.${key}`, existingExt[key]);
+                    }
+                }
+            }
+
+            char = JSON.stringify(charObj);
+        }
+    } catch (worldGuardErr) {
+        console.warn('[Characters] World binding guard error (continuing):', worldGuardErr.message);
     }
 
     try {
@@ -1306,15 +1584,61 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
                         const recipBuf = fs.readFileSync(destPath);
                         const recipDataStr = read(recipBuf);
                         const recipData = recipDataStr ? JSON.parse(recipDataStr) : {};
-                        const recipWorld = recipData?.data?.extensions?.world || '';
+                        const recipExt = recipData?.data?.extensions || {};
+                        const recipWorld = recipExt.world || '';
+                        const recipChat = recipData?.chat || '';
+                        const recipAlternateGreetings = recipData?.data?.alternate_greetings;
+                        const recipFav = recipData?.fav;
+                        const recipFavExtension = recipData?.data?.extensions?.fav;
 
                         // Clone creator data and restore recipient-specific fields
                         const synced = JSON.parse(JSON.stringify(creatorData));
                         if (!synced.data) synced.data = {};
                         if (!synced.data.extensions) synced.data.extensions = {};
                         synced.data.extensions.world = recipWorld;
-                        synced.data.extensions.dreamtavern_pushed = true;
-                        synced.data.extensions.dreamtavern_creator = syncCreatorHandle;
+                        if (recipChat) {
+                            synced.chat = recipChat;
+                        }
+                        if (recipAlternateGreetings !== undefined) {
+                            synced.data.alternate_greetings = JSON.parse(JSON.stringify(recipAlternateGreetings));
+                        }
+                        if (recipFav !== undefined) {
+                            synced.fav = recipFav;
+                        }
+                        if (recipFavExtension !== undefined) {
+                            synced.data.extensions.fav = recipFavExtension;
+                        }
+                        synced.data.extensions[NS('pushed')] = getPushExtensionBySuffix(recipExt, 'pushed') ?? true;
+                        synced.data.extensions[NS('creator')] = getPushExtensionBySuffix(recipExt, 'creator') || syncCreatorHandle;
+                        synced.data.extensions[NS('original_creator')] = getPushExtensionBySuffix(recipExt, 'original_creator')
+                            || getPushExtensionBySuffix(recipExt, 'creator')
+                            || syncCreatorHandle;
+                        synced.data.extensions[NS('symlink_mode')] = getPushExtensionBySuffix(recipExt, 'symlink_mode') ?? true;
+                        synced.data.extensions[NS('symlink_to')] = getPushExtensionBySuffix(recipExt, 'symlink_to') || `${syncCreatorHandle}/${avatarFilename}`;
+                        const symlinkAvatar = getPushExtensionBySuffix(recipExt, 'symlink_avatar');
+                        if (symlinkAvatar !== undefined) {
+                            synced.data.extensions[NS('symlink_avatar')] = symlinkAvatar;
+                        }
+                        const symlinkLinkedAt = getPushExtensionBySuffix(recipExt, 'symlink_linked_at');
+                        if (symlinkLinkedAt !== undefined) {
+                            synced.data.extensions[NS('symlink_linked_at')] = symlinkLinkedAt;
+                        }
+                        const masterId = getPushExtensionBySuffix(recipExt, 'master_id');
+                        if (masterId !== undefined) {
+                            synced.data.extensions[NS('master_id')] = masterId;
+                        }
+                        const sourceLorebook = getPushExtensionBySuffix(recipExt, 'source_lorebook');
+                        if (sourceLorebook !== undefined) {
+                            synced.data.extensions[NS('source_lorebook')] = sourceLorebook;
+                        }
+                        const pushedLorebookName = getPushExtensionBySuffix(recipExt, 'pushed_lorebook_name');
+                        if (pushedLorebookName !== undefined) {
+                            synced.data.extensions[NS('pushed_lorebook_name')] = pushedLorebookName;
+                        }
+                        const sourceHandle = getPushExtensionBySuffix(recipExt, 'source_handle');
+                        if (sourceHandle !== undefined) {
+                            synced.data.extensions[NS('source_handle')] = sourceHandle;
+                        }
 
                         // Write updated PNG
                         const updatedPng = write(recipBuf, JSON.stringify(synced));
@@ -1370,10 +1694,14 @@ router.post('/edit-avatar', validateAvatarUrlMiddleware, async function (request
 
         const crop = tryParse(request.query.crop);
         const fileName = request.body.avatar_url.replace('.png', '');
-        await writeCharacterData(uploadPath, data, fileName, request, crop);
+        const writeResult = await writeCharacterData(uploadPath, data, fileName, request, crop);
 
         // Remove uploaded temp file
-        fs.unlinkSync(uploadPath);
+        try { fs.unlinkSync(uploadPath); } catch { /* already cleaned */ }
+
+        if (!writeResult) {
+            return response.status(500).send('Error: failed to write character image');
+        }
 
         // Reset images caches
         cacheBuster.bust(request, response);
@@ -1736,6 +2064,11 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
     }
 });
 
+/**
+ * Create an independent copy from a symlinked character.
+ * Resolves the symlink, copies the master's full data, strips all symlink/push metadata,
+ * and creates a new PNG in the user's characters directory.
+ */
 router.post('/export', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body.format || !request.body.avatar_url) {
