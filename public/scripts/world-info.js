@@ -36,7 +36,7 @@
 
 import { Fuse } from '../lib.js';
 
-import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1 } from '../script.js';
+import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1, isCharacterDefinitionLocked, applyCharacterDefinitionLockState, getCharacters, setCharacterId, selectCharacterById } from '../script.js';
 import { download, debounce, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName } from './utils.js';
 import { extension_settings, getContext } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
@@ -103,7 +103,262 @@ export let world_info = {};
 export let selected_world_info = [];
 /** @type {string[]} */
 export let world_names;
+const hidden_world_name_set = new Set();
+const HIDDEN_LOREBOOK_PLACEHOLDER = '(hidden entries)';
 export let world_info_depth = 2;
+
+function normalizeHiddenLorebookName(name) {
+    const worldName = String(name || '').trim();
+    if (!worldName) return '';
+
+    const normalizedWorldName = worldName.startsWith('9z') ? worldName.substring(2) : worldName;
+    const hiddenSuffix = ` ${HIDDEN_LOREBOOK_PLACEHOLDER}`;
+    return normalizedWorldName.endsWith(hiddenSuffix)
+        ? normalizedWorldName.substring(0, normalizedWorldName.length - hiddenSuffix.length)
+        : normalizedWorldName;
+}
+
+export function getLorebookDropdownDisplayName(name) {
+    const normalizedWorldName = normalizeHiddenLorebookName(name);
+    if (!normalizedWorldName) return '';
+
+    return isHiddenPushedLorebookForDropdown(normalizedWorldName)
+        ? `${normalizedWorldName} ${HIDDEN_LOREBOOK_PLACEHOLDER}`
+        : normalizedWorldName;
+}
+
+/**
+ * Check if a world name is a hidden pushed lorebook that should be excluded
+ * from the user-facing dropdowns but kept in world_names for binding/loading.
+ * @param {string} name World info name
+ * @returns {boolean} True if it should be hidden from dropdowns
+ */
+/**
+ * Checks if a lorebook name is a hidden pushed lorebook that should be
+ * filtered from dropdown selectors (unless the user is admin or the creator).
+ * @param {string} name - Lorebook name
+ * @returns {boolean} True if the lorebook should be hidden from the dropdown
+ */
+export function isHiddenPushedLorebookForDropdown(name) {
+    const worldName = String(name || '').trim();
+    const normalizedWorldName = normalizeHiddenLorebookName(worldName);
+    if (!normalizedWorldName) return false;
+    return hidden_world_name_set.has(worldName) || hidden_world_name_set.has(normalizedWorldName);
+}
+
+function refreshWorldNameCaches(data) {
+    world_names = data?.world_names?.length ? data.world_names : [];
+    hidden_world_name_set.clear();
+
+    for (const hiddenWorldName of data?.hidden_world_names ?? []) {
+        const normalizedHiddenWorldName = String(hiddenWorldName || '').trim();
+        if (normalizedHiddenWorldName) {
+            hidden_world_name_set.add(normalizedHiddenWorldName);
+        }
+    }
+}
+
+function normalizeHandleForPushLock(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isDdLorebookOwnedByHandle(worldName, handle) {
+    const normalizedHandle = normalizeHandleForPushLock(handle);
+    const normalizedWorldName = String(worldName || '').trim().toLowerCase();
+    if (!normalizedHandle || !normalizedWorldName.startsWith('dd-')) return false;
+    return normalizedWorldName.startsWith(`dd-${normalizedHandle}-`);
+}
+
+function getCharacterPushExtensionBySuffix(character, suffix) {
+    const ext = character?.data?.extensions || {};
+    const exactKeys = [suffix, `dreamtavern_${suffix}`];
+
+    for (const key of exactKeys) {
+        if (Object.prototype.hasOwnProperty.call(ext, key)) {
+            return ext[key];
+        }
+    }
+
+    for (const [key, value] of Object.entries(ext)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
+function getWorldInfoExtensionBySuffix(data, suffix) {
+    const ext = data?.extensions || {};
+    const exactKeys = [suffix, `dreamtavern_${suffix}`];
+
+    for (const key of exactKeys) {
+        if (Object.prototype.hasOwnProperty.call(ext, key)) {
+            return ext[key];
+        }
+    }
+
+    for (const [key, value] of Object.entries(ext)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
+function isTrueishFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function isHiddenLorebookRestrictedForUser(data, currentHandle) {
+    const creatorHandle = String(
+        data?._stwii_lorebook_creator
+        || getWorldInfoExtensionBySuffix(data, 'creator')
+        || '',
+    ).trim().toLowerCase();
+    const originalCreatorHandle = String(
+        data?._stwii_lorebook_original_creator
+        || getWorldInfoExtensionBySuffix(data, 'original_creator')
+        || creatorHandle
+        || '',
+    ).trim().toLowerCase();
+    const normalizedHandle = String(currentHandle || '').trim().toLowerCase();
+    const isHidden = isTrueishFlag(data?._stwii_lorebook_hidden)
+        || isTrueishFlag(getWorldInfoExtensionBySuffix(data, 'hidden'))
+        || !!data?._dreamtavern_restricted
+        || !!data?._stw_hidden_restricted;
+
+    if (!isHidden) {
+        return false;
+    }
+
+    if (creatorHandle && creatorHandle === normalizedHandle) {
+        return false;
+    }
+
+    if (originalCreatorHandle && originalCreatorHandle === normalizedHandle) {
+        return false;
+    }
+
+    return true;
+}
+
+function mapLoadedWorldInfoEntries(data, worldName) {
+    if (!data?.entries) {
+        return [];
+    }
+
+    const lorebookCreator = getWorldInfoExtensionBySuffix(data, 'creator') || '';
+    const lorebookOriginalCreator = getWorldInfoExtensionBySuffix(data, 'original_creator') || lorebookCreator;
+    const lorebookHidden = isTrueishFlag(getWorldInfoExtensionBySuffix(data, 'hidden'))
+        || !!data?._dreamtavern_restricted
+        || !!data?._stw_hidden_restricted;
+
+    return Object.keys(data.entries)
+        .map((key) => data.entries[key])
+        .map(({ uid, ...rest }) => ({
+            uid,
+            world: worldName,
+            _stwii_lorebook_hidden: lorebookHidden,
+            _stwii_lorebook_creator: lorebookCreator,
+            _stwii_lorebook_original_creator: lorebookOriginalCreator,
+            _dreamtavern_restricted: !!data?._dreamtavern_restricted,
+            _stw_hidden_restricted: !!data?._stw_hidden_restricted,
+            ...rest,
+        }));
+}
+
+function isPushedCharacterRecord(character) {
+    if (!character) return false;
+    const worldName = String(character?.data?.extensions?.world || '').trim().toLowerCase();
+    if (isTrueishFlag(getCharacterPushExtensionBySuffix(character, 'pushed'))) return true;
+    if (worldName.startsWith('admin-')) return true;
+    if (worldName.startsWith('dd-')) return true;
+    return false;
+}
+
+/**
+ * Auto-link a pushed character to its hidden lorebook based on metadata.
+ * Checks the existing world extension first; if missing or invalid,
+ * searches world_names for a matching ADMIN-* or dd-* pattern.
+ * @param {number} chid - Character index
+ * @returns {boolean} True if the character is now linked to a lorebook
+ */
+function autoLinkPushedLorebook(chid) {
+    const character = characters[chid];
+    if (!character) return false;
+
+    const currentWorld = String(character?.data?.extensions?.world || '').trim();
+    if (currentWorld) {
+        return true;
+    }
+
+    const exactPreferred = String(
+        getCharacterPushExtensionBySuffix(character, 'pushed_lorebook_name')
+        || getCharacterPushExtensionBySuffix(character, 'source_lorebook')
+        || '',
+    ).trim();
+    if (exactPreferred && world_names.includes(exactPreferred)) {
+        if (!character.data) character.data = {};
+        if (!character.data.extensions) character.data.extensions = {};
+        character.data.extensions.world = exactPreferred;
+        console.log(`[AutoLink] Restored pushed character ${character.name || character.data?.name || chid} to exact lorebook: ${exactPreferred}`);
+        return true;
+    }
+
+    const preferredCreator = normalizeHandleForPushLock(
+        getCharacterPushExtensionBySuffix(character, 'creator')
+        || getCharacterPushExtensionBySuffix(character, 'original_creator')
+        || getCurrentUserHandle(),
+    );
+    const charName = String(character?.name || character?.data?.name || '').trim().toLowerCase();
+    const candidates = Array.from(world_names || []).filter(Boolean).filter(worldName => {
+        const name = String(worldName);
+        return name.startsWith('ADMIN-') || name.startsWith('dd-');
+    });
+
+    const preferred = candidates.find(worldName => {
+        const lowered = String(worldName).toLowerCase();
+        if (preferredCreator && lowered.startsWith(`dd-${preferredCreator}-`)) {
+            return !charName || lowered.includes(charName);
+        }
+        return false;
+    })
+        || candidates.find(worldName => {
+            const lowered = String(worldName).toLowerCase();
+            return !!charName && lowered.includes(charName);
+        })
+        || candidates[0];
+
+    if (!preferred) return false;
+
+    if (!character.data) character.data = {};
+    if (!character.data.extensions) character.data.extensions = {};
+    character.data.extensions.world = preferred;
+    console.log(`[AutoLink] Linked pushed character ${character.name || character.data?.name || chid} to lorebook: ${preferred}`);
+    return true;
+}
+
+/**
+ * Failsafe: ensure a pushed character's lorebook link is valid on character load.
+ * If the link is broken or missing, attempt to re-link via autoLinkPushedLorebook.
+ * @param {number} chid - Character index
+ */
+export function ensurePushedLoreBookLinked(chid) {
+    const character = characters[chid];
+    if (!character || !isPushedCharacterRecord(character)) return;
+
+    const currentWorld = String(character?.data?.extensions?.world || '').trim();
+    if (currentWorld) {
+        setWorldInfoButtonClass(chid);
+        return;
+    }
+
+    if (autoLinkPushedLorebook(chid)) {
+        setWorldInfoButtonClass(chid);
+    }
+}
 export let world_info_min_activations = 0; // if > 0, will continue seeking chat until minimum world infos are activated
 export let world_info_min_activations_depth_max = 0; // used when (world_info_min_activations > 0)
 
@@ -933,21 +1188,35 @@ function ensureWiiPanelObserver() {
     if (!panel) return; // extension not loaded yet – will retry on next emit
     _wiiObserverReady = true;
 
+    const redactHiddenWorldHeader = (element) => {
+        if (!element) return;
+        const rawText = String(element.textContent || '').trim();
+        const normalizedText = rawText.startsWith('9z') ? rawText.substring(2) : rawText;
+        const sourceWorldName = normalizeHiddenLorebookName(
+            element.dataset.hiddenLorebookSourceName || normalizedText,
+        );
+        if (!sourceWorldName || !isHiddenPushedLorebookForDropdown(sourceWorldName)) return;
+
+        element.dataset.hiddenLorebookSourceName = sourceWorldName;
+        element.textContent = normalizedText;
+        element.setAttribute('title', normalizedText);
+        element.dataset.hiddenLorebookRedacted = 'true';
+    };
+
+    panel.querySelectorAll('.stwii--world').forEach(redactHiddenWorldHeader);
+
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== Node.ELEMENT_NODE) continue;
-                // Direct child with .stwii--world class (lorebook header)
                 if (node.classList?.contains('stwii--world')) {
-                    const text = node.textContent || '';
-                    if (text.startsWith('9z')) {
-                        node.textContent = text.substring(2);
-                    }
+                    redactHiddenWorldHeader(node);
                 }
+                node.querySelectorAll?.('.stwii--world').forEach(redactHiddenWorldHeader);
             }
         }
     });
-    observer.observe(panel, { childList: true });
+    observer.observe(panel, { childList: true, subtree: true });
 }
 
 /**
@@ -960,6 +1229,7 @@ function ensureWiiPanelObserver() {
  */
 export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData) {
     let worldInfoString = '', worldInfoBefore = '', worldInfoAfter = '';
+    let hasRestrictedHiddenLore = false;
 
     const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData);
     worldInfoBefore = activatedWorldInfo.worldInfoBefore;
@@ -967,31 +1237,35 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
     worldInfoString = worldInfoBefore + worldInfoAfter;
 
     if (!isDryRun && activatedWorldInfo.allActivatedEntries && activatedWorldInfo.allActivatedEntries.size > 0) {
-        const arg = Array.from(activatedWorldInfo.allActivatedEntries.values());
+        const arg = Array.from(activatedWorldInfo.allActivatedEntries.values()).map(entry => ({ ...entry }));
+        const handle = getCurrentUserHandle();
 
-        // For non-admin users: prefix hidden lorebook world names with "9z"
-        // so the WorldInfoInfo extension's built-in isHiddenWorld() recognises them
-        // and renders a single "(hidden entries)" placeholder. The full array
-        // length is preserved so the badge count stays accurate.
-        if (!isAdmin()) {
-            const handle = getCurrentUserHandle();
-            for (const entry of arg) {
-                const w = entry.world || '';
-                let isHiddenBook = false;
-                if (w.startsWith('ADMIN-')) {
-                    isHiddenBook = true;
-                } else if (w.startsWith('dd-')) {
-                    const creator = w.split('-')[1];
-                    if (creator !== handle) isHiddenBook = true;
-                }
-                if (isHiddenBook && !w.startsWith('9z')) {
-                    entry.world = '9z' + w;
-                }
+        hasRestrictedHiddenLore = arg.some((entry) => {
+            const worldName = entry.world || '';
+            const normalizedWorldName = normalizeHiddenLorebookName(worldName);
+            const isConventionHiddenBook = hidden_world_name_set.has(normalizedWorldName);
+            const isFlagHiddenBook = isHiddenLorebookRestrictedForUser(entry, handle);
+            return isConventionHiddenBook || isFlagHiddenBook;
+        });
+
+        // Prefix hidden lorebook names with "9z" so the WorldInfoInfo
+        // extension's built-in isHiddenWorld() recognises them. Keep the
+        // source lorebook name in the label so users can still identify
+        // which hidden lorebook triggered the badge.
+        for (const entry of arg) {
+            const w = entry.world || '';
+            const normalizedWorldName = normalizeHiddenLorebookName(w);
+            const isConventionHiddenBook = hidden_world_name_set.has(normalizedWorldName);
+            const isFlagHiddenBook = isHiddenLorebookRestrictedForUser(entry, handle);
+            const isHiddenBook = isConventionHiddenBook || isFlagHiddenBook;
+            if (isHiddenBook && !w.startsWith('9z')) {
+                entry._stwii_source_world = w;
+                entry.world = '9z' + getLorebookDropdownDisplayName(w);
             }
-            // Ensure the panel observer is ready to strip the "9z" prefix
-            // from displayed world-name headers after the extension renders.
-            ensureWiiPanelObserver();
         }
+        // Ensure the panel observer is ready to strip the "9z" prefix
+        // from displayed world-name headers after the extension renders.
+        ensureWiiPanelObserver();
 
         await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, arg);
     }
@@ -1000,6 +1274,7 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
         worldInfoString,
         worldInfoBefore,
         worldInfoAfter,
+        hasRestrictedHiddenLore,
         worldInfoExamples: activatedWorldInfo.EMEntries ?? [],
         worldInfoDepth: activatedWorldInfo.WIDepthEntries ?? [],
         anBefore: activatedWorldInfo.ANBeforeEntries ?? [],
@@ -1086,7 +1361,7 @@ export function setWorldInfoSettings(settings, data) {
     $('#world_info_max_recursion_steps').val(world_info_max_recursion_steps);
     $('#world_info_max_recursion_steps_counter').val(world_info_max_recursion_steps);
 
-    world_names = data.world_names?.length ? data.world_names : [];
+    refreshWorldNameCaches(data);
 
     // Add to existing selected WI if it exists
     selected_world_info = selected_world_info.concat(settings.world_info?.globalSelect?.filter((e) => world_names.includes(e)) ?? []);
@@ -1096,8 +1371,13 @@ export function setWorldInfoSettings(settings, data) {
     }
 
     world_names.forEach((item, i) => {
-        $('#world_info').append(`<option value='${i}'${selected_world_info.includes(item) ? ' selected' : ''}>${item}</option>`);
-        $('#world_editor_select').append(`<option value='${i}'>${item}</option>`);
+        const displayName = getLorebookDropdownDisplayName(item);
+        const globalListOption = new Option(displayName, i.toString(), selected_world_info.includes(item), selected_world_info.includes(item));
+        globalListOption.dataset.worldName = item;
+        const editorListOption = new Option(displayName, i.toString());
+        editorListOption.dataset.worldName = item;
+        $('#world_info').append(globalListOption);
+        $('#world_editor_select').append(editorListOption);
     });
 
     $('#world_info_sort_order').val(accountStorage.getItem(SORT_ORDER_KEY) || '0');
@@ -1157,30 +1437,23 @@ function registerWorldInfoSlashCommands() {
             return '';
         }
 
-        // Silently skip hidden lorebook lookups from extensions.
-        // The "9z" prefix is added by the WORLD_INFO_ACTIVATED handler so the
-        // WorldInfoInfo extension treats the lorebook as hidden; strip it here
-        // before checking the actual naming pattern.
-        if (!isAdmin()) {
-            const checkFile = file.startsWith('9z') ? file.substring(2) : file;
-            if (checkFile.startsWith('ADMIN-')) return '';
-            if (checkFile.startsWith('dd-')) {
-                const creator = checkFile.split('-')[1];
-                if (creator !== getCurrentUserHandle()) return '';
-            }
-        }
-
-        const data = await loadWorldInfo(file);
+            // The "9z" prefix is added by the WORLD_INFO_ACTIVATED handler so the
+            // WorldInfoInfo extension's built-in hidden-book logic can recognize
+            // hidden lorebooks. Strip that UI-only marker before loading entries.
+            const checkFile = normalizeHiddenLorebookName(file);
+            const data = await loadWorldInfo(checkFile);
 
         if (!data || !('entries' in data)) {
-            toastr.warning(t`Valid World Info file name is required`);
+                toastr.warning(t`Valid World Info file name is required`);
             return '';
         }
+
+            if (data?._stw_hidden_restricted || isHiddenLorebookRestrictedForUser(data, getCurrentUserHandle())) return '';
 
         const entries = Object.values(data.entries);
 
         if (!entries || entries.length === 0) {
-            toastr.warning(t`World Info file has no entries`);
+            console.debug(`[WorldInfo] Skipping empty World Info file: ${file}`);
             return '';
         }
 
@@ -2156,16 +2429,24 @@ export async function updateWorldInfoList() {
 
     if (result.ok) {
         const data = await result.json();
-        const editorSelected = String($('#world_editor_select').find(':selected').text());
-        world_names = data.world_names?.length ? data.world_names : [];
+        const editorSelectedOption = $('#world_editor_select').find(':selected');
+        const editorSelected = String(
+            editorSelectedOption.data('worldName')
+            || world_names?.[Number(editorSelectedOption.val())]
+            || '',
+        );
+        refreshWorldNameCaches(data);
         $('#world_info').find('option[value!=""]').remove();
         $('#world_editor_select').find('option[value!=""]').remove();
 
         world_names.forEach((item, i) => {
-            const globalListOption = new Option(item, i.toString());
+            const displayName = getLorebookDropdownDisplayName(item);
+            const globalListOption = new Option(displayName, i.toString());
             globalListOption.selected = selected_world_info.includes(item);
-            const editorListOption = new Option(item, i.toString());
+            globalListOption.dataset.worldName = item;
+            const editorListOption = new Option(displayName, i.toString());
             editorListOption.selected = editorSelected === item;
+            editorListOption.dataset.worldName = item;
             $('#world_info').append(globalListOption);
             $('#world_editor_select').append(editorListOption);
         });
@@ -2415,10 +2696,13 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
         return;
     }
 
-    // Block display of hidden/restricted lorebooks for non-admin/non-creator users
-    const isHidden = !!data?.extensions?.dreamtavern_hidden || !!data?._dreamtavern_restricted;
-    const hiddenCreator = data?.extensions?.dreamtavern_creator || '';
-    if (isHidden && !isAdmin() && getCurrentUserHandle() !== hiddenCreator) {
+    // Block display of hidden/restricted lorebooks for non-creator users
+    const isHidden = isTrueishFlag(getWorldInfoExtensionBySuffix(data, 'hidden')) || !!data?._dreamtavern_restricted || !!data?._stw_hidden_restricted;
+    const hiddenCreator = String(getWorldInfoExtensionBySuffix(data, 'creator') || '').trim().toLowerCase();
+    const hiddenOriginalCreator = String(getWorldInfoExtensionBySuffix(data, 'original_creator') || hiddenCreator || '').trim().toLowerCase();
+    const currentHandle = String(getCurrentUserHandle() || '').trim().toLowerCase();
+    const canViewHiddenLorebook = !isHidden || currentHandle === hiddenCreator || currentHandle === hiddenOriginalCreator;
+    if (!canViewHiddenLorebook) {
         $('#world_popup_new').off('click').on('click', nullWorldInfo);
         $('#world_popup_name_button').off('click').on('click', nullWorldInfo);
         $('#world_popup_export').off('click').on('click', nullWorldInfo);
@@ -2430,9 +2714,10 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
     }
 
     // Check if lorebook is locked for this user
-    const isLocked = !!data?.extensions?.dreamtavern_locked;
-    const lockCreator = data?.extensions?.dreamtavern_creator || '';
-    const canEdit = !isLocked || isAdmin() || getCurrentUserHandle() === lockCreator;
+    const isLocked = isTrueishFlag(getWorldInfoExtensionBySuffix(data, 'locked'));
+    const lockCreator = String(getWorldInfoExtensionBySuffix(data, 'creator') || '').trim().toLowerCase();
+    const lockOriginalCreator = String(getWorldInfoExtensionBySuffix(data, 'original_creator') || lockCreator || '').trim().toLowerCase();
+    const canEdit = !isLocked || currentHandle === lockCreator || currentHandle === lockOriginalCreator;
 
     // Show lock indicator
     if (isLocked && !canEdit) {
@@ -2678,153 +2963,6 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
             } else {
                 await hideWorldEditor();
             }
-        }
-    });
-
-    // Push to Users button (all users — admin pushes to anyone, regular users push to admin only)
-    $('#world_popup_share').show().off('click').on('click', async () => {
-        if (!name) return;
-
-        const userIsAdmin = isAdmin();
-
-        // Fetch user list + find attached characters in parallel
-        // Admin: fetch all users from /api/users/get
-        // Non-admin: fetch only admin handles from /api/worldinfo/admin-handles
-        let users = [];
-        let linkedChars = [];
-        try {
-            const userListUrl = userIsAdmin ? '/api/users/get' : '/api/worldinfo/admin-handles';
-            const [usersRes, charsRes] = await Promise.all([
-                fetch(userListUrl, { method: 'POST', headers: getRequestHeaders() }),
-                fetch('/api/worldinfo/find-characters', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ name }) }),
-            ]);
-            if (usersRes.ok) users = (await usersRes.json()).filter(u => u.enabled);
-            if (charsRes.ok) linkedChars = (await charsRes.json()).characters || [];
-        } catch { /* ignore */ }
-
-        // For admin: show all users (disable self). For non-admin: show only admin targets.
-        const userCheckboxes = users
-            .map(u => {
-                const isSelf = u.handle === getCurrentUserHandle();
-                return `
-                    <label style="display:flex; align-items:center; gap:8px; padding:6px 8px; cursor:pointer; border-radius:4px;" class="push_user_row">
-                        <input type="checkbox" class="push_user_cb" value="${u.handle}" ${isSelf ? 'disabled' : ''}>
-                        <span>${u.name} <span style="opacity:0.5;">(${u.handle})</span></span>
-                        ${u.admin ? '<span style="font-size:0.75em; opacity:0.5; margin-left:auto;">admin</span>' : ''}
-                        ${isSelf ? '<span style="font-size:0.75em; opacity:0.5; margin-left:auto;">you</span>' : ''}
-                    </label>
-                `;
-            }).join('');
-
-        const charListHtml = linkedChars.length > 0
-            ? `<div style="margin-bottom:12px; padding:8px; background:var(--SmartThemeBlurTintColor); border-radius:6px;">
-                <div style="font-weight:bold; margin-bottom:4px;">Character(s) linked to this lorebook:</div>
-                ${linkedChars.map(c => `<div style="padding:2px 0;">📎 ${c.replace('.png', '')}</div>`).join('')}
-                <div style="font-size:0.85em; opacity:0.6; margin-top:4px;">These will also be pushed to selected users.</div>
-            </div>`
-            : '<div style="margin-bottom:8px; padding:6px; opacity:0.5; font-size:0.9em;">No characters linked to this lorebook.</div>';
-
-        const defaultCharLabel = linkedChars.length > 0 ? linkedChars[0].replace('.png', '') : name;
-
-        const pushTitle = userIsAdmin ? `Push "${name}"` : `Push "${name}" to Admin`;
-        const pushNote = userIsAdmin
-            ? '🔒 Lorebook will be <strong>hidden &amp; locked</strong> for all non-admin users.'
-            : '🔒 Lorebook will be <strong>hidden &amp; locked</strong>. Only you and the admin can view or edit it.';
-
-        // Naming format differs by role:
-        //   Admin → ADMIN-{label}
-        //   User  → dd-{handle}-{label}
-        const namePrefix = userIsAdmin ? 'ADMIN-' : `dd-${getCurrentUserHandle()}-`;
-        const namePreviewDefault = `${namePrefix}${defaultCharLabel}`;
-
-        const popupHtml = `
-            <div style="min-width: 380px;">
-                <h3 style="margin-top:0;">${pushTitle}</h3>
-
-                ${charListHtml}
-
-                <div style="margin-bottom:12px;">
-                    <label style="display:block; font-weight:bold; margin-bottom:4px;">${userIsAdmin ? 'Book name:' : 'Character name:'}</label>
-                    <input type="text" id="push_char_label" class="text_pole" value="${defaultCharLabel}" placeholder="${userIsAdmin ? 'e.g. MyLorebook' : 'e.g. MyCharacter'}" style="width:100%; box-sizing:border-box;">
-                    <small style="opacity:0.5;">Lorebook will be saved as: <span id="push_name_preview">${namePreviewDefault}</span></small>
-                </div>
-
-                <div style="margin-bottom:12px;">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; font-weight:bold;">
-                        <input type="checkbox" id="push_select_all">
-                        Select All
-                    </label>
-                </div>
-
-                <div style="max-height:200px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; padding:4px;">
-                    ${userCheckboxes}
-                </div>
-
-                <div style="margin-top:8px; padding:6px 8px; background:var(--SmartThemeBlurTintColor); border-radius:4px; font-size:0.85em;">
-                    ${pushNote}
-                </div>
-            </div>
-        `;
-
-        const popup = new Popup(
-            popupHtml,
-            POPUP_TYPE.CONFIRM,
-            '',
-            { okButton: 'Push', cancelButton: 'Cancel' },
-        );
-        const resultPromise = popup.show();
-
-        $('#push_select_all').on('change', function() {
-            const checked = $(this).prop('checked');
-            $('.push_user_cb:not(:disabled)').prop('checked', checked);
-        });
-
-        // Live preview of lorebook name with correct prefix
-        $('#push_char_label').on('input', function() {
-            const val = $(this).val() || '???';
-            $('#push_name_preview').text(`${namePrefix}${val}`);
-        });
-
-        // Capture selections + label before popup closes
-        let selectedHandles = [];
-        let charLabel = '';
-        $(popup.dlg).on('click', '.popup-button-ok', function() {
-            $(popup.dlg).find('.push_user_cb:checked').each(function() {
-                selectedHandles.push($(this).val());
-            });
-            charLabel = $(popup.dlg).find('#push_char_label').val().trim();
-        });
-
-        const result = await resultPromise;
-        if (result !== POPUP_RESULT.AFFIRMATIVE) return;
-
-        if (selectedHandles.length === 0) {
-            toastr.warning('No users selected', 'Push');
-            return;
-        }
-
-        if (!charLabel) {
-            toastr.warning('Character label is required', 'Push');
-            return;
-        }
-
-        const pushResult = await fetch('/api/worldinfo/push', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ name, targets: selectedHandles, charLabel }),
-        });
-
-        if (pushResult.ok) {
-            const pushData = await pushResult.json();
-            const msg = [];
-            if (pushData.pushed.length) msg.push(`Lorebook → ${pushData.pushed.length} new user(s)`);
-            if (pushData.updated?.length) msg.push(`${pushData.updated.length} updated`);
-            if (pushData.characters_pushed.length) msg.push(`${linkedChars.length} character(s) pushed`);
-            if (pushData.failed.length) msg.push(`${pushData.failed.length} failed`);
-            toastr.success(msg.join('. '), `"${name}" Pushed`);
-        } else {
-            const errText = await pushResult.text();
-            toastr.error(errText || 'Failed to push', 'Error');
         }
     });
 
@@ -4426,6 +4564,7 @@ export async function deleteWorldInfo(worldInfoName) {
 
     if ($('#character_world').val() === worldInfoName) {
         $('#character_world').val('').trigger('change');
+        $('#character_world_unlink').val('true');
         setWorldInfoButtonClass(undefined, false);
         if (menu_type != 'create') {
             saveCharacterDebounced();
@@ -4550,7 +4689,7 @@ async function getCharacterLore() {
         }
 
         const data = await loadWorldInfo(worldName);
-        const newEntries = data ? Object.keys(data.entries).map((x) => data.entries[x]).map(({ uid, ...rest }) => ({ uid, world: worldName, ...rest })) : [];
+        const newEntries = mapLoadedWorldInfoEntries(data, worldName);
         entries = entries.concat(newEntries);
 
         if (!newEntries.length) {
@@ -4570,7 +4709,7 @@ async function getGlobalLore() {
     let entries = [];
     for (const worldName of selected_world_info) {
         const data = await loadWorldInfo(worldName);
-        const newEntries = data ? Object.keys(data.entries).map((x) => data.entries[x]).map(({ uid, ...rest }) => ({ uid, world: worldName, ...rest })) : [];
+        const newEntries = mapLoadedWorldInfoEntries(data, worldName);
         entries = entries.concat(newEntries);
     }
 
@@ -4592,7 +4731,7 @@ async function getChatLore() {
     }
 
     const data = await loadWorldInfo(chatWorld);
-    const entries = data ? Object.keys(data.entries).map((x) => data.entries[x]).map(({ uid, ...rest }) => ({ uid, world: chatWorld, ...rest })) : [];
+    const entries = mapLoadedWorldInfoEntries(data, chatWorld);
 
     console.debug(`[WI] Chat lore has ${entries.length} entries`, [chatWorld]);
 
@@ -4618,7 +4757,7 @@ async function getPersonaLore() {
     }
 
     const data = await loadWorldInfo(personaWorld);
-    const entries = data ? Object.keys(data.entries).map((x) => data.entries[x]).map(({ uid, ...rest }) => ({ uid, world: personaWorld, ...rest })) : [];
+    const entries = mapLoadedWorldInfoEntries(data, personaWorld);
 
     console.debug(`[WI] Persona lore has ${entries.length} entries`, [personaWorld]);
 
@@ -5717,8 +5856,8 @@ export function setWorldInfoButtonClass(chid, forceValue = undefined) {
         return;
     }
 
-    const world = characters[chid]?.data?.extensions?.world;
-    const worldSet = Boolean(world && world_names.includes(world));
+    const world = String(characters[chid]?.data?.extensions?.world || '').trim();
+    const worldSet = Boolean(world);
     $('#set_character_world, #world_button').toggleClass('world_set', worldSet);
 }
 
@@ -5726,6 +5865,16 @@ export function checkEmbeddedWorld(chid) {
     $('#import_character_info').hide();
 
     if (chid === undefined) {
+        return false;
+    }
+
+    // Skip auto-import for pushed characters — their lorebook is already
+    // imported by the push system via applyQueuedPushToRecipient().
+    // Without this guard, the embedded character_book triggers a duplicate import.
+    // Instead, ensure the pushed lorebook link is valid and icon is lit.
+    const isPushedCharacter = isPushedCharacterRecord(characters[chid]);
+    if (isPushedCharacter) {
+        ensurePushedLoreBookLinked(chid);
         return false;
     }
 
@@ -5767,6 +5916,17 @@ export async function importEmbeddedWorldInfo(skipPopup = false) {
     const chid = $('#import_character_info').data('chid');
 
     if (chid === undefined || chid === -1) {
+        return;
+    }
+
+    // Safety guard: don't re-import lorebooks for pushed characters.
+    // Instead, auto-link the already-imported pushed lorebook.
+    const isPushed = isPushedCharacterRecord(characters[chid]);
+    if (isPushed) {
+        const linked = autoLinkPushedLorebook(chid);
+        if (linked) {
+            setWorldInfoButtonClass(chid);
+        }
         return;
     }
 
@@ -5971,6 +6131,19 @@ export async function importWorldInfo(file) {
  */
 export function openWorldInfoEditor(worldName) {
     console.log(`Opening lorebook for ${worldName}`);
+    const selectedCharacterId = Number($('#set_character_world').data('chid'));
+
+    if (!Number.isNaN(selectedCharacterId) && selectedCharacterId >= 0) {
+        const selectedCharacter = characters[selectedCharacterId];
+        const selectedWorld = String(selectedCharacter?.data?.extensions?.world || '').trim();
+
+        if (selectedWorld === String(worldName || '').trim() && isCharacterDefinitionLocked(selectedCharacter)) {
+            applyCharacterDefinitionLockState(true);
+            toastr.warning('Lorebook access is locked on this pushed character.');
+            return;
+        }
+    }
+
     // Block hidden lorebooks from being opened by non-admin/non-creator
     if (!world_names.includes(worldName)) {
         console.log(`[WI] Lorebook "${worldName}" not in world_names list, skipping editor open`);
@@ -6137,6 +6310,7 @@ export async function moveWorldInfoEntry(sourceName, targetName, uid, { deleteOr
 export async function charUpdatePrimaryWorld(name) {
     const previousValue = $('#character_world').val();
     $('#character_world').val(name);
+    $('#character_world_unlink').val(previousValue && !name ? 'true' : '');
 
     console.debug('Character world selected:', name);
 
@@ -6162,6 +6336,7 @@ export async function charUpdatePrimaryWorld(name) {
     }
 
     await createOrEditCharacter();
+    $('#character_world_unlink').val('');
 
     setWorldInfoButtonClass(undefined, !!name);
 }
@@ -6213,6 +6388,7 @@ function updateAuxBooks(fileName, computeNext) {
 }
 
 export function initWorldInfo() {
+    setupPushWorkflowControls();
     $('#world_info').on('mousedown change', async function (e) {
         // If there's no world names, don't do anything
         if (world_names.length === 0) {
@@ -6247,195 +6423,6 @@ export function initWorldInfo() {
 
         if (finalName) {
             await createNewWorldInfo(finalName, { interactive: true });
-        }
-    });
-
-    // ── Bulk Push button (admin only) ──
-    // Show the button only for admins; it's independent of which lorebook is open.
-    $('#world_bulk_push').toggle(isAdmin());
-    $('#world_bulk_push').on('click', async () => {
-        // Build a list of characters that have an embedded lorebook
-        const charList = (characters || [])
-            .filter(c => c?.data?.extensions?.world)
-            .map(c => ({ name: c.name, avatar: c.avatar, world: c.data.extensions.world }));
-
-        if (charList.length === 0) {
-            toastr.info('No characters with embedded lorebooks found.', 'Bulk Push');
-            return;
-        }
-
-        // Fetch user list in parallel while we build the popup
-        let users = [];
-        try {
-            const usersRes = await fetch('/api/users/get', { method: 'POST', headers: getRequestHeaders() });
-            if (usersRes.ok) users = (await usersRes.json()).filter(u => u.enabled);
-        } catch { /* ignore */ }
-
-        const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        const myHandle = getCurrentUserHandle();
-
-        const charCheckboxes = charList.map((c, i) => `
-            <label style="display:flex; align-items:center; gap:8px; padding:6px 8px; cursor:pointer; border-radius:4px;" class="bulk_char_row">
-                <input type="checkbox" class="bulk_char_cb" data-world="${esc(c.world)}" data-idx="${i}">
-                <span style="font-weight:bold;">${esc(c.name)}</span>
-                <span style="opacity:0.5; font-size:0.85em; margin-left:auto;">📖 ${esc(c.world)}</span>
-            </label>
-        `).join('');
-
-        const userCheckboxes = users.map(u => {
-            const isSelf = u.handle === myHandle;
-            return `
-                <label style="display:flex; align-items:center; gap:8px; padding:6px 8px; cursor:pointer; border-radius:4px;" class="bulk_user_row">
-                    <input type="checkbox" class="bulk_user_cb" value="${esc(u.handle)}" ${isSelf ? 'disabled' : ''}>
-                    <span>${esc(u.name)} <span style="opacity:0.5;">(${esc(u.handle)})</span></span>
-                    ${u.admin ? '<span style="font-size:0.75em; opacity:0.5; margin-left:auto;">admin</span>' : ''}
-                    ${isSelf ? '<span style="font-size:0.75em; opacity:0.5; margin-left:auto;">you</span>' : ''}
-                </label>
-            `;
-        }).join('');
-
-        const popupHtml = `
-            <div style="min-width:420px;">
-                <h3 style="margin-top:0;">Bulk Push Characters</h3>
-                <p style="margin:0 0 8px; opacity:0.7;">Select 1–10 lorebook-embedded characters, then choose which users to push to.</p>
-
-                <!-- Character selection -->
-                <div style="font-weight:bold; margin-bottom:4px;">Characters:</div>
-                <div style="margin-bottom:8px;">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; font-weight:bold;">
-                        <input type="checkbox" id="bulk_char_select_all">
-                        Select All Characters
-                    </label>
-                </div>
-                <div id="bulk_char_list" style="max-height:200px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; padding:4px;">
-                    ${charCheckboxes}
-                </div>
-                <div style="margin-top:4px; margin-bottom:12px;">
-                    <span id="bulk_count_label" style="font-size:0.85em; opacity:0.6;">0 / 10 selected</span>
-                </div>
-
-                <!-- User selection -->
-                <div style="font-weight:bold; margin-bottom:4px;">Push to:</div>
-                <div style="margin-bottom:8px;">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; font-weight:bold;">
-                        <input type="checkbox" id="bulk_user_select_all">
-                        Select All Users
-                    </label>
-                </div>
-                <div id="bulk_user_list" style="max-height:200px; overflow-y:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:6px; padding:4px;">
-                    ${userCheckboxes}
-                </div>
-
-                <div style="margin-top:8px; padding:6px 8px; background:var(--SmartThemeBlurTintColor); border-radius:4px; font-size:0.85em;">
-                    🔒 Lorebooks will be <strong>hidden &amp; locked</strong> for all non-admin users.
-                </div>
-            </div>
-        `;
-
-        const popup = new Popup(popupHtml, POPUP_TYPE.CONFIRM, '', { okButton: 'Push', cancelButton: 'Cancel' });
-        const resultPromise = popup.show();
-
-        // Enforce max-10 characters and update counter / button label
-        function refreshBulkState() {
-            const charChecked = $(popup.dlg).find('.bulk_char_cb:checked').length;
-            const userChecked = $(popup.dlg).find('.bulk_user_cb:checked').length;
-            $(popup.dlg).find('#bulk_count_label').text(`${charChecked} / 10 selected`);
-            // Disable unchecked character boxes when at limit
-            if (charChecked >= 10) {
-                $(popup.dlg).find('.bulk_char_cb:not(:checked)').prop('disabled', true);
-            } else {
-                $(popup.dlg).find('.bulk_char_cb').prop('disabled', false);
-            }
-            // Update OK button label to show both counts
-            if (charChecked > 0 && userChecked > 0) {
-                $(popup.dlg).find('.popup-button-ok').text(`Push ${charChecked} → ${userChecked} user${userChecked !== 1 ? 's' : ''}`);
-            } else {
-                $(popup.dlg).find('.popup-button-ok').text('Push');
-            }
-        }
-
-        $(popup.dlg).on('change', '.bulk_char_cb', refreshBulkState);
-        $(popup.dlg).on('change', '.bulk_user_cb', refreshBulkState);
-
-        // Select All Characters (limit to first 10)
-        $(popup.dlg).on('change', '#bulk_char_select_all', function () {
-            const isChecked = $(this).prop('checked');
-            $(popup.dlg).find('.bulk_char_cb').each(function (i) {
-                if (isChecked && i >= 10) {
-                    $(this).prop('checked', false);
-                } else {
-                    $(this).prop('checked', isChecked);
-                }
-            });
-            refreshBulkState();
-        });
-
-        // Select All Users
-        $(popup.dlg).on('change', '#bulk_user_select_all', function () {
-            const isChecked = $(this).prop('checked');
-            $(popup.dlg).find('.bulk_user_cb:not(:disabled)').prop('checked', isChecked);
-            refreshBulkState();
-        });
-
-        // Capture selections before popup closes
-        let selectedWorlds = [];
-        let selectedUsers = [];
-        $(popup.dlg).on('click', '.popup-button-ok', function () {
-            $(popup.dlg).find('.bulk_char_cb:checked').each(function () {
-                selectedWorlds.push($(this).data('world'));
-            });
-            $(popup.dlg).find('.bulk_user_cb:checked').each(function () {
-                selectedUsers.push($(this).val());
-            });
-        });
-
-        const result = await resultPromise;
-        if (result !== POPUP_RESULT.AFFIRMATIVE) return;
-
-        if (selectedWorlds.length === 0) {
-            toastr.warning('No characters selected', 'Bulk Push');
-            return;
-        }
-
-        if (selectedWorlds.length > 10) {
-            toastr.warning('Maximum 10 characters allowed', 'Bulk Push');
-            return;
-        }
-
-        if (selectedUsers.length === 0) {
-            toastr.warning('No users selected', 'Bulk Push');
-            return;
-        }
-
-        // De-duplicate lorebook names (two characters might share the same lorebook)
-        const uniqueLorebooks = [...new Set(selectedWorlds)];
-
-        toastr.info(`Pushing ${uniqueLorebooks.length} lorebook(s) + characters to ${selectedUsers.length} user(s)…`, 'Bulk Push');
-
-        try {
-            const pushRes = await fetch('/api/worldinfo/bulk-push', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify({ lorebooks: uniqueLorebooks, targets: selectedUsers }),
-            });
-            if (pushRes.ok) {
-                const { results: bulkResults } = await pushRes.json();
-                const msgs = [];
-                for (const r of bulkResults) {
-                    const parts = [];
-                    if (r.pushed.length) parts.push(`${r.pushed.length} new`);
-                    if (r.updated?.length) parts.push(`${r.updated.length} updated`);
-                    if (r.characters_pushed.length) parts.push(`${r.characters_pushed.length} char(s)`);
-                    if (r.failed.length) parts.push(`${r.failed.length} failed`);
-                    msgs.push(`<b>${r.lorebook}</b>: ${parts.join(', ') || 'no targets'}`);
-                }
-                toastr.success(msgs.join('<br>'), 'Bulk Push Complete', { timeOut: 8000, escapeHtml: false });
-            } else {
-                const errText = await pushRes.text();
-                toastr.error(errText || 'Bulk push failed', 'Error');
-            }
-        } catch (err) {
-            toastr.error(String(err), 'Bulk Push Error');
         }
     });
 
@@ -6550,6 +6537,14 @@ export function initWorldInfo() {
             return;
         }
 
+        if (chid !== undefined && chid !== null && isCharacterDefinitionLocked(characters[chid])) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            applyCharacterDefinitionLockState(true);
+            toastr.warning('Lorebook access is locked on this pushed character.');
+            return;
+        }
+
         const worldName = characters[chid]?.data?.extensions?.world;
         const hasEmbed = checkEmbeddedWorld(chid);
         if (worldName && world_names.includes(worldName) && !event.shiftKey) {
@@ -6624,4 +6619,1867 @@ export function initWorldInfo() {
             }
         });
     });
+}
+
+
+let pushNotificationPollTimer = null;
+const PUSH_UI_PREF_KEY = 'push_workflow_ui_pref';
+const PUSH_UI_PREF_MIGRATION_KEY = 'push_workflow_ui_pref_v5';
+const PUSH_UI_MIN_TOP = 300;
+const PUSH_UI_DEFAULT_TOP = 420;
+const PUSH_UI_RIGHT_OFFSET = 260;
+
+function getDefaultPushUiLeft() {
+    return Math.max(16, (window.innerWidth || 1280) - PUSH_UI_RIGHT_OFFSET);
+}
+
+function getDefaultPushUiTop() {
+    const viewportHeight = window.innerHeight || 900;
+    return Math.max(PUSH_UI_MIN_TOP, Math.min(PUSH_UI_DEFAULT_TOP, viewportHeight - 140));
+}
+function getPushUiPref() {
+    const fallback = { collapsed: false, floating: true, hidden: false, left: getDefaultPushUiLeft(), top: getDefaultPushUiTop() };
+    try {
+        const raw = power_user?.push_workflow_ui_pref
+            ? JSON.stringify(power_user.push_workflow_ui_pref)
+            : accountStorage.getItem(PUSH_UI_PREF_KEY);
+        if (!raw) return normalizePushUiPref(fallback);
+        const parsed = JSON.parse(raw);
+        return normalizePushUiPref({
+            collapsed: !!parsed.collapsed,
+            floating: typeof parsed.floating === 'boolean' ? parsed.floating : fallback.floating,
+            hidden: !!parsed.hidden,
+            left: Number.isFinite(Number(parsed.left)) ? Number(parsed.left) : fallback.left,
+            top: Number.isFinite(Number(parsed.top)) ? Number(parsed.top) : fallback.top,
+        });
+    } catch {
+        return normalizePushUiPref(fallback);
+    }
+}
+
+function normalizePushUiPref(pref) {
+    const normalized = { ...pref };
+    normalized.floating = true;
+    normalized.hidden = !!normalized.hidden;
+    const maxTop = Math.max(PUSH_UI_MIN_TOP, (window.innerHeight || 900) - 120);
+    const topValue = Number.isFinite(Number(normalized.top)) ? Number(normalized.top) : getDefaultPushUiTop();
+    normalized.top = Math.min(maxTop, Math.max(PUSH_UI_MIN_TOP, topValue));
+    const viewportWidth = window.innerWidth || 1280;
+    const maxLeft = Math.max(16, viewportWidth - 80);
+    const defaultLeft = getDefaultPushUiLeft();
+    const leftValue = Number.isFinite(Number(normalized.left)) ? Number(normalized.left) : defaultLeft;
+    normalized.left = Math.min(maxLeft, Math.max(16, leftValue));
+    return normalized;
+}
+
+function setPushUiPref(pref) {
+    const normalized = normalizePushUiPref(pref);
+    power_user.push_workflow_ui_pref = normalized;
+    accountStorage.setItem(PUSH_UI_PREF_KEY, JSON.stringify(normalized));
+    saveSettingsDebounced();
+}
+
+function setPushWorkflowControlsHidden(hidden, showToast = true) {
+    const pref = getPushUiPref();
+    pref.hidden = !!hidden;
+    applyPushUiPref(pref);
+    bindPushUiDrag(pref);
+    setPushUiPref(pref);
+
+    if (showToast) {
+        if (pref.hidden) {
+            toastr.info('Push controls hidden. Use /showPUSH to restore.', 'Push');
+        } else {
+            toastr.info('Push controls visible.', 'Push');
+        }
+    }
+
+    return pref;
+}
+
+globalThis.setPushWorkflowControlsHidden = setPushWorkflowControlsHidden;
+
+function applyPushUiPref(pref) {
+    pref = normalizePushUiPref(pref);
+    const controls = $('#push_workflow_controls');
+    controls.toggle(!pref.hidden);
+    controls.toggleClass('push-controls-collapsed', !!pref.collapsed);
+    controls.toggleClass('push-controls-floating', !!pref.floating);
+
+    if (pref.floating) {
+        controls.css({ left: `${pref.left}px`, top: `${pref.top}px` });
+        $('#topbar_push_drag').addClass('drag-enabled').attr('title', 'Drag to Move');
+    } else {
+        controls.css({ left: '', top: '' });
+        $('#topbar_push_drag').removeClass('drag-enabled').attr('title', 'Drag to Move');
+    }
+
+    $('#topbar_push_reset').attr('title', 'Reset Push Controls Position');
+
+    $('#topbar_push_toggle')
+        .toggleClass('fa-chevron-left', !pref.collapsed)
+        .toggleClass('fa-chevron-right', !!pref.collapsed)
+        .attr('title', pref.collapsed ? 'Expand Push Controls' : 'Collapse Push Controls');
+}
+
+function formatDetailedPushFailures(bulkResults) {
+    const failures = [];
+
+    for (const result of bulkResults || []) {
+        const lorebook = escapeHtml(String(result?.lorebook || 'Unknown lorebook'));
+        for (const failure of result?.failed || []) {
+            failures.push(`<b>${lorebook}</b>: ${escapeHtml(String(failure))}`);
+        }
+    }
+
+    return failures;
+}
+
+function bindPushUiDrag(pref) {
+    const controls = $('#push_workflow_controls');
+    if (!($.fn && $.fn.draggable)) return;
+
+    try {
+        if (controls.hasClass('ui-draggable')) {
+            controls.draggable('destroy');
+        }
+    } catch {
+        // no-op
+    }
+
+    if (!pref.floating || pref.hidden) return;
+
+    let dragStarted = false;
+    
+    controls.draggable({
+        handle: '#topbar_push_drag',
+        containment: 'window',
+        start: function (_event, _ui) {
+            dragStarted = true;
+            controls.addClass('ui-draggable-dragging');
+        },
+        stop: function (_event, ui) {
+            pref.left = Math.max(16, Math.round(ui.position.left));
+            pref.top = Math.max(PUSH_UI_MIN_TOP, Math.round(ui.position.top));
+            controls.css({ left: `${pref.left}px`, top: `${pref.top}px` });
+            controls.removeClass('ui-draggable-dragging');
+            setPushUiPref(pref);
+            
+            if (dragStarted) {
+                toastr.success('Position saved', 'Push Controls', { timeOut: 1500 });
+                dragStarted = false;
+            }
+        },
+    });
+}
+
+async function getPushNotificationState() {
+    try {
+        const res = await fetch('/api/worldinfo/push-notifications', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+        if (!res.ok) {
+            return { pending_count: 0, unread_count: 0, pending_unread_count: 0, inbox_unread_count: 0, pending: [], submission_updates: [], legacy: [] };
+        }
+        return await res.json();
+    } catch {
+        return { pending_count: 0, unread_count: 0, pending_unread_count: 0, inbox_unread_count: 0, pending: [], submission_updates: [], legacy: [] };
+    }
+}
+
+function updatePushBadge(el, count) {
+    if (!el) return;
+    el.textContent = count > 99 ? '99+' : String(count);
+    el.classList.toggle('show', count > 0);
+}
+
+function updatePushNotificationBadge(state) {
+    // Keep badge semantics explicit:
+    // - Bell: unread pending push items only
+    // - Submit: unread user inbox items
+    // - Admin Inbox: pending submissions
+    updatePushBadge(document.getElementById('topbar_push_notif_badge'), Number(state?.pending_unread_count || 0));
+    updatePushBadge(document.getElementById('topbar_submit_badge'), Number(state?.inbox_unread_count || 0));
+    updatePushBadge(document.getElementById('topbar_admin_inbox_badge'), Number(state?.admin_pending_submissions || 0));
+
+    // Update title only - click handler is bound once during initialization
+    const submitBtn = document.getElementById('topbar_submit');
+    if (submitBtn && Number(state?.inbox_unread_count || 0) > 0) {
+        submitBtn.style.cursor = 'pointer';
+        submitBtn.title = `Submit to Admin (${state.inbox_unread_count} unread inbox item${state.inbox_unread_count !== 1 ? 's' : ''})`;
+        const badge = document.getElementById('topbar_submit_badge');
+        if (badge) {
+            badge.style.cursor = 'pointer';
+        }
+    } else if (submitBtn) {
+        submitBtn.title = 'Submit to Admin';
+    }
+}
+
+function formatPushTs(ts) {
+    if (!ts) return '';
+    try {
+        return new Date(ts).toLocaleString();
+    } catch {
+        return '';
+    }
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function inboxTypeTag(type) {
+    const normalized = String(type || 'note').toUpperCase();
+    if (normalized === 'SUBMISSION_REPLY') return 'SUBMISSION';
+    if (normalized === 'ADMIN_NOTE') return 'NOTE';
+    return normalized;
+}
+
+function inboxPreview(text, max = 110) {
+    const str = String(text || '');
+    if (str.length <= max) return str;
+    return `${str.slice(0, max - 1)}...`;
+}
+
+async function getUserInboxState() {
+    const res = await fetch('/api/worldinfo/user-inbox', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+    });
+
+    if (!res.ok) {
+        throw new Error(await res.text() || 'Failed to load inbox');
+    }
+
+    return await res.json();
+}
+
+async function openUserInboxDetailModal(inboxId) {
+    const detailRes = await fetch('/api/worldinfo/user-inbox-detail', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ inbox_id: inboxId }),
+    });
+
+    if (!detailRes.ok) {
+        toastr.error(await detailRes.text() || 'Failed to load inbox detail', 'Inbox');
+        return;
+    }
+
+    const item = await detailRes.json();
+    const context = item.context || {};
+    const senderHandle = String(item.from_handle || '').trim();
+    const canReply = !!senderHandle && senderHandle.toLowerCase() !== 'system';
+    const chips = [];
+    if (context.content_type) chips.push(`<span class="push-inbox-chip">${escapeHtml(String(context.content_type).toUpperCase())}</span>`);
+    if (context.content_name) chips.push(`<span class="push-inbox-chip">${escapeHtml(context.content_name)}</span>`);
+    if (context.push_id) chips.push('<span class="push-inbox-chip">PUSH</span>');
+    if (context.submission_id) chips.push('<span class="push-inbox-chip">SUBMISSION</span>');
+
+    const html = `
+        <div class="push-inbox-modal" style="min-width:480px;">
+            <h3 style="margin-top:0;">${escapeHtml(item.title || 'Inbox Item')}</h3>
+            <div class="push-flow-meta">From ${escapeHtml(item.from_name || item.from_handle || 'System')} • ${formatPushTs(item.created_at)}</div>
+            <div class="push-inbox-chip-row">${chips.join('')}</div>
+            <div class="push-inbox-detail-body">${escapeHtml(item.body || '')}</div>
+        </div>
+    `;
+
+    const RESULT_TOGGLE_READ = POPUP_RESULT.CUSTOM1;
+    const RESULT_DELETE = POPUP_RESULT.CUSTOM2;
+    const RESULT_REPLY = POPUP_RESULT.CUSTOM3;
+    const customButtons = [
+        ...(canReply ? [{ text: 'Reply', result: RESULT_REPLY }] : []),
+        { text: item.read_at ? 'Mark Unread' : 'Mark Read', result: RESULT_TOGGLE_READ },
+        { text: 'Delete', result: RESULT_DELETE },
+    ];
+
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        rows: 1,
+        wider: true,
+        customButtons,
+    });
+    decoratePushPopup(popup, 'user-inbox-detail');
+
+    const result = await popup.show();
+    if (result === RESULT_REPLY) {
+        await openUserSendAdminNoteModal(inboxId);
+        const refreshed = await getPushNotificationState();
+        updatePushNotificationBadge(refreshed);
+        return;
+    }
+
+    if ([RESULT_TOGGLE_READ, RESULT_DELETE].includes(result)) {
+        const action = result === RESULT_TOGGLE_READ
+            ? (item.read_at ? 'mark_unread' : 'mark_read')
+            : 'delete';
+
+        const actionRes = await fetch('/api/worldinfo/user-inbox-action', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ action, inbox_id: inboxId }),
+        });
+
+        if (!actionRes.ok) {
+            toastr.error(await actionRes.text() || 'Failed to update inbox item', 'Inbox');
+        }
+    }
+
+    const refreshed = await getPushNotificationState();
+    updatePushNotificationBadge(refreshed);
+}
+
+
+async function fetchPushBotUsers({ adminsOnly = false } = {}) {
+    const endpoints = adminsOnly
+        ? ['/api/worldinfo/admin-handles', '/api/worldinfo/users/get', '/api/users/get']
+        : ['/api/worldinfo/users/get', '/api/users/get'];
+
+    let lastError = '';
+    for (const url of endpoints) {
+        try {
+            const res = await fetch(url, { method: 'POST', headers: getRequestHeaders() });
+            if (!res.ok) {
+                lastError = await res.text().catch(() => `${res.status} ${res.statusText}`);
+                continue;
+            }
+            const data = await res.json();
+            if (!Array.isArray(data)) continue;
+            const users = data.filter(u => u && typeof u === 'object');
+            return adminsOnly ? users.filter(u => u.admin) : users;
+        } catch (err) {
+            lastError = String(err?.message || err || 'Unknown error');
+        }
+    }
+    throw new Error(lastError || 'Failed to retrieve users');
+}
+
+async function openUserSendAdminNoteModal(onResponseToInboxId = null) {
+    // Fetch admins
+    let admins = [];
+    try {
+        admins = await fetchPushBotUsers({ adminsOnly: true });
+    } catch (err) {
+        console.warn('[UserAdminNote] Failed to fetch admins:', err);
+    }
+
+    const adminOptions = admins.length > 0
+        ? admins.map(a => `<option value="${escapeHtml(a.handle)}">${escapeHtml(a.name || a.handle)}</option>`).join('')
+        : '<option value="">No admins available</option>';
+
+    const html = `
+        <div class="push-popup-layout">
+            <h3 style="margin-top:0;">Send Note to Admin</h3>
+            <label class="push-inbox-label">Send To</label>
+            <select id="user_admin_note_target" class="text_pole" style="width:100%; margin-bottom:10px;">
+                ${adminOptions}
+            </select>
+            <label class="push-inbox-label">Message</label>
+            <textarea id="user_admin_note_text" class="text_pole" style="width:100%; height:120px; resize:vertical;" placeholder="Your message to the admin..."></textarea>
+        </div>
+    `;
+
+    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', {
+        okButton: 'Send Note',
+        cancelButton: 'Cancel',
+        wider: true,
+    });
+    decoratePushPopup(popup, 'user-admin-note');
+
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    const noteText = $(popup.dlg).find('#user_admin_note_text').val() || '';
+    if (!noteText.trim()) {
+        toastr.warning('Please enter a message.', 'Note');
+        return;
+    }
+
+    const targetAdmin = $(popup.dlg).find('#user_admin_note_target').val() || admins[0]?.handle || null;
+
+    if (!targetAdmin) {
+        toastr.error('No admin selected or available.', 'Send Note');
+        return;
+    }
+
+    const payload = {
+        message: noteText,
+        target_admin: targetAdmin,
+        in_response_to_inbox_id: onResponseToInboxId,
+    };
+
+    const sendRes = await fetch('/api/worldinfo/user-admin-note', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(payload),
+    });
+
+    if (!sendRes.ok) {
+        toastr.error(await sendRes.text() || 'Failed to send note', 'Send Note');
+        return;
+    }
+
+    toastr.success('Note sent to admin.', 'Send Note');
+    await openUserInboxModal();
+}
+
+async function openUserInboxModal() {
+
+    let payload;
+    try {
+        payload = await getUserInboxState();
+    } catch (err) {
+        toastr.error(String(err?.message || err), 'Inbox');
+        return;
+    }
+
+    const inboxIcon = (type) => {
+        const t = String(type || '').toLowerCase();
+        if (t === 'submission_reply') return 'fa-upload';
+        if (t === 'admin_note') return 'fa-pen-to-square';
+        if (t === 'push') return 'fa-paper-plane';
+        return 'fa-envelope';
+    };
+
+    const inboxTagClass = (type) => {
+        const t = String(type || '').toLowerCase();
+        if (t === 'submission_reply') return 'push-tag-char';
+        if (t === 'push') return 'push-tag-lore';
+        return 'push-tag-char';
+    };
+
+    const rows = (payload.items || []).map(item => {
+        const unreadClass = item.read_at ? '' : ' unread';
+        const tag = inboxTypeTag(item.type);
+        const body = inboxPreview(item.body || '');
+        return `
+            <div class="push-ni${unreadClass}" data-inbox-id="${escapeHtml(item.inbox_id)}">
+                <div class="push-ni-av"><i class="fa-solid ${inboxIcon(item.type)}"></i></div>
+                <div class="push-ni-body">
+                    <div class="push-ni-title">${escapeHtml(item.title || 'Inbox Item')} <span class="push-tag ${inboxTagClass(item.type)}">${escapeHtml(tag)}</span></div>
+                    <div class="push-ni-desc">${escapeHtml(body)}</div>
+                    <div class="push-ni-desc" style="margin-top:2px"><span style="opacity:.5">From:</span> <strong>${escapeHtml(item.from_name || item.from_handle || 'System')}</strong></div>
+                    <div class="push-ni-time">${formatPushTs(item.created_at)}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    const html = `
+        <div class="push-inbox-modal push-popup-layout">
+            <h3 style="margin-top:0;"><i class="fa-solid fa-inbox" style="color:#a78bfa; font-size:14px;"></i> Notifications &amp; Inbox</h3>
+            <div class="push-nl">${rows || '<div class="push-ni-desc" style="padding:12px; text-align:center;">No inbox items.</div>'}</div>
+        </div>
+    `;
+
+    const RESULT_CLEAR_READ = POPUP_RESULT.CUSTOM1;
+    const RESULT_CLEAR_ALL = POPUP_RESULT.CUSTOM2;
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        rows: 1,
+        wider: true,
+        customButtons: [
+            { text: 'Clear Read', result: RESULT_CLEAR_READ },
+            { text: 'Clear All', result: RESULT_CLEAR_ALL },
+        ],
+    });
+    decoratePushPopup(popup, 'user-inbox');
+    const resultPromise = popup.show();
+
+    $(popup.dlg).on('click', '.push-ni[data-inbox-id]', async function () {
+        const inboxId = $(this).data('inbox-id');
+        if (!inboxId) return;
+        popup.complete(POPUP_RESULT.AFFIRMATIVE);
+        setTimeout(() => {
+            openUserInboxDetailModal(inboxId);
+        }, 220);
+    });
+
+    const result = await resultPromise;
+    if (result === RESULT_CLEAR_READ || result === RESULT_CLEAR_ALL) {
+        const clearRes = await fetch('/api/worldinfo/user-inbox-action', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ action: result === RESULT_CLEAR_ALL ? 'clear_all' : 'clear_read' }),
+        });
+        if (!clearRes.ok) {
+            toastr.error(await clearRes.text() || 'Failed to clear read items', 'Inbox');
+        }
+    }
+
+    const refreshed = await getPushNotificationState();
+    updatePushNotificationBadge(refreshed);
+}
+
+async function openAdminNoteModal() {
+    console.log('[AdminNote] Modal opened');
+    
+    if (!isAdmin()) {
+        console.warn('[AdminNote] User is not admin');
+        toastr.warning('Only admins can send direct notes.', 'Admin Note');
+        return;
+    }
+
+    let users = [];
+    try {
+        console.log('[AdminNote] Fetching users...');
+        const allUsers = await fetchPushBotUsers();
+        users = allUsers.filter(u => u.handle !== getCurrentUserHandle())
+            .sort((a, b) => (a.handle || '').localeCompare(b.handle || ''));
+        console.log('[AdminNote] Fetched users:', users.length);
+    } catch (err) {
+        console.error('[AdminNote] Error fetching users:', err);
+    }
+
+    const userRows = users.map(u => `
+        <label class="push-note-target">
+            <input type="checkbox" class="admin_note_target" value="${escapeHtml(u.handle)}" />
+            <span>${escapeHtml(u.name || u.handle)} <span style="opacity:0.6;">(${escapeHtml(u.handle)})</span></span>
+        </label>
+    `).join('');
+
+    const html = `
+        <div class="push-inbox-modal push-popup-layout">
+            <h3 style="margin-top:0;">Send Note</h3>
+            <label class="push-inbox-label">Targets</label>
+            <label class="push-note-target" style="margin-bottom:6px;">
+                <input type="checkbox" id="admin_note_all" />
+                <span>All users</span>
+            </label>
+            <div class="push-flow-list" style="max-height:150px; margin-bottom:10px;">${userRows || '<div class="push-flow-meta">No users found.</div>'}</div>
+            <label class="push-inbox-label">Subject</label>
+            <input id="admin_note_subject" class="text_pole" style="width:100%; margin-bottom:10px;" />
+            <label class="push-inbox-label">Note</label>
+            <textarea id="admin_note_body" class="text_pole" style="width:100%; min-height:100px; margin-bottom:10px;"></textarea>
+            <label class="push-inbox-label">Priority</label>
+            <select id="admin_note_priority" class="text_pole" style="width:100%;">
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+                <option value="high">High</option>
+            </select>
+        </div>
+    `;
+
+    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', { okButton: 'Send Note', cancelButton: 'Cancel', wider: true });
+    decoratePushPopup(popup, 'admin-note');
+    const dlg = popup.dlg;
+
+    const syncAdminNoteSelectionUi = () => {
+        $(dlg).find('.push-note-target').removeClass('push-note-target-selected');
+        $(dlg).find('.admin_note_target:checked').each(function () {
+            $(this).closest('.push-note-target').addClass('push-note-target-selected');
+        });
+    };
+
+    $(dlg).on('click', '.push-note-target', function (event) {
+        if ($(event.target).is('input')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const cb = $(this).find('input[type="checkbox"]').first();
+        if (cb.length) {
+            cb.prop('checked', !cb.prop('checked')).trigger('change');
+        }
+    });
+
+    $(dlg).on('change', '#admin_note_all', function () {
+        const checked = !!$(this).prop('checked');
+        $(dlg).find('.admin_note_target').prop('checked', false).prop('disabled', checked);
+        syncAdminNoteSelectionUi();
+    });
+
+    $(dlg).on('change', '.admin_note_target', function () {
+        if ($(this).prop('checked')) {
+            $(dlg).find('#admin_note_all').prop('checked', false);
+        }
+        syncAdminNoteSelectionUi();
+    });
+
+    syncAdminNoteSelectionUi();
+
+    const result = await popup.show();
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    const useAll = !!$(dlg).find('#admin_note_all').prop('checked');
+    const targets = [];
+    if (!useAll) {
+        $(dlg).find('.admin_note_target:checked').each(function () {
+            targets.push($(this).val());
+        });
+        if (targets.length === 0) {
+            toastr.warning('Select at least one user, or choose All users.', 'Admin Note');
+            return;
+        }
+    }
+
+    const payload = {
+        targets: useAll ? 'all' : targets,
+        subject: String($(dlg).find('#admin_note_subject').val() || '').trim(),
+        body: String($(dlg).find('#admin_note_body').val() || '').trim(),
+        priority: String($(dlg).find('#admin_note_priority').val() || 'normal'),
+    };
+
+    const res = await fetch('/api/worldinfo/admin-note', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+        toastr.error(await res.text() || 'Failed to send note', 'Admin Note');
+        return;
+    }
+
+    const data = await res.json();
+    toastr.success(`Sent to ${data.delivered?.length || 0} user(s).`, 'Admin Note');
+}
+
+function decoratePushPopup(popup, mode = 'default') {
+    if (!popup?.dlg) return;
+
+    const decorate = () => {
+        const dlg = $(popup.dlg);
+        if (!dlg.length) return;
+
+        dlg.addClass('push-aurora-popup');
+        dlg.attr('data-push-popup-mode', mode);
+
+        const root = dlg.closest('.popup, .dialogue_popup, .popup_holder');
+        if (root.length) {
+            root.addClass('push-aurora-popup-shell');
+        }
+
+        const buttonMap = [
+            ['Overwrite', 'push-aurora-btn-overwrite'],
+            ['Decline', 'push-aurora-btn-decline'],
+            ['Reject', 'push-aurora-btn-decline'],
+            ['Deny', 'push-aurora-btn-decline'],
+            ['Approve', 'push-aurora-btn-approve'],
+            ['Mark Reviewed', 'push-aurora-btn-reviewed'],
+            ['Accept', 'push-aurora-btn-accept'],
+            ['Yes — Import', 'push-aurora-btn-accept'],
+            ['Yes-Import', 'push-aurora-btn-accept'],
+            ['No', 'push-aurora-btn-decline'],
+            ['Close', 'push-aurora-btn-ghost'],
+            ['Submit', 'push-aurora-btn-accept'],
+            ['Send Note', 'push-aurora-btn-accept'],
+            ['Send Admin Note', 'push-aurora-btn-accept'],
+            ['Mark Read', 'push-aurora-btn-reviewed'],
+            ['Mark Unread', 'push-aurora-btn-reviewed'],
+            ['Clear Read', 'push-aurora-btn-ghost'],
+            ['Clear Processed', 'push-aurora-btn-ghost'],
+            ['Clear All', 'push-aurora-btn-ghost'],
+            ['Delete', 'push-aurora-btn-decline'],
+        ];
+
+        dlg.find('.popup-button-ok').addClass('push-aurora-btn push-aurora-btn-primary');
+        dlg.find('.popup-button-cancel').addClass('push-aurora-btn push-aurora-btn-ghost');
+        dlg.find('.menu_button, .popup-button-custom').each(function () {
+            const button = $(this);
+            const text = String(button.text() || '').trim();
+            button.addClass('push-aurora-btn');
+            for (const [label, cls] of buttonMap) {
+                if (text === label) {
+                    button.addClass(cls);
+                    break;
+                }
+            }
+        });
+    };
+
+    decorate();
+    setTimeout(decorate, 0);
+    setTimeout(decorate, 80);
+}
+
+function renderPushTargetRail(users) {
+    if (!Array.isArray(users) || users.length === 0) {
+        return '<div class="push-ni-desc" style="padding:8px 0;">No users found.</div>';
+    }
+
+    const userCards = users.map(u => `
+        <button type="button" class="push-rail-card" data-handle="${escapeHtml(u.handle)}">
+            <i class="fa-solid fa-user"></i>
+            <span>${escapeHtml(u.name || u.handle)}</span>
+        </button>
+    `).join('');
+
+    return `
+        <div class="push-rail-shell">
+            <div class="push-rail-fade push-rail-fade-left"></div>
+            <div class="push-rail-track" data-push-rail-track="true">
+                <button type="button" class="push-rail-card push-rail-card-all on" data-push-all="true">
+                    <i class="fa-solid fa-users"></i>
+                    <span>All Users</span>
+                </button>
+                ${userCards}
+            </div>
+            <div class="push-rail-fade push-rail-fade-right"></div>
+        </div>
+    `;
+}
+
+function initPushTargetRail(dlg) {
+    const shell = $(dlg).find('.push-rail-shell');
+    const track = shell.find('.push-rail-track').get(0);
+    if (!track) return;
+
+    const view = track.ownerDocument?.defaultView || window;
+    const fadeLeft = shell.find('.push-rail-fade-left');
+    const fadeRight = shell.find('.push-rail-fade-right');
+    let isPointerDown = false;
+    let dragMoved = false;
+    let startX = 0;
+    let startScrollLeft = 0;
+
+    const updateFades = () => {
+        const maxScrollLeft = track.scrollWidth - track.clientWidth;
+        const canScroll = maxScrollLeft > 8;
+        fadeLeft.toggleClass('visible', canScroll && track.scrollLeft > 8);
+        fadeRight.toggleClass('visible', canScroll && track.scrollLeft < (maxScrollLeft - 8));
+    };
+
+    const endDrag = () => {
+        if (!isPointerDown) return;
+        isPointerDown = false;
+        track.classList.remove('push-rail-dragging');
+        view.setTimeout(() => {
+            dragMoved = false;
+        }, 0);
+    };
+
+    track.addEventListener('scroll', updateFades);
+    track.addEventListener('wheel', (event) => {
+        if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+        event.preventDefault();
+        track.scrollLeft += event.deltaY;
+    }, { passive: false });
+
+    track.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) return;
+        isPointerDown = true;
+        dragMoved = false;
+        startX = event.pageX;
+        startScrollLeft = track.scrollLeft;
+        track.classList.add('push-rail-dragging');
+        view.addEventListener('mouseup', endDrag, { once: true });
+    });
+
+    track.addEventListener('mousemove', (event) => {
+        if (!isPointerDown) return;
+        const delta = event.pageX - startX;
+        if (Math.abs(delta) > 4) {
+            dragMoved = true;
+        }
+        event.preventDefault();
+        track.scrollLeft = startScrollLeft - delta;
+    });
+
+    track.addEventListener('mouseleave', endDrag);
+
+    track.addEventListener('click', (event) => {
+        if (!dragMoved) return;
+        const button = event.target instanceof Element ? event.target.closest('.push-rail-card') : null;
+        if (button) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    }, true);
+
+    updateFades();
+    view.setTimeout(updateFades, 60);
+}
+
+async function openPushDetailModal(pushId) {
+    const detailRes = await fetch('/api/worldinfo/push-detail', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ push_id: pushId }),
+    });
+
+    if (!detailRes.ok) {
+        toastr.error(await detailRes.text() || 'Failed to load push detail', 'Push');
+        return;
+    }
+
+    const item = await detailRes.json();
+    const isChar = (item.character_files || []).length > 0;
+    const charIcon = isChar ? 'fa-user-astronaut' : 'fa-book-atlas';
+    const tagText = isChar ? 'Character' : 'Lorebook';
+    const tagClass = isChar ? 'push-tag-char' : 'push-tag-lore';
+    const titleLabel = isChar ? 'Character Update' : 'Lorebook Update';
+    const isAnnouncement = !!item.is_public_announcement;
+    const characterLabel = item.announcement_character_name || item.source_names?.character_label || item.char_label || item.pushed_lorebook_name || 'Character';
+    const cardTitle = isAnnouncement ? (item.announcement_title || 'NEW CHARACTER!! 🎉') : item.pushed_lorebook_name;
+    const cardDescription = isAnnouncement
+        ? characterLabel
+        : (item.char_label || (isChar ? 'Updated character and lorebook content.' : 'Updated world lore.'));
+    const floralCharacterLabel = `🌸 ${characterLabel} 🌸`;
+    const notesText = isAnnouncement
+        ? `<span style="font-size:20px; font-weight:bold;">NEW CHARACTER!! 🎉</span>\n<span style="font-size:20px; font-weight:bold;">${floralCharacterLabel}</span>`
+        : (item.notes || 'No notes provided.');
+    const pushedByLabel = item.pushed_by_label || item.pushed_by_name || item.creator_handle || 'User';
+    const originalCreator = item.original_creator_name || item.original_creator_handle || item.effective_creator || item.creator_handle || 'Unknown';
+    const dialogTitle = isAnnouncement ? 'Import Lorebook' : titleLabel;
+    const okLabel = 'Yes — Import';
+    const declineLabel = 'No';
+
+    const html = `
+        <div class="push-popup-layout">
+            <h3 style="margin-top:0;"><i class="fa-solid ${charIcon}" style="color:#a78bfa; font-size:14px;"></i> ${dialogTitle}</h3>
+            <div class="push-cp">
+                <div class="push-cp-av"><i class="fa-solid ${charIcon}"></i></div>
+                <div class="push-cp-info">
+                    <div class="push-cp-name" ${isAnnouncement ? 'style="font-size:20px;"' : ''}>${escapeHtml(cardTitle)} <span class="push-tag ${tagClass}">${tagText}</span></div>
+                    <div class="push-cp-by">Pushed by: ${escapeHtml(pushedByLabel)}</div>
+                    <div class="push-cp-by">Submitted by original creator: ${escapeHtml(originalCreator)}</div>
+                    <div class="push-cp-desc">${escapeHtml(cardDescription)}</div>
+                </div>
+            </div>
+            <div class="push-cl-box">
+                <div class="push-cl-title"><i class="fa-solid fa-scroll"></i> Update Notes</div>
+                <div class="push-cl-body">${isAnnouncement ? notesText.replace(/\n/g, '<br>') : escapeHtml(notesText).replace(/\n/g, '<br>')}</div>
+                ${item.version ? `<div class="push-cl-ver">Version: ${escapeHtml(item.version)}</div>` : ''}
+            </div>
+            <div class="push-warn">
+                <i class="fa-solid fa-info-circle"></i>
+                <p><strong>Yes-Import</strong> will import the character and linked lorebook. Lorebook contents will be hidden unless you are the creator or admin.</p>
+            </div>
+        </div>
+    `;
+
+    const RESULT_DECLINE = POPUP_RESULT.CUSTOM1;
+    const RESULT_CLOSE = POPUP_RESULT.CUSTOM2;
+    const customButtons = [
+        { text: declineLabel, result: RESULT_DECLINE },
+        { text: 'Close', result: RESULT_CLOSE }
+    ];
+
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
+        okButton: okLabel,
+        rows: 1,
+        wider: true,
+        customButtons,
+    });
+    decoratePushPopup(popup, 'detail');
+
+    const result = await popup.show();
+    let action = null;
+    if (result === POPUP_RESULT.AFFIRMATIVE) action = 'accept';
+    if (result === RESULT_DECLINE) action = 'decline';
+        if (result === RESULT_CLOSE) return; // Close without action
+    if (!action) return;
+
+    const actionRes = await fetch('/api/worldinfo/push-action', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ push_id: pushId, action }),
+    });
+
+    if (actionRes.ok) {
+        let actionData = null;
+        try {
+            actionData = await actionRes.json();
+        } catch {
+            // no-op
+        }
+        const resolvedAction = actionData?.action || action;
+        if (resolvedAction === 'accept' || resolvedAction === 'overwrite') {
+            const charCount = actionData?.applied?.characters?.length || 0;
+            const lorebookName = actionData?.applied?.lorebook || '';
+
+            // Success message showing what was imported
+            let successMessage = `Imported ${charCount} character(s)`;
+            if (lorebookName) {
+                successMessage += ` with lorebook: ${lorebookName}`;
+            }
+            toastr.success(successMessage, 'Import Successful', { timeOut: 5000 });
+
+            // Reload character list and world info from backend
+            await updateWorldInfoList();
+            await getCharacters();
+
+            // Auto-select the first imported character through the normal selection flow
+            // so the recipient can interact with it immediately.
+            if (actionData?.applied?.characters?.[0]) {
+                const importedFileName = actionData.applied.characters[0];
+                const charIndex = characters.findIndex(c => c.avatar === importedFileName);
+                if (charIndex >= 0) {
+                    await selectCharacterById(charIndex, { switchMenu: true });
+
+                    const character = characters[charIndex] || characters[Number(this_chid)] || null;
+                    if (!character) {
+                        return;
+                    }
+
+                    // Verify lorebook is linked
+                    const characterWorld = character?.data?.extensions?.world;
+                    const isPushedCharacter = isPushedCharacterRecord(character);
+
+                    if (isPushedCharacter && lorebookName) {
+                        // If backend didn't auto-link, link it now
+                        if (characterWorld !== lorebookName) {
+                            console.log(`[Push Import] Auto-linking "${character.name}" to lorebook "${lorebookName}"`);
+                            const characterExtensions = /** @type {any} */ (character?.data?.extensions);
+                            if (characterExtensions) {
+                                characterExtensions.world = lorebookName;
+                            }
+                        }
+                    }
+
+                    // Show world button lit up
+                    setWorldInfoButtonClass(charIndex);
+
+                    // Show toast confirming lorebook is linked
+                    if (lorebookName) {
+                        const creatorHandle = getCharacterPushExtensionBySuffix(character, 'creator');
+                        const currentHandle = getCurrentUserHandle();
+                        const creatorInfo = creatorHandle === currentHandle
+                            ? ' (visible to you)'
+                            : ' (hidden from dropdown)';
+                        toastr.info(
+                            `Lorebook "${lorebookName}"${creatorInfo} linked to "${character.name || character.data?.name || 'Character'}"`,
+                            'Lorebook Linked',
+                            { timeOut: 6000 },
+                        );
+                    }
+
+                    // Apply definition lock state for pushed characters
+                    const locked = isCharacterDefinitionLocked(character);
+                    applyCharacterDefinitionLockState(locked);
+                    ensurePushedLoreBookLinked(charIndex);
+                    checkEmbeddedWorld(charIndex);
+
+                    // Log what was imported for debugging
+                    console.log(`[Push Import] Completed:`);
+                    console.log(`  Character: "${character.name || character.data?.name}"`);
+                    console.log(`  Lorebook: "${lorebookName}"`);
+                    console.log(`  Locked: ${locked}`);
+                }
+            } else if (this_chid !== undefined && this_chid >= 0) {
+                // Fallback: re-apply to current character
+                setWorldInfoButtonClass(this_chid);
+                ensurePushedLoreBookLinked(Number(this_chid));
+            }
+        } else {
+            toastr.success(`Push ${resolvedAction} completed.`, 'Push');
+        }
+    } else {
+        let err = 'Push action failed';
+        try {
+            const errJson = await actionRes.json();
+            err = errJson?.reason || errJson?.error || err;
+        } catch {
+            err = await actionRes.text() || err;
+        }
+        toastr.error(err, 'Push');
+    }
+
+    const refreshed = await getPushNotificationState();
+    updatePushNotificationBadge(refreshed);
+}
+
+function statusTagClass(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'approved' || s === 'accepted') return 'push-tag-approved';
+    if (s === 'reviewed') return 'push-tag-reviewed';
+    if (s === 'rejected' || s === 'declined') return 'push-tag-rejected';
+    return 'push-tag-pending';
+}
+
+async function openPushNotificationsModal() {
+    const state = await getPushNotificationState();
+    updatePushNotificationBadge(state);
+
+    // Build a flat unified list of all notification items (demo pattern)
+    const rows = (state.pending || []).map(item => {
+        const isChar = item.character_files?.length > 0;
+        const icon = isChar ? 'fa-user-astronaut' : 'fa-book-atlas';
+        const tag = isChar ? 'Char' : 'Lore';
+        const tagClass = isChar ? 'push-tag-char' : 'push-tag-lore';
+        const unreadClass = item.unread ? ' unread' : '';
+        const isAnnouncement = !!item.is_public_announcement;
+        const rowTitle = isAnnouncement
+            ? (item.announcement_title || 'NEW CHARACTER!! 🎉')
+            : (item.pushed_lorebook_name || 'Notification');
+        const announcementCharacter = item.announcement_character_name || item.source_names?.character_label || 'Character';
+        const rowDesc = isAnnouncement
+            ? `🌸 ${announcementCharacter} 🌸`
+            : (item.notes || 'No notes');
+        return `
+        <div class="push-ni${unreadClass}" data-push-id="${item.push_id}">
+            <div class="push-ni-av"><i class="fa-solid ${icon}"></i></div>
+            <div class="push-ni-body">
+                <div class="push-ni-title" ${isAnnouncement ? 'style="font-size:20px; font-weight:bold;"' : ''}>${escapeHtml(rowTitle)} <span class="push-tag ${tagClass}">${tag}</span></div>
+                <div class="push-ni-desc ${isAnnouncement ? 'push-ni-desc-announce' : ''}" ${isAnnouncement ? 'style="font-size:20px; font-weight:bold;"' : ''}>${escapeHtml(rowDesc)}</div>
+                <div class="push-ni-time">${formatPushTs(item.created_at)}</div>
+            </div>
+        </div>`;
+    }).join('');
+
+    const html = `
+        <div class="push-inbox-modal push-popup-layout">
+            <h3 style="margin-top:0;"><i class="fa-solid fa-bell" style="color:#a78bfa; font-size:14px;"></i> Notifications</h3>
+            <div class="push-nl">${rows || '<div class="push-ni-desc" style="padding:12px; text-align:center;">No notifications.</div>'}</div>
+        </div>
+    `;
+
+    const RESULT_MARK_ALL_READ = POPUP_RESULT.CUSTOM1;
+    const RESULT_CLEAR_READ = POPUP_RESULT.CUSTOM2;
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        rows: 1,
+        wider: true,
+        customButtons: [
+            { text: 'Mark All Read', result: RESULT_MARK_ALL_READ },
+            { text: 'Clear Read', result: RESULT_CLEAR_READ },
+        ],
+    });
+    decoratePushPopup(popup, 'notifications');
+    const resultPromise = popup.show();
+
+    $(popup.dlg).on('click', '.push-ni[data-push-id]', async function (evt) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const pushId = $(this).data('push-id');
+        if (!pushId) return;
+        popup.complete(POPUP_RESULT.AFFIRMATIVE);
+        setTimeout(() => {
+            openPushDetailModal(pushId);
+        }, 220);
+    });
+
+    const result = await resultPromise;
+    let clearAction = null;
+    if (result === RESULT_MARK_ALL_READ) clearAction = 'mark_all_read';
+    if (result === RESULT_CLEAR_READ) clearAction = 'clear_read';
+    if (clearAction) {
+        const clearRes = await fetch('/api/worldinfo/push-notifications-clear', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ action: clearAction }),
+        });
+        if (!clearRes.ok) {
+            toastr.error(await clearRes.text() || 'Failed to clear notifications', 'Push');
+        }
+        const refreshed = await getPushNotificationState();
+        updatePushNotificationBadge(refreshed);
+    }
+}
+
+function getSubmitRenameTargetName(boundLorebook, characterName) {
+    const sourceName = String(boundLorebook || characterName || '').trim();
+    const currentHandle = String(getCurrentUserHandle() || '').trim();
+
+    if (!sourceName) return '';
+    if (sourceName.startsWith('dd-')) return sourceName;
+    if (!currentHandle) return sourceName;
+
+    const baseName = sourceName.startsWith('ADMIN-')
+        ? sourceName.substring('ADMIN-'.length).trim()
+        : sourceName;
+
+    return `dd-${currentHandle}-${baseName}`;
+}
+
+function renderPushBindingCard({
+    characterName,
+    boundLorebook,
+    renameValue = '',
+    renameInputId = '',
+    showRenameInput = false,
+}) {
+    const safeCharacterName = escapeHtml(characterName || 'Unknown');
+    const safeBoundLorebook = escapeHtml(boundLorebook || '');
+    const safeRenameValue = escapeHtml(renameValue || '');
+    const hiddenNote = boundLorebook ? '<span class="push-lb-hidden-note">~(hidden entries)~</span>' : '';
+    const bindingHtml = boundLorebook
+        ? `<div class="push-lb bound"><i class="fa-solid fa-book-atlas"></i> <span>Lorebook bound: <strong>${safeBoundLorebook}</strong> ${hiddenNote}</span></div>`
+        : '<div class="push-lb unbound"><i class="fa-solid fa-book-skull"></i> <span>No lorebook bound to this character. Submission will use the character name.</span></div>';
+
+    const renameHtml = showRenameInput
+        ? `
+            <div class="push-f push-rename-field">
+                <div class="push-fl"><i class="fa-solid fa-i-cursor"></i> Rename Lorebook Before Submission</div>
+                <input id="${renameInputId}" class="text_pole push-submit-rename" style="width:100%;" value="${safeRenameValue}" />
+            </div>
+        `
+        : '';
+
+    return `
+        <div class="push-binding-card">
+            <div class="push-binding-card-name">${safeCharacterName}</div>
+            ${bindingHtml}
+            ${renameHtml}
+        </div>
+    `;
+}
+
+async function openSubmitToAdminModal() {
+    // Build character options — show all characters, sorted alphabetically
+    const charList = (characters || []).map(c => ({
+        name: c.name || c.avatar?.replace('.png', '') || 'Unknown',
+        world: c?.data?.extensions?.world || '',
+    }));
+    charList.sort((a, b) => a.name.localeCompare(b.name));
+
+    const charOptions = charList.map(c =>
+        `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`,
+    ).join('');
+
+    const html = `
+        <div class="push-popup-layout">
+            <h3 style="margin-top:0;">Submit to Admin</h3>
+            <div class="push-f">
+                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card &amp; Lorebook <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
+                <select id="push_submit_name" class="text_pole" style="width:100%;" multiple="multiple">
+                    ${charOptions}
+                </select>
+                <div id="push_submit_lb" class="push-binding-list" style="display:none;"></div>
+                <div style="margin-top:4px;">
+                    <span id="push_submit_count" style="font-size:0.85em; opacity:0.6;">0 / 10 selected</span>
+                </div>
+            </div>
+            <div class="push-f">
+                <div class="push-fl"><i class="fa-solid fa-comment-dots"></i> Notes to Admin</div>
+                <textarea id="push_submit_notes" class="text_pole" style="width:100%; min-height:90px;" placeholder="What you changed, bugs, suggestions..."></textarea>
+            </div>
+            <div class="push-f">
+                <div class="push-fl">Priority</div>
+                <select id="push_submit_priority" class="text_pole" style="width:100%;">
+                    <option value="normal">Normal</option>
+                    <option value="low">Low \u2014 Suggestion</option>
+                    <option value="high">High \u2014 Bug fix</option>
+                </select>
+            </div>
+        </div>
+    `;
+    const RESULT_INBOX = POPUP_RESULT.CUSTOM1;
+    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', {
+        okButton: 'Submit',
+        cancelButton: 'Cancel',
+        wider: true,
+        customButtons: [{ text: 'Inbox', result: RESULT_INBOX }],
+    });
+    decoratePushPopup(popup, 'submit');
+    const dlg = popup.dlg;
+    const resultPromise = popup.show();
+
+    // Initialize Select2 searchable multi-select for character selection.
+    // dropdownParent must point to the open popup dialog so the dropdown
+    // renders INSIDE the popup instead of behind it (z-index issue).
+    const $charSelect = $(dlg).find('#push_submit_name');
+    $charSelect.select2({
+        width: '100%',
+        placeholder: '\u2014 Search and select characters \u2014',
+        searchInputPlaceholder: 'Type to filter...',
+        allowClear: true,
+        closeOnSelect: false,
+        maximumSelectionLength: 10,
+        dropdownParent: $(dlg),
+    });
+
+    const renameDrafts = new Map();
+
+    // Lorebook binding indicator — updates as selections change
+    function refreshSubmitBindings() {
+        const lbDiv = $(dlg).find('#push_submit_lb');
+        const selected = $charSelect.val() || [];
+        const count = selected.length;
+        $(dlg).find('#push_submit_count').text(`${count} / 10 selected`);
+
+        if (count === 0) {
+            lbDiv.hide().empty();
+            return;
+        }
+
+        const entries = selected.map((name, index) => {
+            const c = charList.find(x => x.name === name);
+            const world = c?.world || '';
+            const renameValue = renameDrafts.get(name) || getSubmitRenameTargetName(world, name);
+            return renderPushBindingCard({
+                characterName: name,
+                boundLorebook: world,
+                renameValue,
+                renameInputId: `push_submit_rename_${index}`,
+                showRenameInput: true,
+            });
+        });
+
+        lbDiv.show().html(entries.join(''));
+    }
+
+    $charSelect.on('change', refreshSubmitBindings);
+    $(dlg).on('input', '.push-submit-rename', function () {
+        const selectedNames = $charSelect.val() || [];
+        const renameIndex = $(this).closest('.push-binding-card').index();
+        const characterName = selectedNames[renameIndex];
+        if (!characterName) return;
+        renameDrafts.set(characterName, String($(this).val() || '').trim());
+    });
+
+    const result = await resultPromise;
+
+    // Clean up Select2 before popup removal
+    if ($charSelect.data('select2')) {
+        try { $charSelect.select2('destroy'); } catch { /* no-op */ }
+    }
+
+    if (result === RESULT_INBOX) {
+        await openUserInboxModal();
+        return;
+    }
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    const selectedNames = $charSelect.val() || [];
+    if (selectedNames.length === 0) {
+        toastr.warning('Choose at least one character before submitting.', 'Submit');
+        return;
+    }
+
+    const priority = String($(dlg).find('#push_submit_priority').val() || 'normal');
+    const notes = String($(dlg).find('#push_submit_notes').val() || '');
+
+    // Submit each selected character individually
+    let successCount = 0;
+    let failCount = 0;
+    let needsRefresh = false;
+    for (const charName of selectedNames) {
+        const charInfo = charList.find(c => c.name === charName);
+        const boundLorebook = charInfo?.world || '';
+        const submittedLorebookName = renameDrafts.get(charName) || getSubmitRenameTargetName(boundLorebook, charName);
+
+        const payload = {
+            content_type: 'character_lorebook_bundle',
+            content_name: submittedLorebookName,
+            source_lorebook_name: boundLorebook || charName,
+            character_name: charName,
+            priority,
+            notes,
+        };
+
+        try {
+            const res = await fetch('/api/worldinfo/submit', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(payload),
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                if (data?.renamed_source_lorebook) needsRefresh = true;
+                successCount++;
+            } else {
+                console.warn(`[Submit] Failed for ${charName}:`, await res.text());
+                failCount++;
+            }
+        } catch (err) {
+            console.error(`[Submit] Error for ${charName}:`, err);
+            failCount++;
+        }
+    }
+
+    if (needsRefresh) {
+        await updateWorldInfoList();
+        await getCharacters();
+    }
+
+    if (successCount > 0) {
+        toastr.success(`Submitted ${successCount} character(s) to admin inbox.${failCount > 0 ? ` (${failCount} failed)` : ''}`, 'Submit');
+    } else {
+        toastr.error('All submissions failed.', 'Submit');
+    }
+
+    const refreshed = await getPushNotificationState();
+    updatePushNotificationBadge(refreshed);
+}
+
+async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
+    const detailRes = await fetch('/api/worldinfo/admin-inbox-detail', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(itemType === 'admin_note' ? { note_id: itemId } : { submission_id: itemId }),
+    });
+
+    if (!detailRes.ok) {
+        toastr.error(await detailRes.text() || 'Failed to load inbox item', 'Admin Inbox');
+        return;
+    }
+
+    const item = await detailRes.json();
+
+    const old = document.getElementById('push_admin_submission_overlay');
+    if (old) old.remove();
+
+    const isAdminNote = item.inbox_item_type === 'admin_note';
+    const priorityLabel = { high: '\u{1F534} High \u2014 Bug fix', low: '\u{1F535} Low \u2014 Suggestion', normal: '\u{1F7E2} Normal' };
+    const isChar = item.content_type === 'character_lorebook_bundle';
+    const charIcon = isAdminNote ? 'fa-note-sticky' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
+    const tagText = isAdminNote ? 'User Note' : (isChar ? 'Character' : 'Lorebook');
+    const tagClass = isAdminNote ? 'push-tag-note' : (isChar ? 'push-tag-char' : 'push-tag-lore');
+    const cardName = isAdminNote ? `Note for ${item.target_admin || 'admin'}` : (item.content_name || 'Submission');
+    const byLine = isAdminNote
+        ? `Sent by: ${escapeHtml(item.from_name || item.from_handle || 'user')}`
+        : `Submitted by: ${escapeHtml(item.submitter_name || item.submitter_handle || 'user')}`;
+    const descText = isAdminNote
+        ? 'A user note sent directly to an admin.'
+        : (item.character_description || 'User-submitted content for review.');
+    const notesTitle = isAdminNote ? 'Message' : 'User Notes';
+    const notesBody = isAdminNote ? (item.message || 'No message provided.') : (item.notes || 'No notes provided.');
+    const replyValue = isAdminNote ? (item.admin_reply || '') : (item.reply || '');
+    const replyPlaceholder = isAdminNote ? 'Optional reply back to the user...' : 'Feedback for user...';
+    const footerButtons = isAdminNote
+        ? `
+                    <button type="button" id="push_admin_submission_reply" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-reply"></i> Reply</button>
+                    <button type="button" id="push_admin_submission_delete" class="menu_button push-aurora-btn push-aurora-btn-decline"><i class="fa-solid fa-trash"></i> Delete</button>
+                    <button type="button" id="push_admin_submission_reviewed" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-eye"></i> Reviewed</button>
+                `
+        : `
+                    <button type="button" id="push_admin_submission_deny" class="menu_button push-aurora-btn push-aurora-btn-decline"><i class="fa-solid fa-xmark"></i> Reject</button>
+                    <button type="button" id="push_admin_submission_reviewed" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-eye"></i> Reviewed</button>
+                    <button type="button" id="push_admin_submission_approve" class="menu_button push-aurora-btn push-aurora-btn-approve"><i class="fa-solid fa-check"></i> Approve</button>
+                    <button type="button" id="push_admin_submission_delete" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-trash"></i> Delete</button>
+                `;
+
+    const html = `
+        <div id="push_admin_submission_overlay" class="push-inbox-overlay">
+            <div class="push-inbox-window" role="dialog" aria-modal="true" aria-label="Submission Detail">
+                <div class="push-inbox-window-header">
+                    <h3><i class="fa-solid fa-envelope-open-text"></i> From ${escapeHtml(isAdminNote ? (item.from_handle || 'user') : (item.submitter_handle || 'user'))}</h3>
+                    <button type="button" id="push_admin_submission_close" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="push-inbox-window-body">
+                    <div class="push-cp">
+                        <div class="push-cp-av"><i class="fa-solid ${charIcon}"></i></div>
+                        <div class="push-cp-info">
+                            <div class="push-cp-name">${escapeHtml(cardName)} <span class="push-tag ${tagClass}">${tagText}</span></div>
+                            <div class="push-cp-by">${byLine}</div>
+                            <div class="push-cp-desc">${escapeHtml(descText)}</div>
+                        </div>
+                    </div>
+                    <div class="push-cl-box notes">
+                        <div class="push-cl-title"><i class="fa-solid fa-comment-dots"></i> ${notesTitle}</div>
+                        <div class="push-cl-body">${escapeHtml(notesBody)}</div>
+                        <div class="push-cl-ver">Priority: ${priorityLabel[item.priority] || escapeHtml(item.priority || 'normal')}</div>
+                    </div>
+                    <div class="push-f" style="margin-top:14px;">
+                        <div class="push-fl"><i class="fa-solid fa-reply"></i> Reply</div>
+                        <textarea id="admin_submission_reply" class="text_pole" style="width:100%; min-height:90px;" placeholder="${replyPlaceholder}">${escapeHtml(replyValue)}</textarea>
+                    </div>
+                </div>
+                <div class="push-inbox-window-footer">
+                    ${footerButtons}
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('body').append(html);
+
+    const closeOverlay = () => {
+        $('#push_admin_submission_overlay').remove();
+    };
+
+    $('#push_admin_submission_overlay').on('click', function (evt) {
+        if (evt.target && evt.target.id === 'push_admin_submission_overlay') {
+            closeOverlay();
+        }
+    });
+    $('#push_admin_submission_close').on('click', closeOverlay);
+
+    async function submitAction(action) {
+        const replyText = String($('#admin_submission_reply').val() || '');
+        if (itemType === 'admin_note' && action === 'reply' && !replyText.trim()) {
+            toastr.warning('Enter a reply before sending it.', 'Admin Inbox');
+            return;
+        }
+
+        const apiAction = itemType === 'admin_note' && action === 'reply' ? 'reviewed' : action;
+        const actionRes = await fetch('/api/worldinfo/admin-inbox-action', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(itemType === 'admin_note' ? { note_id: itemId, action: apiAction, reply: replyText } : { submission_id: itemId, action: apiAction, reply: replyText }),
+        });
+
+        if (actionRes.ok) {
+            if (action === 'approve') {
+                toastr.success('Submission Approved', 'Admin Inbox');
+                await updateWorldInfoList();
+                await getCharacters();
+            } else if (itemType === 'admin_note' && action === 'reply') {
+                toastr.success('Reply sent to user', 'Admin Inbox');
+            } else if (action === 'reject') {
+                toastr.info('Submission Rejected', 'Admin Inbox');
+            } else if (action === 'reviewed') {
+                toastr.info('Submission Marked Reviewed', 'Admin Inbox');
+            } else if (action === 'delete') {
+                toastr.success('Submission Deleted', 'Admin Inbox');
+            } else {
+                toastr.success(`Submission ${action}.`, 'Admin Inbox');
+            }
+            closeOverlay();
+            const refreshed = await getPushNotificationState();
+            updatePushNotificationBadge(refreshed);
+            return;
+        }
+
+        let err = 'Failed to update submission';
+        try {
+            const errJson = await actionRes.json();
+            err = errJson?.error || errJson?.reason || err;
+        } catch {
+            err = await actionRes.text() || err;
+        }
+        toastr.error(err, 'Admin Inbox');
+    }
+
+    $('#push_admin_submission_reply').on('click', () => { submitAction('reply'); });
+    $('#push_admin_submission_approve').on('click', () => { submitAction('approve'); });
+    $('#push_admin_submission_reviewed').on('click', () => { submitAction('reviewed'); });
+    $('#push_admin_submission_deny').on('click', () => { submitAction('reject'); });
+    $('#push_admin_submission_delete').on('click', () => { submitAction('delete'); });
+}
+
+async function openAdminInboxModal() {
+    const res = await fetch('/api/worldinfo/admin-inbox', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+    });
+
+    if (!res.ok) {
+        toastr.error(await res.text() || 'Failed to load admin inbox', 'Admin Inbox');
+        return;
+    }
+
+    const payload = await res.json();
+    const priorityDot = { high: '\u{1F534}', low: '\u{1F535}', normal: '\u{1F7E2}' };
+    const rows = (payload.items || []).map(item => {
+        const isAdminNote = item.inbox_item_type === 'admin_note';
+        const isChar = item.content_type === 'character_lorebook_bundle';
+        const icon = isAdminNote ? 'fa-note-sticky' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
+        const tag = isAdminNote ? 'Note' : (isChar ? 'Char' : 'Lore');
+        const tagClass = isAdminNote ? 'push-tag-note' : (isChar ? 'push-tag-char' : 'push-tag-lore');
+        const title = isAdminNote ? `Note from ${item.from_handle || 'user'}` : (item.content_name || 'Submission');
+        const desc = isAdminNote ? (item.message || 'No message provided.') : (item.notes || 'No notes provided.');
+        const fromHandle = isAdminNote ? (item.from_handle || 'unknown') : (item.submitter_handle || 'unknown');
+        const unreadClass = (isAdminNote ? !item.read_at : item.status === 'pending') ? 'unread' : '';
+        return `
+        <div class="push-ni ${unreadClass}" data-item-id="${escapeHtml(item.item_id || '')}" data-item-type="${escapeHtml(item.inbox_item_type || 'submission')}">
+            <div class="push-ni-av"><i class="fa-solid ${icon}"></i></div>
+            <div class="push-ni-body">
+                <div class="push-ni-title">${escapeHtml(title)} <span class="push-tag ${tagClass}">${tag}</span></div>
+                <div class="push-ni-desc">${priorityDot[item.priority] || ''} ${escapeHtml(inboxPreview(desc))}</div>
+                <div class="push-ni-desc" style="margin-top:2px"><span style="opacity:.5">From:</span> <strong>${escapeHtml(fromHandle)}</strong></div>
+                <div class="push-ni-time">${formatPushTs(item.created_at)}</div>
+            </div>
+        </div>`;
+    }).join('');
+
+    const html = `
+        <div class="push-inbox-modal push-popup-layout">
+            <h3 style="margin-top:0;"><i class="fa-solid fa-inbox" style="color:#a78bfa; font-size:14px;"></i> User Submissions</h3>
+            <div class="push-nl">${rows || '<div class="push-ni-desc" style="padding:12px; text-align:center;">No submissions.</div>'}</div>
+        </div>
+    `;
+
+    const RESULT_CLEAR_PROCESSED = POPUP_RESULT.CUSTOM1;
+    const RESULT_CLEAR_ALL = POPUP_RESULT.CUSTOM2;
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        rows: 1,
+        wider: true,
+        customButtons: [
+            { text: 'Clear Processed', result: RESULT_CLEAR_PROCESSED },
+            { text: 'Clear All', result: RESULT_CLEAR_ALL },
+        ],
+    });
+    decoratePushPopup(popup, 'inbox');
+    const resultPromise = popup.show();
+
+    $(popup.dlg).on('click', '.push-ni[data-item-id]', function (evt) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const itemId = $(this).data('item-id');
+        const itemType = $(this).data('item-type') || 'submission';
+        if (!itemId) return;
+        popup.complete(POPUP_RESULT.AFFIRMATIVE);
+        setTimeout(() => {
+            openAdminInboxDetailModal(itemId, itemType);
+        }, 220);
+    });
+
+    const result = await resultPromise;
+    if (result === RESULT_CLEAR_PROCESSED || result === RESULT_CLEAR_ALL) {
+        const clearRes = await fetch('/api/worldinfo/admin-inbox-clear', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ action: result === RESULT_CLEAR_ALL ? 'clear_all' : 'clear_processed' }),
+        });
+        if (!clearRes.ok) {
+            toastr.error(await clearRes.text() || 'Failed to clear admin inbox', 'Admin Inbox');
+        }
+    }
+
+    const refreshed = await getPushNotificationState();
+    updatePushNotificationBadge(refreshed);
+}
+
+async function openTopbarPushModal() {
+    if (!isAdmin()) {
+        toastr.warning('Only admins can queue pushes.', 'Push');
+        return;
+    }
+
+    let users = [];
+    try {
+        const allUsers = await fetchPushBotUsers();
+        users = allUsers.filter(u => u.handle !== getCurrentUserHandle())
+            .sort((a, b) => (a.handle || '').localeCompare(b.handle || ''));
+    } catch {
+        // no-op
+    }
+
+    // Build character options — only those with a bound lorebook
+    const charList = (characters || [])
+        .filter(c => c?.data?.extensions?.world)
+        .map(c => ({
+            name: c.name || c.avatar?.replace('.png', '') || 'Unknown',
+            world: c.data.extensions.world,
+        }));
+    charList.sort((a, b) => a.name.localeCompare(b.name));
+
+    const charOptions = charList.map(c =>
+        `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`,
+    ).join('');
+
+    const userRail = renderPushTargetRail(users);
+
+    const html = `
+        <div class="push-popup-layout">
+            <div class="push-f">
+                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card &amp; Lorebook <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
+                <select id="topbar_push_book" class="text_pole" style="width:100%;" multiple="multiple">
+                    ${charOptions}
+                </select>
+                <div id="topbar_push_lb" class="push-binding-list" style="display:none;"></div>
+                <div style="margin-top:4px;">
+                    <span id="topbar_push_count" style="font-size:0.85em; opacity:0.6;">0 / 10 selected</span>
+                </div>
+            </div>
+            <div class="push-f">
+                <div class="push-fl">Push To</div>
+                ${userRail}
+            </div>
+            <div class="push-f">
+                <div class="push-fl">Update Notes</div>
+                <textarea id="topbar_push_notes" class="text_pole" style="width:100%; min-height:90px;" placeholder="What changed..."></textarea>
+            </div>
+            <div class="push-f">
+                <div class="push-fl">Version</div>
+                <input id="topbar_push_version" class="text_pole" style="width:100%;" placeholder="e.g. v2.1" />
+            </div>
+        </div>
+    `;
+
+    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', { okButton: 'Push Now', cancelButton: 'Cancel', wider: true });
+    decoratePushPopup(popup, 'queue');
+    const dlg = popup.dlg;
+    const resultPromise = popup.show();
+
+    // Initialize Select2 searchable multi-select for character selection.
+    // dropdownParent must point to the open popup dialog so the dropdown
+    // renders INSIDE the popup instead of behind it (z-index issue).
+    const $charSelect = $(dlg).find('#topbar_push_book');
+    $charSelect.select2({
+        width: '100%',
+        placeholder: '\u2014 Search and select characters \u2014',
+        searchInputPlaceholder: 'Type to filter...',
+        allowClear: true,
+        closeOnSelect: false,
+        maximumSelectionLength: 10,
+        dropdownParent: $(dlg),
+    });
+
+    initPushTargetRail(dlg);
+
+    // Lorebook binding indicator — updates as selections change
+    function refreshPushBindings() {
+        const lbDiv = $(dlg).find('#topbar_push_lb');
+        const selected = $charSelect.val() || [];
+        const count = selected.length;
+        $(dlg).find('#topbar_push_count').text(`${count} / 10 selected`);
+
+        if (count === 0) {
+            lbDiv.hide().empty();
+            return;
+        }
+
+        const boundEntries = selected.map(name => {
+            const char = charList.find(c => c.name === name);
+            if (!char) return null;
+            return renderPushBindingCard({
+                characterName: char.name,
+                boundLorebook: char.world,
+                showRenameInput: false,
+            });
+        }).filter(Boolean);
+
+        lbDiv.show().html(boundEntries.join(''));
+    }
+
+    $charSelect.on('change', refreshPushBindings);
+
+    $(popup.dlg).on('click', '.push-rail-card-all', function () {
+        $(popup.dlg).find('.push-rail-card').removeClass('on');
+        $(this).addClass('on');
+    });
+    $(popup.dlg).on('click', '.push-rail-card[data-handle]', function () {
+        $(popup.dlg).find('.push-rail-card-all').removeClass('on');
+        $(this).toggleClass('on');
+        const selectedCount = $(popup.dlg).find('.push-rail-card[data-handle].on').length;
+        if (selectedCount === 0) {
+            $(popup.dlg).find('.push-rail-card-all').addClass('on');
+        }
+    });
+
+    const result = await resultPromise;
+
+    // Clean up Select2 before popup removal
+    if ($charSelect.data('select2')) {
+        try { $charSelect.select2('destroy'); } catch { /* no-op */ }
+    }
+
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    const targets = $(dlg).find('.push-rail-card-all').hasClass('on')
+        ? users.map(u => u.handle)
+        : $(dlg).find('.push-rail-card[data-handle].on').map(function () {
+            return $(this).data('handle');
+        }).get();
+
+    const selectedNames = $charSelect.val() || [];
+    if (selectedNames.length === 0 || targets.length === 0) {
+        toastr.warning('Choose at least one character and one target user.', 'Push');
+        return;
+    }
+
+    // Collect unique lorebook names from selected characters
+    const selectedWorlds = [...new Set(
+        selectedNames.map(name => {
+            const c = charList.find(x => x.name === name);
+            return c?.world || '';
+        }).filter(Boolean),
+    )];
+
+    if (selectedWorlds.length === 0) {
+        toastr.warning('Selected characters have no bound lorebooks.', 'Push');
+        return;
+    }
+
+    const notes = String($(dlg).find('#topbar_push_notes').val() || '').trim();
+    const version = String($(dlg).find('#topbar_push_version').val() || '').trim();
+
+    // Use bulk-push endpoint for multi-character support
+    toastr.info(`Pushing ${selectedWorlds.length} lorebook(s) + characters to ${targets.length} user(s)\u2026`, 'Push');
+    try {
+        const pushRes = await fetch('/api/worldinfo/bulk-push', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ lorebooks: selectedWorlds, targets, notes, version }),
+        });
+        if (pushRes.ok) {
+            const { results: bulkResults } = await pushRes.json();
+            const msgs = [];
+            for (const r of bulkResults) {
+                const parts = [];
+                if (r.queued?.length) parts.push(`${r.queued.length} queued`);
+                if (r.failed?.length) parts.push(`${r.failed.length} failed`);
+                msgs.push(`<b>${escapeHtml(r.lorebook)}</b>: ${parts.join(', ') || 'done'}`);
+            }
+            const detailedFailures = formatDetailedPushFailures(bulkResults);
+            if (msgs.length > 0) {
+                toastr.success(msgs.join('<br>'), 'Push Complete', { timeOut: 8000, escapeHtml: false });
+            }
+            if (detailedFailures.length > 0) {
+                toastr.error(detailedFailures.join('<br>'), 'Push Failed', { timeOut: 12000, escapeHtml: false, closeButton: true });
+            }
+        } else {
+            toastr.error(await pushRes.text() || 'Push failed', 'Push Failed', { timeOut: 12000, closeButton: true });
+        }
+    } catch (err) {
+        toastr.error(String(err), 'Push Error', { timeOut: 12000, closeButton: true });
+    }
+}
+
+
+async function runPushWorkflowDiagnostics() {
+    const checks = [];
+
+    async function probe(name, routePath, expectedStatus = 200, body = {}) {
+        try {
+            const res = await fetch(routePath, {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(body),
+            });
+            const ok = res.status === expectedStatus;
+            checks.push({ name, ok, detail: `status ${res.status} (expected ${expectedStatus})` });
+        } catch (err) {
+            checks.push({ name, ok: false, detail: String(err?.message || err) });
+        }
+    }
+
+    await probe('Push Notifications API', '/api/worldinfo/push-notifications', 200);
+    await probe('User Inbox API', '/api/worldinfo/user-inbox', 200);
+    await probe('Admin Handles API', '/api/worldinfo/admin-handles', 200);
+
+    if (isAdmin()) {
+        await probe('Admin Inbox API', '/api/worldinfo/admin-inbox', 200);
+    } else {
+        await probe('Admin Inbox Access Control', '/api/worldinfo/admin-inbox', 403);
+    }
+
+    checks.push({ name: 'Topbar Push Button', ok: $('#topbar_push').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar Inbox Button', ok: $('#topbar_push_inbox').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar Admin Note Button', ok: $('#topbar_admin_note').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar Submit Button', ok: $('#topbar_submit').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar User Admin Note Button', ok: $('#topbar_user_admin_note').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar Notifications Button', ok: $('#topbar_push_notifs').length === 1, detail: 'DOM present' });
+    checks.push({ name: 'Topbar Diagnostics Button', ok: $('#topbar_push_diag').length === 1, detail: 'DOM present' });
+
+    const passCount = checks.filter(x => x.ok).length;
+    const failCount = checks.length - passCount;
+
+    const rows = checks.map(c => `
+        <div class="push-flow-row" style="cursor:default;">
+            <div><b>${c.ok ? 'PASS' : 'FAIL'}</b> - ${c.name}</div>
+            <div class="push-flow-meta">${c.detail}</div>
+        </div>
+    `).join('');
+
+    const html = `
+        <div style="min-width:520px;">
+            <h3 style="margin-top:0;">Push Workflow Diagnostics</h3>
+            <div class="push-flow-meta" style="margin-bottom:8px;">Passed: ${passCount} | Failed: ${failCount}</div>
+            <div class="push-flow-list">${rows}</div>
+        </div>
+    `;
+
+    const popup = new Popup(html, POPUP_TYPE.TEXT, '', { okButton: 'Close', rows: 1, wider: true });
+    decoratePushPopup(popup, 'diagnostics');
+    await popup.show();
+}
+async function setupPushWorkflowControls() {
+    const admin = isAdmin();
+    const pref = getPushUiPref();
+
+    if (!accountStorage.getItem(PUSH_UI_PREF_MIGRATION_KEY)) {
+        pref.collapsed = false;
+        pref.left = getDefaultPushUiLeft();
+        pref.top = getDefaultPushUiTop();
+        setPushUiPref(pref);
+        accountStorage.setItem(PUSH_UI_PREF_MIGRATION_KEY, '1');
+    }
+
+    // Always keep controls floating and below the topbar area.
+    pref.floating = true;
+    pref.top = Math.max(PUSH_UI_MIN_TOP, pref.top);
+
+    $('#topbar_push').toggle(admin).off('click').on('click', async () => {
+        await openTopbarPushModal();
+    });
+    $('#topbar_push_inbox').toggle(admin).off('click').on('click', async () => {
+        await openAdminInboxModal();
+    });
+    $('#topbar_admin_note').toggle(admin).off('click').on('click', async () => {
+        console.log('[AdminNote] Button clicked');
+        try {
+            await openAdminNoteModal();
+        } catch (err) {
+            console.error('[AdminNote] Error in modal:', err);
+            toastr.error(`Error: ${err.message}`, 'Admin Note');
+        }
+    });
+    $('#topbar_submit').toggle(!admin).off('click').on('click', async () => {
+        await openSubmitToAdminModal();
+    });
+
+    // Bind badge click handler once during initialization (not on every poll update)
+    const submitBadge = document.getElementById('topbar_submit_badge');
+    if (submitBadge) {
+        $(submitBadge).off('click').on('click', async (e) => {
+            e.stopPropagation();
+            await openUserInboxModal();
+        });
+    }
+
+    $('#topbar_user_admin_note').toggle(!admin).off('click').on('click', async () => {
+        try {
+            await openUserSendAdminNoteModal();
+        } catch (err) {
+            console.error('[UserAdminNote] Failed to open modal:', err);
+            toastr.error(String(err?.message || err), 'Send Note');
+        }
+    });
+
+    $('#topbar_push_notifs').show().off('click').on('click', async () => {
+        try {
+            await openPushNotificationsModal();
+        } catch (err) {
+            console.error('[PushWorkflow] Failed to open notifications modal:', err);
+            toastr.error(String(err?.message || err), 'Push Notifications');
+        }
+    });
+
+    $('#topbar_push_diag').show().off('click').on('click', async () => {
+        await runPushWorkflowDiagnostics();
+    });
+
+    $('#topbar_push_toggle').show().off('click').on('click', () => {
+        pref.collapsed = !pref.collapsed;
+        applyPushUiPref(pref);
+        setPushUiPref(pref);
+    });
+
+    $('#push_workflow_controls').off('dblclick').on('dblclick', () => {
+        const nextPref = setPushWorkflowControlsHidden(true);
+        pref.hidden = nextPref.hidden;
+        pref.left = nextPref.left;
+        pref.top = nextPref.top;
+        pref.collapsed = nextPref.collapsed;
+    });
+
+    $('#topbar_push_drag').show().off('click');
+
+    $('#topbar_push_reset').show().off('click').on('click', () => {
+        // Reset dock to default right-side position if it gets stuck.
+        pref.left = getDefaultPushUiLeft();
+        pref.top = getDefaultPushUiTop();
+        pref.floating = true;
+        applyPushUiPref(pref);
+        bindPushUiDrag(pref);
+        setPushUiPref(pref);
+        toastr.info('Push controls reset to default position', 'Push Controls', { timeOut: 2000 });
+    });
+
+    applyPushUiPref(pref);
+    bindPushUiDrag(pref);
+
+    const state = await getPushNotificationState();
+    updatePushNotificationBadge(state);
+
+    if (pushNotificationPollTimer) {
+        clearInterval(pushNotificationPollTimer);
+    }
+    pushNotificationPollTimer = setInterval(async () => {
+        const polledState = await getPushNotificationState();
+        updatePushNotificationBadge(polledState);
+    }, 30000);
 }
