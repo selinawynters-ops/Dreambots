@@ -1,0 +1,55 @@
+/* iOS-only fixes for top-bar drawer tap reliability.
+ *
+ * Purpose
+ * -------
+ * On iOS Safari (and iOS Chrome, which uses WebKit), tapping the icons in
+ * #top-settings-holder did nothing — the .drawer-toggle element that
+ * receives the delegated click handler in script.js
+ * ($(document).on('click', '.drawer-toggle', doNavbarIconClick)) had no
+ * cursor: pointer and no touch-action. iOS Safari refuses to synthesize a
+ * click event for non-anchor, non-button elements lacking one of those
+ * cues, so taps were silently dropped.
+ *
+ * Scoping
+ * -------
+ * @supports (-webkit-touch-callout: none) only matches iOS WebKit. The
+ * -webkit-touch-callout property is NOT supported on macOS Safari or
+ * Android Chrome, so this block is iOS-exclusive without any inner
+ * @media condition.
+ *
+ * The previous inner @media (hover: none) and (pointer: coarse) was
+ * removed because iPads in desktop mode report (hover: hover) and
+ * (pointer: fine) and would not match, leaving those devices broken.
+ * The @supports gate alone is sufficient and correct for all iOS devices.
+ *
+ * What this file deliberately does NOT touch
+ * ------------------------------------------
+ * - #top-settings-holder layout: untouched, so the horizontal grid scroll
+ *   feature (side-swipe through icons when font size grows) is preserved.
+ * - Any drawer-open animation or display logic: handled by mobile-fixes.css.
+ * - browser-fixes.js / body class state: untouched.
+ * - The dead-code body.ios-safari rules in mobile-styles.css: deliberately
+ *   not activated, because they override overflow-x and would break
+ *   horizontal scrolling.
+ */
+@supports (-webkit-touch-callout: none) {
+
+    #top-settings-holder .drawer-toggle {
+        cursor: pointer;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: rgba(0, 0, 0, 0.08);
+        min-width: 44px;
+        min-height: 44px;
+        pointer-events: auto;
+        position: relative;
+        z-index: 1;
+    }
+
+    #top-settings-holder .drawer-toggle > .drawer-icon {
+        pointer-events: none;
+    }
+
+    #top-settings-holder .drawer-toggle:active > .drawer-icon {
+        opacity: 0.6;
+    }
+}

@@ -1,4 +1,5 @@
 // native node modules
+import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
 import net from 'node:net';
@@ -64,7 +65,7 @@ import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 import { router as usersPublicRouter } from './endpoints/users-public.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
 import { checkForNewContent } from './endpoints/content-manager.js';
-import { init as settingsInit } from './endpoints/settings.js';
+import { init as settingsInit, publicFontsRouter } from './endpoints/settings.js';
 import { redirectDeprecatedEndpoints, ServerStartup, setupPrivateEndpoints } from './server-startup.js';
 import { diskCache } from './endpoints/characters.js';
 import { migrateFlatSecrets } from './endpoints/secrets.js';
@@ -144,6 +145,11 @@ app.use(cookieSession({
 
 app.use(setUserDataMiddleware);
 
+// Public API - MUST be before CSRF protection so these routes bypass CSRF
+app.use('/api/users', usersPublicRouter);
+// Public fonts endpoint - must use different path to avoid conflict with private /api/settings
+app.use('/api/public', publicFontsRouter);
+
 // CSRF Protection //
 if (!cliArgs.disableCsrf) {
     const csrfSyncProtection = csrfSync({
@@ -196,6 +202,7 @@ app.get('/', cacheBuster.middleware, (request, response) => {
         return response.redirect(redirectUrl);
     }
 
+    response.setHeader('Cache-Control', 'no-store');
     return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
 });
 
@@ -213,13 +220,25 @@ app.get('/callback/:source?', (request, response) => {
 // Host login page
 app.get('/login', loginPageMiddleware);
 
+// Public status page (must remain reachable without login)
+app.get('/status', cacheBuster.middleware, (request, response) => {
+    response.setHeader('Cache-Control', 'no-store');
+    return response.sendFile('status.html', { root: path.join(serverDirectory, 'public') });
+});
+
 // Host frontend assets
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
-app.use(express.static(path.join(serverDirectory, 'public'), {}));
+app.use(express.static(path.join(serverDirectory, 'public'), {
+    setHeaders: (response, filePath) => {
+        const extension = path.extname(filePath).toLowerCase();
 
-// Public API
-app.use('/api/users', usersPublicRouter);
+        // Keep app UI assets uncached so CSS/JS fixes propagate reliably across devices.
+        if (['.css', '.js', '.mjs', '.html', '.json', '.webmanifest'].includes(extension)) {
+            response.setHeader('Cache-Control', 'no-store');
+        }
+    },
+}));
 
 // Everything below this line requires authentication
 app.use(requireLoginMiddleware);

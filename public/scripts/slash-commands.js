@@ -502,6 +502,42 @@ export function initDefaultSlashCommands() {
         helpString: t`Toggle UI panels on/off`,
     }));
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'hidePUSH',
+        callback: function () {
+            if (typeof globalThis.setPushWorkflowControlsHidden === 'function') {
+                globalThis.setPushWorkflowControlsHidden(true);
+                return '';
+            }
+            const $controls = $('#push_workflow_controls');
+            if ($controls.length === 0) {
+                toastr.warning(t`Push Bot controls not found.`);
+                return '';
+            }
+            $controls.hide();
+            toastr.info(t`Push Bot controls hidden. Use /showPUSH to restore.`);
+            return '';
+        },
+        helpString: t`Hides the Push Bot system drawer contents from view. Does not disable the push system — only hides the UI controls. Useful for smaller screens.`,
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'showPUSH',
+        callback: function () {
+            if (typeof globalThis.setPushWorkflowControlsHidden === 'function') {
+                globalThis.setPushWorkflowControlsHidden(false);
+                return '';
+            }
+            const $controls = $('#push_workflow_controls');
+            if ($controls.length === 0) {
+                toastr.warning(t`Push Bot controls not found.`);
+                return '';
+            }
+            $controls.show();
+            toastr.info(t`Push Bot controls visible.`);
+            return '';
+        },
+        helpString: t`Shows the Push Bot system drawer contents after being hidden with /hidePUSH. Does not enable/disable the push system — only restores visibility of the UI controls.`,
+    }));
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'forcesave',
         callback: async function () {
             await saveSettings();

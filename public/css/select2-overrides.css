@@ -204,6 +204,14 @@
     display: none;
 }
 
+/* Single-select lorebook dropdowns: suppress checkboxes (only appropriate for multi-select) */
+.wi-lorebook-single .select2-results__option::before {
+    display: none;
+}
+.wi-lorebook-single .select2-results__option {
+    padding-left: 6px;
+}
+
 .select2-selection__choice__display {
     /* Fix weird alignment of the inside block */
     margin-left: 3px;

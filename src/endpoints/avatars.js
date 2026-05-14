@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import express from 'express';
 import sanitize from 'sanitize-filename';
 import { Jimp } from '../jimp.js';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import writeFileAtomic from 'write-file-atomic';
 
-import { getImages, tryParse } from '../util.js';
+import { getImagesAsync, tryParse } from '../util.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { applyAvatarCropResize } from './characters.js';
 import { invalidateThumbnail } from './thumbnails.js';
@@ -14,12 +14,17 @@ import cacheBuster from '../middleware/cacheBuster.js';
 
 export const router = express.Router();
 
-router.post('/get', function (request, response) {
-    const images = getImages(request.user.directories.avatars);
-    response.send(images);
+router.post('/get', async function (request, response) {
+    try {
+        const images = await getImagesAsync(request.user.directories.avatars);
+        response.send(images);
+    } catch (err) {
+        console.error('Error getting avatar images:', err);
+        response.sendStatus(500);
+    }
 });
 
-router.post('/delete', getFileNameValidationFunction('avatar'), function (request, response) {
+router.post('/delete', getFileNameValidationFunction('avatar'), async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
     if (request.body.avatar !== sanitize(request.body.avatar)) {
@@ -29,13 +34,14 @@ router.post('/delete', getFileNameValidationFunction('avatar'), function (reques
 
     const fileName = path.join(request.user.directories.avatars, sanitize(request.body.avatar));
 
-    if (fs.existsSync(fileName)) {
-        fs.unlinkSync(fileName);
+    try {
+        await fs.promises.access(fileName);
+        await fs.promises.unlink(fileName);
         invalidateThumbnail(request.user.directories, 'persona', sanitize(request.body.avatar));
         return response.send({ result: 'ok' });
+    } catch {
+        return response.sendStatus(404);
     }
-
-    return response.sendStatus(404);
 });
 
 router.post('/upload', getFileNameValidationFunction('overwrite_name'), async (request, response) => {
@@ -55,8 +61,8 @@ router.post('/upload', getFileNameValidationFunction('overwrite_name'), async (r
 
         const filename = sanitize(request.body.overwrite_name || `${Date.now()}.png`);
         const pathToNewFile = path.join(request.user.directories.avatars, filename);
-        writeFileAtomicSync(pathToNewFile, image);
-        fs.unlinkSync(pathToUpload);
+        await writeFileAtomic(pathToNewFile, image);
+        await fs.promises.unlink(pathToUpload);
         return response.send({ path: filename });
     } catch (err) {
         console.error('Error uploading user avatar:', err);

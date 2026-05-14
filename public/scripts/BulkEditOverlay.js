@@ -33,7 +33,6 @@ class CharacterContextMenu {
     static tag = (selectedCharacters) => {
         characterGroupOverlay.bulkTagPopupHandler.show(selectedCharacters);
     };
-
     /**
      * Duplicate one or more characters
      *
@@ -837,31 +836,43 @@ class BulkEditOverlay {
      * @returns {Promise<number>}
      */
     handleContextMenuDelete = () => {
-        const characterIds = this.selectedCharacters;
+        const characterIds = [...this.selectedCharacters];
+        if (characterIds.length === 0) {
+            return Promise.resolve();
+        }
+
         const popupContent = $(BulkEditOverlay.#getDeletePopupContentHtml(characterIds));
         const checkbox = popupContent.find('#del_char_checkbox');
-        const promise = callGenericPopup(popupContent, POPUP_TYPE.CONFIRM)
+        const entities = characterIds.map(id => characterToEntity(characters[id], id)).filter(entity => entity.item !== undefined);
+        popupContent.find('#bulk_delete_avatars_block').each(function () {
+            buildAvatarList($(this), entities);
+        });
+
+        return callGenericPopup(popupContent, POPUP_TYPE.CONFIRM)
             .then((accept) => {
                 if (!accept) return;
 
                 const deleteChats = checkbox.prop('checked') ?? false;
 
+                // Delete each selected character individually to properly handle their chat conversations
                 showLoader();
                 const toast = toastr.info('We\'re deleting your characters, please wait...', 'Working on it');
-                const avatarList = characterIds.map(id => characters[id]?.avatar).filter(a => a);
-                return CharacterContextMenu.delete(avatarList, deleteChats)
+
+                const deletePromises = characterIds.map(id => {
+                    const character = characters[id];
+                    if (!character?.avatar) return Promise.resolve();
+                    return CharacterContextMenu.delete([character.avatar], deleteChats);
+                });
+
+                return Promise.all(deletePromises)
+                    .then(() => getCharacters())
+                    .then(() => printCharactersDebounced())
                     .then(() => this.browseState())
                     .finally(() => {
                         toastr.clear(toast);
                         hideLoader();
                     });
             });
-
-        // At this moment the popup is already changed in the dom, but not yet closed/resolved. We build the avatar list here
-        const entities = characterIds.map(id => characterToEntity(characters[id], id)).filter(entity => entity.item !== undefined);
-        buildAvatarList($('#bulk_delete_avatars_block'), entities);
-
-        return promise;
     };
 
     /**

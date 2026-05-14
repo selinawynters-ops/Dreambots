@@ -16,6 +16,7 @@ import {
 import { forwardFetchResponse, trimV1, getConfigValue } from '../../util.js';
 import { setAdditionalHeaders } from '../../additional-headers.js';
 import { createHash } from 'node:crypto';
+import { applyHiddenLoreContextToRequest, setHiddenLoreActivationHeader } from '../hidden-lore.js';
 
 export const router = express.Router();
 
@@ -273,6 +274,9 @@ router.post('/generate', async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
     try {
+        const { activatedWorlds } = await applyHiddenLoreContextToRequest(request);
+        setHiddenLoreActivationHeader(response, activatedWorlds);
+
         if (request.body.api_server.indexOf('localhost') !== -1) {
             request.body.api_server = request.body.api_server.replace('localhost', '127.0.0.1');
         }

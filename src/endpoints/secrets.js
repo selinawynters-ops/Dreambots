@@ -66,6 +66,8 @@ export const SECRET_KEYS = {
     ZAI: 'api_key_zai',
     SILICONFLOW: 'api_key_siliconflow',
     ELEVENLABS: 'api_key_elevenlabs',
+    NAVY: 'api_key_navy',
+    ROUTEWAY: 'api_key_routeway',
 };
 
 /**

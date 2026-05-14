@@ -51,7 +51,7 @@
             background-color: rgb(36, 36, 37);
         }
     </style>
-    <link rel="preload" as="style" href="style.css">
+    <link rel="preload" as="style" href="style.css?v=20260420b">
     <link rel="manifest" crossorigin="use-credentials" href="manifest.json">
     <link href="webfonts/NotoSans/stylesheet.css" rel="stylesheet">
     <link href="webfonts/NotoSansMono/stylesheet.css" rel="stylesheet">
@@ -67,23 +67,26 @@
     <link rel="apple-touch-icon" sizes="72x72" href="img/apple-icon-72x72.png" />
     <link rel="apple-touch-icon" sizes="114x114" href="img/apple-icon-114x114.png" />
     <link rel="apple-touch-icon" sizes="144x144" href="img/apple-icon-144x144.png" />
-    <link rel="stylesheet" type="text/css" href="style.css">
+    <link rel="stylesheet" type="text/css" href="style.css?v=20260420b">
     <link rel="stylesheet" type="text/css" href="css/st-tailwind.css">
     <link rel="stylesheet" type="text/css" href="css/rm-groups.css">
     <link rel="stylesheet" type="text/css" href="css/group-avatars.css">
-    <link rel="stylesheet" type="text/css" href="css/toggle-dependent.css">
+    <link rel="stylesheet" type="text/css" href="css/toggle-dependent.css?v=20260420b">
     <link rel="stylesheet" type="text/css" href="css/world-info.css">
     <link rel="stylesheet" type="text/css" href="css/extensions-panel.css">
     <link rel="stylesheet" type="text/css" href="css/select2-overrides.css">
-    <link rel="stylesheet" type="text/css" href="css/mobile-styles.css">
+    <link rel="stylesheet" type="text/css" href="css/mobile-styles.css?v=20260507">
+    <link rel="stylesheet" type="text/css" href="css/mobile-fixes.css?v=20260512">
+    <link rel="stylesheet" type="text/css" href="css/ios-fixes.css?v=20260512">
     <link rel="stylesheet" type="text/css" href="css/macros.css">
     <link rel="stylesheet" type="text/css" href="css/user.css">
+    <link rel="stylesheet" type="text/css" href="css/fonts.css">
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <!-- Scripts are loaded at the end of the body to improve page load speed -->
 </head>
 
 <body class="no-blur">
-    <div id="preloader"></div>
+    <div id="preloader" aria-hidden="true"></div>
     <div id="bg1"></div>
     <div id="character_context_menu" class="hidden">
         <ul>
@@ -93,9 +96,6 @@
             <li><button id="character_context_menu_persona" data-i18n="Persona">Persona</button></li>
             <li><button id="character_context_menu_delete" data-i18n="Delete">Delete</button></li>
         </ul>
-    </div>
-    <!-- top bar central settings buttons -->
-    <div id="top-bar">
     </div>
     <div id="top-settings-holder">
         <!-- background selection menu -->
@@ -713,6 +713,12 @@
                                 <div data-source="electronhub">
                                     <span data-i18n="Max prompt cost:">Max prompt cost:</span> <span id="electronhub_max_prompt_cost" data-i18n="Unknown">Unknown</span>
                                 </div>
+                                <div data-source="navy">
+                                    <span data-i18n="Max prompt cost:">Max prompt cost:</span> <span id="navy_max_prompt_cost" data-i18n="Unknown">Unknown</span>
+                                </div>
+                                <div data-source="routeway">
+                                    <span data-i18n="Max prompt cost:">Max prompt cost:</span> <span id="routeway_max_prompt_cost" data-i18n="Unknown">Unknown</span>
+                                </div>
                                 <div data-source="chutes">
                                     <span data-i18n="Max prompt cost:">Max prompt cost:</span> <span id="chutes_max_prompt_cost" data-i18n="Unknown">Unknown</span>
                                 </div>
@@ -731,7 +737,7 @@
                                         </span>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
+                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,navy,routeway,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
                                     <div class="range-block-title" data-i18n="Temperature">
                                         Temperature
                                     </div>
@@ -744,7 +750,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
+                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,navy,routeway,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
                                     <div class="range-block-title" data-i18n="Frequency Penalty">
                                         Frequency Penalty
                                     </div>
@@ -757,7 +763,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
+                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,navy,routeway,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
                                     <div class="range-block-title" data-i18n="Presence Penalty">
                                         Presence Penalty
                                     </div>
@@ -770,7 +776,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="claude,aimlapi,openrouter,makersuite,vertexai,cohere,perplexity,electronhub,chutes,nanogpt">
+                                <div class="range-block" data-source="claude,aimlapi,openrouter,makersuite,vertexai,cohere,perplexity,electronhub,navy,routeway,chutes,nanogpt">
                                     <div class="range-block-title" data-i18n="Top K">
                                         Top K
                                     </div>
@@ -783,7 +789,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
+                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,navy,routeway,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
                                     <div class="range-block-title" data-i18n="Top P">
                                         Top P
                                     </div>
@@ -1020,7 +1026,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,openrouter,mistralai,custom,cohere,groq,electronhub,chutes,nanogpt,xai,pollinations,aimlapi,makersuite,vertexai,azure_openai">
+                                <div class="range-block" data-source="openai,openrouter,mistralai,custom,cohere,groq,electronhub,navy,routeway,chutes,nanogpt,xai,pollinations,aimlapi,makersuite,vertexai,azure_openai">
                                     <div class="range-block-title justifyLeft" data-i18n="Seed">
                                         Seed
                                     </div>
@@ -1994,7 +2000,7 @@
                                             </span>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="makersuite,vertexai,aimlapi,openrouter,claude,xai,electronhub,chutes,nanogpt">
+                                    <div class="range-block" data-source="makersuite,vertexai,aimlapi,openrouter,claude,xai,electronhub,navy,routeway,chutes,nanogpt">
                                         <label for="openai_enable_web_search" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_enable_web_search" type="checkbox" />
                                             <span data-i18n="Enable web search">Enable web search</span>
@@ -2008,7 +2014,7 @@
                                             </b>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="openai,cohere,mistralai,custom,claude,aimlapi,openrouter,groq,siliconflow,deepseek,makersuite,vertexai,ai21,xai,pollinations,moonshot,fireworks,cometapi,electronhub,chutes,azure_openai,zai">
+                                    <div class="range-block" data-source="openai,cohere,mistralai,custom,claude,aimlapi,openrouter,groq,siliconflow,deepseek,makersuite,vertexai,ai21,xai,pollinations,moonshot,fireworks,cometapi,electronhub,navy,routeway,chutes,azure_openai,zai">
                                         <label for="openai_function_calling" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_function_calling" type="checkbox" />
                                             <span data-i18n="Enable function calling">Enable function calling</span>
@@ -2023,7 +2029,7 @@
                                             <strong data-i18n="enable_functions_desc_4">Not supported when Prompt Post-Processing with "no tools" is used!</strong>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="openai,aimlapi,openrouter,mistralai,makersuite,vertexai,claude,custom,xai,pollinations,moonshot,cohere,cometapi,nanogpt,electronhub,azure_openai,zai,siliconflow,chutes">
+                                    <div class="range-block" data-source="openai,aimlapi,openrouter,mistralai,makersuite,vertexai,claude,custom,xai,pollinations,moonshot,cohere,cometapi,nanogpt,electronhub,navy,routeway,azure_openai,zai,siliconflow,chutes">
                                         <label for="openai_media_inlining" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_media_inlining" type="checkbox" />
                                             <span data-i18n="Send inline media">Send inline media</span>
@@ -2047,7 +2053,7 @@
                                             <strong data-source="makersuite,vertexai" data-i18n="video_inlining_hint_4">Videos must be less than 20 MB and under 1 minute long.</strong>
                                             <strong data-source="makersuite,vertexai" data-i18n="audio_inlining_hint_2">Audio must be less than 20 MB.</strong>
                                         </div>
-                                        <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,xai,pollinations,cohere,cometapi,nanogpt,moonshot,aimlapi,openrouter,mistralai,electronhub,azure_openai,zai,siliconflow,chutes,makersuite,vertexai">
+                                        <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,xai,pollinations,cohere,cometapi,nanogpt,moonshot,aimlapi,openrouter,mistralai,electronhub,navy,routeway,azure_openai,zai,siliconflow,chutes,makersuite,vertexai">
                                             <div class="flex-container oneline-dropdown">
                                                 <label for="openai_inline_image_quality" data-i18n="Inline Image Quality">
                                                     Inline Image Quality
@@ -2108,7 +2114,7 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="deepseek,aimlapi,openrouter,custom,claude,xai,makersuite,vertexai,pollinations,moonshot,mistralai,fireworks,cometapi,electronhub,chutes,azure_openai,nanogpt,zai">
+                                    <div class="range-block" data-source="deepseek,aimlapi,openrouter,custom,claude,xai,makersuite,vertexai,pollinations,moonshot,mistralai,fireworks,cometapi,electronhub,navy,routeway,chutes,azure_openai,nanogpt,zai">
                                         <label for="openai_show_thoughts" class="checkbox_label widthFreeExpand">
                                             <input id="openai_show_thoughts" type="checkbox" />
                                             <span data-i18n="Request model reasoning">Request model reasoning</span>
@@ -2122,7 +2128,7 @@
                                             </strong>
                                         </div>
                                     </div>
-                                    <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,claude,xai,makersuite,vertexai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,azure_openai,chutes">
+                                    <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,claude,xai,makersuite,vertexai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,navy,routeway,azure_openai,chutes">
                                         <div class="flex-container oneline-dropdown" title="Constrains effort on reasoning for reasoning models.&#10;Reducing reasoning effort can result in faster responses and fewer tokens used on reasoning in a response." data-i18n="[title]Constrains effort on reasoning for reasoning models.">
                                             <label for="openai_reasoning_effort">
                                                 <span data-i18n="Reasoning Effort">Reasoning Effort</span>
@@ -2870,10 +2876,12 @@
                                 <option value="vertexai">Google Vertex AI</option>
                                 <option value="mistralai">MistralAI</option>
                                 <option value="moonshot">Moonshot AI</option>
+                                <option value="navy">Navy</option>
                                 <option value="nanogpt">NanoGPT</option>
                                 <option value="openrouter">OpenRouter</option>
                                 <option value="perplexity">Perplexity</option>
                                 <option value="pollinations">Pollinations</option>
+                                <option value="routeway">Routeway.ai</option>
                                 <option value="siliconflow">SiliconFlow</option>
                                 <option value="xai">xAI (Grok)</option>
                                 <option value="zai">Z.AI (GLM)</option>
@@ -3536,6 +3544,88 @@
                                                     Put OpenAI models in one group, Anthropic models in other group, etc. Can be combined with sorting.
                                                 </span>
                                             </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="navy_form" data-source="navy">
+                            <h4 data-i18n="Navy API Key">Navy API Key</h4>
+                            <div class="flex-container">
+                                <input id="api_key_navy" name="api_key_navy" class="text_pole flex1" value="" type="text" autocomplete="off">
+                                <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_navy"></div>
+                            </div>
+                            <div data-for="api_key_navy" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
+                                For privacy reasons, your API key will be hidden after you click 'Connect'.
+                            </div>
+                            <div>
+                                <h4 data-i18n="Navy Model">Navy Model</h4>
+                                <select id="model_navy_select">
+                                    <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
+                                </select>
+                            </div>
+                            <div class="marginTopBot5">
+                                <div class="inline-drawer wide100p">
+                                    <div class="inline-drawer-toggle inline-drawer-header">
+                                        <b data-i18n="Navy Model Sorting">Navy Model Sorting</b>
+                                        <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
+                                    </div>
+                                    <div class="inline-drawer-content m-b-1">
+                                        <div class="marginTopBot5">
+                                            <label for="navy_sort_models" class="checkbox_label">
+                                                <select id="navy_sort_models">
+                                                    <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
+                                                    <option data-i18n="Context Size" value="context_length">Context Size</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                        <div class="marginTopBot5">
+                                            <label for="navy_group_models" class="checkbox_label">
+                                                <input id="navy_group_models" type="checkbox" />
+                                                <span data-i18n="Group by vendors">Group by vendors</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="routeway_form" data-source="routeway">
+                            <h4><a href="https://routeway.ai/models" target="_blank" rel="noopener noreferrer" data-i18n="Routeway.ai API Key">Routeway.ai API Key</a></h4>
+                            <div class="flex-container">
+                                <input id="api_key_routeway" name="api_key_routeway" class="text_pole flex1" value="" type="text" autocomplete="off">
+                                <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_routeway"></div>
+                            </div>
+                            <div data-for="api_key_routeway" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
+                                For privacy reasons, your API key will be hidden after you click 'Connect'.
+                            </div>
+                            <div>
+                                <h4 data-i18n="Routeway.ai Model">Routeway.ai Model</h4>
+                                <select id="model_routeway_select">
+                                    <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
+                                </select>
+                            </div>
+                            <div class="marginTopBot5">
+                                <div class="inline-drawer wide100p">
+                                    <div class="inline-drawer-toggle inline-drawer-header">
+                                        <b data-i18n="Routeway.ai Model Sorting">Routeway.ai Model Sorting</b>
+                                        <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
+                                    </div>
+                                    <div class="inline-drawer-content m-b-1">
+                                        <div class="marginTopBot5">
+                                            <label for="routeway_sort_models" class="checkbox_label">
+                                                <select id="routeway_sort_models">
+                                                    <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
+                                                    <option data-i18n="Input Price" value="pricing.input">Input Price (cheapest)</option>
+                                                    <option data-i18n="Output Price" value="pricing.output">Output Price (cheapest)</option>
+                                                    <option data-i18n="Context Size" value="context_length">Context Size</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                        <div class="marginTopBot5">
+                                            <label for="routeway_group_models" class="checkbox_label">
+                                                <input id="routeway_group_models" type="checkbox" />
+                                                <span data-i18n="Group by vendors">Group by vendors</span>
+                                            </label>
                                         </div>
                                     </div>
                                 </div>
@@ -4776,6 +4866,10 @@
                                 <i class="fa-fw fa-solid fa-user-tie"></i>
                                 <span data-i18n="Admin Panel">Admin Panel</span>
                             </div>
+                            <div id="sync_manager_button" class="margin0 menu_button_icon menu_button">
+                                <i class="fa-fw fa-solid fa-arrows-rotate"></i>
+                                <span data-i18n="Sync Manager">Sync Manager</span>
+                            </div>
                             <div id="logout_button" class="margin0 menu_button_icon menu_button">
                                 <i class="fa-fw fa-solid fa-right-from-bracket"></i>
                                 <span data-i18n="Logout">Logout</span>
@@ -4942,6 +5036,82 @@
                                     </small>
                                     <input class="neo-range-slider" type="range" id="shadow_width" name="shadow_width" min="0" max="5" step="1">
                                     <input class="neo-range-input" type="number" min="0" max="5" step="1" data-for="shadow_width" id="shadow_width_counter">
+                                </div>
+                            </div>
+                            <hr>
+                            <div name="FontSettingsBlock">
+                                <div class="inline-drawer">
+                                    <div class="inline-drawer-toggle inline-drawer-header">
+                                        <span data-i18n="Font Settings">Font Settings</span>
+                                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                                    </div>
+                                    <div class="inline-drawer-content">
+                                        <!-- Main Font -->
+                                        <div class="flex-container flexFlowColumn gap0">
+                                            <label for="font_family_picker"><small data-i18n="Font Style">Font Style</small> <div class="fa-solid fa-circle-info opacity50p" title="Font for the main chat interface" data-i18n="[title]Font for the main chat interface"></div></label>
+                                            <div id="font_family_picker" class="font-picker">
+                                                <div id="font_family_selected" class="font-picker-selected"></div>
+                                                <div id="font_family_dropdown" class="font-picker-dropdown">
+                                                    <input id="font_family_search" class="text_pole" type="text" placeholder="Search fonts..." />
+                                                    <div id="font_family_list" class="font-picker-list"></div>
+                                                </div>
+                                            </div>
+                                            <div id="font_family_preview" class="font-preview-text">The quick brown fox jumps over the lazy dog</div>
+                                            <div id="font_family_label"></div>
+                                        </div>
+                                        <div class="flex-container alignitemscenter gap0">
+                                            <small data-i18n="Main Font Size Adjust">Main Font Size Adjust</small>
+                                            <div class="fa-solid fa-circle-info opacity50p" title="Adjust the main font size in pixels" data-i18n="[title]Adjust the main font size in pixels"></div>
+                                        </div>
+                                        <div class="flex-container font-size-adjust-row">
+                                            <input class="neo-range-slider" type="range" id="font_style_size_adjust_px" name="font_style_size_adjust_px" min="0" max="40" step="1">
+                                            <input class="neo-range-input" type="number" min="0" max="40" step="1" data-for="font_style_size_adjust_px" id="font_style_size_adjust_px_counter">
+                                        </div>
+                                        <hr>
+                                        <!-- User Chat Font -->
+                                        <div class="flex-container flexFlowColumn gap0">
+                                            <label for="font_family_user_picker"><small data-i18n="User Chat Font">User Chat Font</small> <div class="fa-solid fa-circle-info opacity50p" title="Font for user chat messages" data-i18n="[title]Font for user chat messages"></div></label>
+                                            <div id="font_family_user_picker" class="font-picker">
+                                                <div id="font_family_user_selected" class="font-picker-selected"></div>
+                                                <div id="font_family_user_dropdown" class="font-picker-dropdown">
+                                                    <input id="font_family_user_search" class="text_pole" type="text" placeholder="Search fonts..." />
+                                                    <div id="font_family_user_list" class="font-picker-list"></div>
+                                                </div>
+                                            </div>
+                                            <div id="font_family_user_preview" class="font-preview-text">You: The quick brown fox jumps over the lazy dog</div>
+                                            <div id="font_family_user_label"></div>
+                                        </div>
+                                        <div class="flex-container alignitemscenter gap0">
+                                            <small data-i18n="User Chat Font Size Adjust">User Chat Font Size Adjust</small>
+                                            <div class="fa-solid fa-circle-info opacity50p" title="Adjust the user chat font size in pixels" data-i18n="[title]Adjust the user chat font size in pixels"></div>
+                                        </div>
+                                        <div class="flex-container font-size-adjust-row">
+                                            <input class="neo-range-slider" type="range" id="font_style_user_size_adjust_px" name="font_style_user_size_adjust_px" min="0" max="40" step="1">
+                                            <input class="neo-range-input" type="number" min="0" max="40" step="1" data-for="font_style_user_size_adjust_px" id="font_style_user_size_adjust_px_counter">
+                                        </div>
+                                        <hr>
+                                        <!-- Character Chat Font -->
+                                        <div class="flex-container flexFlowColumn gap0">
+                                            <label for="font_family_character_picker"><small data-i18n="Character Chat Font">Character Chat Font</small> <div class="fa-solid fa-circle-info opacity50p" title="Font for character chat messages" data-i18n="[title]Font for character chat messages"></div></label>
+                                            <div id="font_family_character_picker" class="font-picker">
+                                                <div id="font_family_character_selected" class="font-picker-selected"></div>
+                                                <div id="font_family_character_dropdown" class="font-picker-dropdown">
+                                                    <input id="font_family_character_search" class="text_pole" type="text" placeholder="Search fonts..." />
+                                                    <div id="font_family_character_list" class="font-picker-list"></div>
+                                                </div>
+                                            </div>
+                                            <div id="font_family_character_preview" class="font-preview-text" style="font-style:italic;">Character: The quick brown fox jumps over the lazy dog</div>
+                                            <div id="font_family_character_label"></div>
+                                        </div>
+                                        <div class="flex-container alignitemscenter gap0">
+                                            <small data-i18n="Character Chat Font Size Adjust">Character Chat Font Size Adjust</small>
+                                            <div class="fa-solid fa-circle-info opacity50p" title="Adjust the character chat font size in pixels" data-i18n="[title]Adjust the character chat font size in pixels"></div>
+                                        </div>
+                                        <div class="flex-container font-size-adjust-row">
+                                            <input class="neo-range-slider" type="range" id="font_style_character_size_adjust_px" name="font_style_character_size_adjust_px" min="0" max="40" step="1">
+                                            <input class="neo-range-input" type="number" min="0" max="40" step="1" data-for="font_style_character_size_adjust_px" id="font_style_character_size_adjust_px_counter">
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                             <hr>
@@ -5891,7 +6061,7 @@
                                                 <input type="hidden" id="fav_checkbox" name="fav" />
                                                 <div id="advanced_div" class="menu_button fa-solid fa-book " title="Advanced Definitions" data-i18n="[title]Advanced Definition"></div>
                                                 <div id="world_button" class="menu_button fa-solid fa-globe" title="Character Lore&#10;&#10;Click to load&#10;Shift-click to open 'Link to World Info' popup" data-i18n="[title]world_button_title"></div>
-                                                <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore&#10;Alt+Click to open the lorebook" data-i18n="[title]Chat Lore Alt+Click to open the lorebook"></div>
+                                                <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore&#10;Alt+Click to open the first visible linked lorebook" data-i18n="[title]Chat Lore Alt+Click to open the first visible linked lorebook"></div>
                                                 <div id="char_connections_button" class="menu_button fa-solid fa-face-smile" title="Connected Personas" data-i18n="[title]Connected Personas"></div>
                                                 <div id="export_button" class="menu_button fa-solid fa-file-export " title="Export and Download" data-i18n="[title]Export and Download"></div>
                                                 <!-- <div id="set_chat_character_settings" class="menu_button fa-solid fa-scroll" title="Set a chat scenario override"></div> -->
@@ -6023,6 +6193,7 @@
                                 <input id="create_date_pole" name="create_date" type="hidden">
                                 <input id="last_mes_pole" name="last_mes" type="hidden">
                                 <input id="character_world" name="world" type="hidden">
+                                <input id="character_world_unlink" name="unlink_world" type="hidden">
                             </div>
                             <!-- now back to normal divs for display purposes-->
                         </form>
@@ -7972,6 +8143,58 @@
                 <i class="fa-lg fa-solid fa-arrow-right"></i>
                 <span data-i18n="Continue">Continue</span>
             </a>
+            <hr id="option_push_separator" class="displayNone">
+            <div id="option_push_heading" class="push-drawer-heading displayNone">
+                <i class="fa-lg fa-solid fa-wand-magic-sparkles"></i>
+                <span>Push Modal</span>
+            </div>
+            <a id="option_push_queue" class="displayNone">
+                <i class="fa-lg fa-solid fa-paper-plane"></i>
+                <span>Push Queue</span>
+            </a>
+            <a id="option_push_inbox" class="displayNone push-drawer-link-badge options-link-badge">
+                <i class="fa-lg fa-solid fa-inbox"></i>
+                <span>Push Inbox</span>
+                <span id="option_admin_inbox_badge" class="push-badge options-inline-badge">0</span>
+            </a>
+            <a id="option_admin_del_mgr" class="displayNone">
+                <i class="fa-lg fa-solid fa-trash-can"></i>
+                <span>Character Deletion Manager</span>
+            </a>
+            <a id="option_admin_note" class="displayNone">
+                <i class="fa-lg fa-solid fa-pen-to-square"></i>
+                <span>Send Note</span>
+            </a>
+            <a id="option_submit_to_admin" class="displayNone">
+                <i class="fa-lg fa-solid fa-upload"></i>
+                <span>Submit to Admin</span>
+            </a>
+            <a id="option_user_inbox" class="displayNone push-drawer-link-badge options-link-badge">
+                <i class="fa-lg fa-solid fa-envelope-open-text"></i>
+                <span>Inbox</span>
+                <span id="option_submit_badge" class="push-badge options-inline-badge">0</span>
+            </a>
+            <a id="option_user_admin_note" class="displayNone">
+                <i class="fa-lg fa-solid fa-envelope"></i>
+                <span>Send Note to Admin</span>
+            </a>
+            <a id="option_del_request" class="displayNone">
+                <i class="fa-lg fa-solid fa-box-archive"></i>
+                <span>Request Character Deletion</span>
+            </a>
+            <a id="option_coauthor" class="displayNone">
+                <i class="fa-lg fa-solid fa-pen-nib"></i>
+                <span>Co-Author Station</span>
+            </a>
+            <a id="option_push_notifs" class="displayNone push-drawer-link-badge options-link-badge">
+                <i class="fa-lg fa-solid fa-bell"></i>
+                <span>Push Notifications</span>
+                <span id="option_push_notif_badge" class="push-badge options-inline-badge">0</span>
+            </a>
+            <a id="option_push_diag" class="displayNone">
+                <i class="fa-lg fa-solid fa-stethoscope"></i>
+                <span>Run Push Diagnostics</span>
+            </a>
         </div>
     </div>
 
@@ -8049,58 +8272,6 @@ document.addEventListener('DOMContentLoaded', function() {
 <script src="scripts/chunking.js"></script>
 <script type="module" src="scripts/extensions/third-party/chat-bulk-delete.js"></script>
 
-<!-- Universal Model Search Box -->
-<script>
-(function () {
-    const MODEL_SELECT_IDS = [
-        'model_novel_select', 'model_togetherai_select', 'model_infermaticai_select',
-        'model_dreamgen_select', 'model_openai_select', 'model_claude_select',
-        'model_openrouter_select', 'model_ai21_select', 'model_google_select',
-        'model_vertexai_select', 'model_mistralai_select', 'model_groq_select',
-        'model_siliconflow_select', 'model_electronhub_select', 'model_chutes_select',
-        'model_nanogpt_select', 'model_deepseek_select', 'model_fireworks_select',
-        'model_cometapi_select', 'model_perplexity_select', 'model_cohere_select',
-        'model_custom_select', 'model_xai_select', 'model_aimlapi_select',
-        'model_pollinations_select', 'model_moonshot_select', 'model_zai_select'
-    ];
-
-    function addSearchBox(selectEl) {
-        // Don't add twice
-        if (selectEl.previousElementSibling && selectEl.previousElementSibling.classList.contains('model-search-box')) return;
-        // Only add if 2+ models
-        if (selectEl.options.length < 2) return;
-
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.placeholder = '🔍 Search models...';
-        input.classList.add('model-search-box', 'text_pole');
-        input.style.cssText = 'width:100%;margin-bottom:4px;padding:4px 8px;box-sizing:border-box;';
-
-        input.addEventListener('input', function () {
-            const query = this.value.toLowerCase();
-            Array.from(selectEl.options).forEach(opt => {
-                opt.style.display = opt.text.toLowerCase().includes(query) ? '' : 'none';
-            });
-        });
-
-        selectEl.parentNode.insertBefore(input, selectEl);
-    }
-
-    function checkAll() {
-        MODEL_SELECT_IDS.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) addSearchBox(el);
-        });
-    }
-
-    // Run once on load
-    window.addEventListener('load', checkAll);
-
-    // Watch for ANY DOM change and re-check — catches dynamically loaded models
-    const observer = new MutationObserver(checkAll);
-    observer.observe(document.body, { childList: true, subtree: true });
-})();
-</script>
 
 </body>
 

@@ -1,0 +1,96 @@
+/* Combined mobile fixes loaded after mobile-styles.css */
+
+/* ---- Fix 1: iOS Safari drawers not opening at all ----
+   style.css declares `transition-property: height, display` plus
+   `transition-behavior: allow-discrete` on .drawer-content. iOS Safari
+   pre-17.4 doesn't support allow-discrete or @starting-style, and listing
+   `display` in transition-property without that feature can leave the
+   panel stuck at `display: none` even after .openDrawer is added — so no
+   drawer in #top-settings-holder opens at all on those iOS versions.
+
+   Fix: on Safari mobile, kill the transition entirely (no animation,
+   instant open/close — robust over polish) and force display + height
+   with !important on every open drawer in #top-settings-holder. We split
+   the rule because `.fillLeft`/`.fillRight` side panels need
+   `display: flex; height: 100vh` while the others need `display: block;
+   height: auto`.
+
+   Scoped to body.safari (set by browser-fixes.js) so Android is
+   completely unaffected. We do NOT touch #top-settings-holder itself, so
+   the horizontal-scroll layout used by Android stays intact. */
+@media screen and (max-width: 1000px) {
+    body.safari .drawer-content {
+        transition: none !important;
+    }
+
+    body.safari #top-settings-holder > .drawer > .drawer-content.openDrawer:not(.fillLeft):not(.fillRight) {
+        display: block !important;
+        height: auto !important;
+        max-height: calc(100vh - var(--topBarBlockSize) - var(--bottomFormBlockSize) - 6px) !important;
+        max-height: calc(100dvh - var(--topBarBlockSize) - var(--bottomFormBlockSize) - 6px) !important;
+        overflow-y: auto !important;
+    }
+
+    body.safari #top-settings-holder > .drawer > .drawer-content.openDrawer.fillLeft,
+    body.safari #top-settings-holder > .drawer > .drawer-content.openDrawer.fillRight {
+        display: flex !important;
+        height: calc(100vh - var(--topBarBlockSize)) !important;
+        height: calc(100dvh - var(--topBarBlockSize)) !important;
+    }
+}
+
+/* ---- Fix 1 (CSS-only fallback) ----
+   Same drawer-open/transition fixes as Fix 1 above, re-expressed with a
+   CSS @supports gate instead of body.safari so the fix applies even if
+   browser-fixes.js hasn't run yet or its UA heuristic missed the device
+   (e.g. iOS PWA, WKWebView wrappers, certain iOS Chrome builds).
+   @supports (-webkit-touch-callout: none) is iOS-WebKit-only — macOS
+   Safari and Android Chrome do not match this query. */
+@supports (-webkit-touch-callout: none) {
+    @media screen and (max-width: 1000px) {
+        .drawer-content {
+            transition: none !important;
+        }
+
+        #top-settings-holder > .drawer > .drawer-content.openDrawer:not(.fillLeft):not(.fillRight) {
+            display: block !important;
+            height: auto !important;
+            max-height: calc(100vh - var(--topBarBlockSize) - var(--bottomFormBlockSize) - 6px) !important;
+            max-height: calc(100dvh - var(--topBarBlockSize) - var(--bottomFormBlockSize) - 6px) !important;
+            overflow-y: auto !important;
+        }
+
+        #top-settings-holder > .drawer > .drawer-content.openDrawer.fillLeft,
+        #top-settings-holder > .drawer > .drawer-content.openDrawer.fillRight {
+            display: flex !important;
+            height: calc(100vh - var(--topBarBlockSize)) !important;
+            height: calc(100dvh - var(--topBarBlockSize)) !important;
+        }
+    }
+}
+
+/* ---- Fix 2: Prompt-manager names wrap on small mobile screens ----
+   Grid items default to min-width: auto, which can prevent the name cell
+   from shrinking enough to wrap. We force min-width: 0 on grid children
+   and re-apply wrap rules to the inner <a>/<span> with !important so a
+   long single-word prompt name flows onto a second/third line instead of
+   being visually cut off. Top-align the row so a multi-line name doesn't
+   visually misalign the tokens/controls cells. */
+@media screen and (max-width: 1000px) {
+    #completion_prompt_manager #completion_prompt_manager_list li.completion_prompt_manager_prompt {
+        align-items: start !important;
+    }
+
+    #completion_prompt_manager #completion_prompt_manager_list li > * {
+        min-width: 0 !important;
+    }
+
+    #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name,
+    #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name .prompt-manager-inspect-action,
+    #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name > a,
+    #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name > span {
+        white-space: normal !important;
+        word-break: break-word !important;
+        overflow-wrap: anywhere !important;
+    }
+}

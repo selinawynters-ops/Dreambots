@@ -384,6 +384,18 @@ body.no-blur #send_form {
     background-color: var(--SmartThemeBlurTintColor) !important;
 }
 
+/* Ensure drawer panels remain visible when blur is disabled.
+   Without backdrop-filter, panels can blend into the chat background
+   if both use the same tint color. Add a distinct border and slightly
+   different background to maintain visual separation. */
+body.no-blur .drawer-content.openDrawer,
+body.no-blur #left-nav-panel.openDrawer,
+body.no-blur #right-nav-panel.openDrawer {
+    background-color: var(--SmartThemeBlurTintColor) !important;
+    border: 2px solid var(--SmartThemeBorderColor) !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5) !important;
+}
+
 /* wAIfu mode*/
 
 body.waifuMode #top-bar {

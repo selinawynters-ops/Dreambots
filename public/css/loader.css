@@ -1,162 +1,448 @@
-/*
- * ============================================================================
- * DREAMTAVERN CUSTOMIZATION - Custom Loader (Magic Orb)
- * ============================================================================
- * 
- * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
- * 
- * 1. CUSTOM PRELOADER BACKGROUND:
- *    - Changed from SmartTheme blur tint to dark gradient background
- *    - Gradient: Deep navy (#1a1a2e) → darker blue (#16213e) → near-black (#0f0f23)
- *    - Creates atmospheric, immersive loading experience
- * 
- * 2. MAGIC ORB SPINNER:
- *    - Replaced default spinner with custom "magic orb" design
- *    - Soft mauve/lavender color scheme for DreamTavern branding
- *    - Animated pulsing glow effect
- *    - Ethereal, fantasy-themed aesthetic
- * 
- * 3. RESPONSIVE LOADING ANIMATION:
- *    - Smooth transitions and animations
- *    - Maintains compatibility with existing JS (uses #load-spinner ID)
- * 
- * RELATED FILES:
- *    - public/css/login.css (matching login page styling)
- *    - public/css/fonts.css (custom font loading)
- * 
- * ============================================================================
- */
-/* DreamTavern Preloader */
+/* DreamTavern loader */
+html:has(body.loader-active),
+body.loader-active {
+    overflow: hidden !important;
+    scrollbar-width: none;
+    overscroll-behavior: none;
+}
+
+html:has(body.loader-active)::-webkit-scrollbar,
+body.loader-active::-webkit-scrollbar {
+    display: none;
+}
+
+.loader-dialogue-popup.popup {
+    position: fixed !important;
+    inset: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+    background: #060610 !important;
+}
+
+.loader-dialogue-popup.popup::backdrop {
+    background: #060610 !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+.loader-dialogue-popup.popup .popup-body,
+.loader-dialogue-popup.popup .popup-content {
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+}
+
+.loader-dialogue-popup.popup .popup-controls,
+.loader-dialogue-popup.popup .popup-button-close {
+    display: none !important;
+}
+
+html:has(#preloader),
+body:has(#preloader),
+html:has(#loader),
+body:has(#loader) {
+    overflow: hidden !important;
+    scrollbar-width: none;
+}
+
+html:has(#preloader)::-webkit-scrollbar,
+body:has(#preloader)::-webkit-scrollbar,
+html:has(#loader)::-webkit-scrollbar,
+body:has(#loader)::-webkit-scrollbar {
+    display: none;
+}
+
 #preloader {
     position: fixed;
+    inset: 0;
+    z-index: 999999;
+    width: auto;
+    height: auto;
     margin: 0;
     padding: 0;
-    top: 0;
-    left: 0;
-    z-index: 999999;
-    width: 100vw;
-    height: 100vh;
-    width: 100dvw;
-    height: 100dvh;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f0f23 100%);
+    overflow: hidden;
+    box-sizing: border-box;
+    background: #060610;
     color: var(--SmartThemeBodyColor);
-    backdrop-filter: blur(30px);
     opacity: 1;
 }
 
-/* Main loader container */
 #loader {
+    position: fixed;
+    inset: 0;
+    z-index: 999999;
+    width: auto;
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
-    flex-direction: column;
-    justify-content: center;
     align-items: center;
-    width: 100%;
-    height: 100%;
+    justify-content: center;
+    overflow: hidden;
+    box-sizing: border-box;
+    background:
+        radial-gradient(circle at 50% 46%, rgba(35, 8, 65, 0.62), rgba(6, 6, 16, 0) 56%),
+        radial-gradient(circle at 28% 24%, rgba(192, 132, 252, 0.11), transparent 30%),
+        radial-gradient(circle at 72% 68%, rgba(255, 180, 80, 0.09), transparent 28%),
+        #060610;
 }
 
-/* Spinner container - keeps original ID for JS compatibility */
-#load-spinner {
-    transition: all var(--animation-duration-2x, 0.3s) ease-out;
-    opacity: 1;
-    position: relative;
-    width: 100px;
-    height: 100px;
+.dt-loader-scene {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    height: auto;
+    overflow: hidden;
+    border-radius: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    background: transparent;
 }
 
-/* ============================================
-   DreamTavern Magic Orb - Soft Mauve/Lavender
-   ============================================ */
-
-/* The orb itself */
-.magic-orb {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 60px;
-    height: 60px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, 
-        #fce4ec 0%, 
-        #f8bbd9 30%, 
-        #ce93d8 50%, 
-        #9575cd 70%,
-        #5e35b1 100%);
-    box-shadow: 
-        0 0 30px rgba(206, 147, 216, 0.8),
-        0 0 60px rgba(149, 117, 205, 0.5),
-        inset 0 0 20px rgba(255, 255, 255, 0.3);
-    animation: pulse-orb 3s ease-in-out infinite;
-}
-
-/* Outer spinning ring */
-.magic-ring {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    border: 3px solid transparent;
-    border-top-color: #ce93d8;
-    border-right-color: #9fa8da;
-    border-radius: 50%;
-    animation: spin-ring 3s linear infinite;
-}
-
-/* Inner spinning ring (reverse direction) */
-.magic-ring::before {
+.dt-loader-scene::before,
+.dt-loader-scene::after,
+.dt-loader-stars {
     content: '';
     position: absolute;
-    top: 5px;
-    left: 5px;
-    right: 5px;
-    bottom: 5px;
-    border: 2px solid transparent;
-    border-bottom-color: #7986cb;
-    border-left-color: #f48fb1;
+    inset: 0;
+    pointer-events: none;
+}
+
+.dt-loader-stars {
+    opacity: 0.86;
+    background-image:
+        radial-gradient(circle at 12% 18%, rgba(232, 213, 245, 0.7) 0 1px, transparent 2px),
+        radial-gradient(circle at 24% 72%, rgba(255, 210, 160, 0.42) 0 1px, transparent 2px),
+        radial-gradient(circle at 38% 28%, rgba(232, 213, 245, 0.46) 0 1px, transparent 2px),
+        radial-gradient(circle at 61% 16%, rgba(255, 210, 160, 0.34) 0 1px, transparent 2px),
+        radial-gradient(circle at 76% 68%, rgba(232, 213, 245, 0.54) 0 1px, transparent 2px),
+        radial-gradient(circle at 88% 34%, rgba(255, 210, 160, 0.38) 0 1px, transparent 2px),
+        radial-gradient(circle at 8% 86%, rgba(232, 213, 245, 0.42) 0 1px, transparent 2px),
+        radial-gradient(circle at 18% 42%, rgba(255, 210, 160, 0.3) 0 1px, transparent 2px),
+        radial-gradient(circle at 32% 12%, rgba(232, 213, 245, 0.34) 0 1px, transparent 2px),
+        radial-gradient(circle at 45% 82%, rgba(255, 210, 160, 0.28) 0 1px, transparent 2px),
+        radial-gradient(circle at 54% 62%, rgba(232, 213, 245, 0.36) 0 1px, transparent 2px),
+        radial-gradient(circle at 68% 88%, rgba(255, 210, 160, 0.32) 0 1px, transparent 2px),
+        radial-gradient(circle at 82% 8%, rgba(232, 213, 245, 0.38) 0 1px, transparent 2px),
+        radial-gradient(circle at 94% 78%, rgba(255, 210, 160, 0.3) 0 1px, transparent 2px);
+    animation: dt-stars-drift 18s ease-in-out infinite;
+}
+
+.dt-loader-scene::before {
+    background:
+        radial-gradient(ellipse at 50% 44%, rgba(192, 132, 252, 0.22), transparent 58%),
+        radial-gradient(circle at 18% 78%, rgba(255, 180, 80, 0.1), transparent 34%),
+        radial-gradient(circle at 84% 20%, rgba(192, 132, 252, 0.13), transparent 36%),
+        linear-gradient(180deg, rgba(6, 6, 16, 0.2), rgba(6, 6, 16, 0.82));
+    animation: dt-scene-breathe 4s ease-in-out infinite;
+}
+
+.dt-loader-scene::after {
+    background:
+        radial-gradient(circle at 44% 56%, rgba(192, 132, 252, 0.18), transparent 18%),
+        radial-gradient(circle at 58% 40%, rgba(255, 180, 80, 0.12), transparent 16%),
+        radial-gradient(circle at 35% 35%, rgba(192, 132, 252, 0.11), transparent 14%);
+    filter: blur(18px);
+    animation: dt-particles-rise 5s ease-in-out infinite;
+}
+
+.dt-loader-center {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    text-align: center;
+    padding: 40px 20px;
+    box-sizing: border-box;
+    max-width: 100%;
+}
+
+#load-spinner,
+.dt-loader-figure-wrap {
+    width: 160px;
+    height: 200px;
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    opacity: 1;
+    transition: filter var(--animation-duration-2x, 0.3s) ease-out, opacity var(--animation-duration-2x, 0.3s) ease-out;
+}
+
+.dt-loader-figure-img {
+    width: 140px;
+    height: 190px;
+    object-fit: cover;
+    object-position: top center;
+    border-radius: 50% 50% 42% 42% / 60% 60% 40% 40%;
+    position: relative;
+    z-index: 3;
+    filter: brightness(1.05) saturate(1.1);
+    -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+}
+
+.dt-loader-ring {
+    position: absolute;
     border-radius: 50%;
-    animation: spin-ring 4s linear infinite reverse;
+    border-style: solid;
 }
 
-/* Loading text */
+.dt-loader-ring-1 {
+    width: 170px;
+    height: 170px;
+    bottom: -10px;
+    border-width: 1px;
+    border-color: rgba(192, 132, 252, 0.36);
+    animation: dt-loader-spin 12s linear infinite;
+}
+
+.dt-loader-ring-2 {
+    width: 148px;
+    height: 148px;
+    bottom: 1px;
+    border-width: 1px;
+    border-style: dashed;
+    border-color: rgba(255, 160, 60, 0.28);
+    animation: dt-loader-spin 8s linear infinite reverse;
+}
+
+.dt-loader-ring-3 {
+    width: 192px;
+    height: 192px;
+    bottom: -21px;
+    border-width: 1px;
+    border-color: rgba(192, 132, 252, 0.13);
+    animation: dt-loader-spin 20s linear infinite;
+}
+
+.dt-loader-glow-base {
+    position: absolute;
+    bottom: -10px;
+    left: 50%;
+    width: 120px;
+    height: 30px;
+    transform: translateX(-50%);
+    border-radius: 50%;
+    z-index: 2;
+    background: radial-gradient(ellipse, rgba(192, 132, 252, 0.36) 0%, transparent 70%);
+    animation: dt-glow-pulse 3s ease-in-out infinite;
+}
+
+.dt-loader-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.dt-loader-title {
+    margin: 0;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 1.65rem;
+    font-weight: 600;
+    color: #e8d5f5;
+    letter-spacing: 4px;
+    animation: dt-title-glow 3s ease-in-out infinite;
+}
+
+.dt-loader-subtitle {
+    margin: 0;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 0.9rem;
+    font-style: italic;
+    color: rgba(255, 210, 160, 0.52);
+    letter-spacing: 1.5px;
+}
+
+.dt-loader-divider {
+    width: 200px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(192, 132, 252, 0.5), rgba(255, 180, 80, 0.4), rgba(192, 132, 252, 0.5), transparent);
+    animation: dt-divider-glow 3s ease-in-out infinite;
+}
+
 .loading-text {
-    margin-top: 30px;
-    color: #ce93d8;
-    font-family: 'Georgia', serif;
-    font-size: 1.1rem;
-    letter-spacing: 3px;
-    text-transform: uppercase;
-    animation: text-glow 3s ease-in-out infinite;
+    margin: 0;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 0.85rem;
+    font-style: italic;
+    color: rgba(192, 132, 252, 0.58);
+    letter-spacing: 2px;
 }
 
-/* Pulse animation for the orb */
-@keyframes pulse-orb {
-    0%, 100% { 
-        transform: translate(-50%, -50%) scale(1); 
-    }
-    50% { 
-        transform: translate(-50%, -50%) scale(1.1); 
-    }
+.dt-loader-dots::after {
+    content: '';
+    animation: dt-loader-dots 2s steps(4, end) infinite;
 }
 
-/* Spin animation for the rings */
-@keyframes spin-ring {
-    0% { 
-        transform: rotate(0deg); 
-    }
-    100% { 
-        transform: rotate(360deg); 
+@keyframes dt-loader-spin {
+    to {
+        transform: rotate(360deg);
     }
 }
 
-/* Glow animation for the loading text */
-@keyframes text-glow {
-    0%, 100% { 
-        text-shadow: 0 0 10px rgba(206, 147, 216, 0.5);
+@keyframes dt-glow-pulse {
+    0%, 100% {
         opacity: 0.7;
+        transform: translateX(-50%) scaleX(1);
     }
-    50% { 
-        text-shadow: 0 0 20px rgba(206, 147, 216, 0.8), 0 0 30px rgba(149, 117, 205, 0.4);
+
+    50% {
         opacity: 1;
+        transform: translateX(-50%) scaleX(1.2);
+    }
+}
+
+@keyframes dt-title-glow {
+    0%, 100% {
+        text-shadow: 0 0 20px rgba(192, 132, 252, 0.42), 0 0 60px rgba(192, 132, 252, 0.12);
+    }
+
+    50% {
+        text-shadow: 0 0 30px rgba(192, 132, 252, 0.78), 0 0 90px rgba(192, 132, 252, 0.22);
+    }
+}
+
+@keyframes dt-divider-glow {
+    0%, 100% {
+        opacity: 0.5;
+    }
+
+    50% {
+        opacity: 1;
+    }
+}
+
+@keyframes dt-loader-dots {
+    0% {
+        content: '';
+    }
+
+    25% {
+        content: '.';
+    }
+
+    50% {
+        content: '..';
+    }
+
+    75% {
+        content: '...';
+    }
+}
+
+@keyframes dt-stars-drift {
+    0%, 100% {
+        transform: translate3d(0, 0, 0);
+        opacity: 0.62;
+    }
+
+    50% {
+        transform: translate3d(0, -18px, 0);
+        opacity: 0.86;
+    }
+}
+
+@keyframes dt-scene-breathe {
+    0%, 100% {
+        opacity: 0.75;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.04);
+    }
+}
+
+@keyframes dt-particles-rise {
+    0%, 100% {
+        opacity: 0.45;
+        transform: translateY(12px) scale(1);
+    }
+
+    50% {
+        opacity: 0.95;
+        transform: translateY(-18px) scale(1.05);
+    }
+}
+
+#preloader {
+    animation: preloader-failsafe-fadeout 0.6s ease-out 12s forwards;
+}
+
+@keyframes preloader-failsafe-fadeout {
+    to {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+    }
+}
+
+@media (max-width: 520px) {
+    #loader {
+        min-height: 100vh;
+        min-height: 100dvh;
+    }
+
+    .dt-loader-scene {
+        width: auto;
+        height: auto;
+        border-radius: 0;
+    }
+
+    .dt-loader-center {
+        gap: 15px;
+        padding: 28px 16px;
+        width: 100%;
+    }
+
+    #load-spinner,
+    .dt-loader-figure-wrap {
+        width: 132px;
+        height: 168px;
+    }
+
+    .dt-loader-figure-img {
+        width: 116px;
+        height: 158px;
+    }
+
+    .dt-loader-ring-1 {
+        width: 140px;
+        height: 140px;
+    }
+
+    .dt-loader-ring-2 {
+        width: 122px;
+        height: 122px;
+    }
+
+    .dt-loader-ring-3 {
+        width: 158px;
+        height: 158px;
+    }
+
+    .dt-loader-title {
+        font-size: 1.35rem;
+        letter-spacing: 3px;
     }
 }

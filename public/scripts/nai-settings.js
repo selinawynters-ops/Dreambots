@@ -13,6 +13,7 @@ import {
 import { MAX_CONTEXT_DEFAULT, MAX_RESPONSE_DEFAULT, power_user } from './power-user.js';
 import { getTextTokens, tokenizers } from './tokenizers.js';
 import { getEventSourceStream } from './sse-stream.js';
+import { clearServerHiddenLoreActivations, emitServerHiddenLoreActivations, getServerHiddenLoreActivationsFromResponse } from './world-info.js';
 import {
     getSortableDelay,
     getStringHash,
@@ -757,6 +758,14 @@ export async function generateNovelWithStreaming(generate_data, signal) {
         tryParseStreamingError(response, await response.text());
         throw new Error(`Got response status ${response.status}`);
     }
+
+    const hiddenLoreActivations = getServerHiddenLoreActivationsFromResponse(response);
+    if (hiddenLoreActivations.length) {
+        await emitServerHiddenLoreActivations(hiddenLoreActivations);
+    } else {
+        clearServerHiddenLoreActivations();
+    }
+
     const eventStream = getEventSourceStream();
     response.body.pipeThrough(eventStream);
     const reader = eventStream.readable.getReader();

@@ -1,64 +1,610 @@
 /*
  * ============================================================================
- * DREAMTAVERN CUSTOMIZATION - Custom Login Page
+ * DREAMTAVERN LOGIN — Hybrid Design
+ * Wide frosted panel (image left / form right) over cinematic blurred backdrop
  * ============================================================================
- * 
- * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
- * 
- * 1. CUSTOM LOGIN STYLING:
- *    - Modified login page appearance to match DreamTavern branding
- *    - Coordinated with loader.css gradient background theme
- *    - Enhanced visual consistency across authentication flows
- * 
- * 2. USER EXPERIENCE:
- *    - Styled login forms for better usability
- *    - Maintains responsive design for mobile/desktop
- * 
+ *
+ * DESIGN:
+ *   - Full-bleed blurred hero background with cinematic vignette
+ *   - Wide 840px frosted-glass panel: 45% image / 55% form
+ *   - Purple/indigo palette with warm gold accents
+ *   - Cinzel serif branding, Inter sans-serif UI
+ *   - Animated ember sparks + purple mist particles
+ *   - 2FA UI prep (optional, not wired to backend yet)
+ *   - Fully responsive — stacks vertically on mobile
+ *
+ * COMPATIBILITY:
+ *   - All element IDs preserved for login.js
+ *   - Both normal (avatar select) and discreet (handle+password) modes
+ *   - Password recovery flow styled
+ *
+ * IMAGE REQUIRED:
+ *   Place hero image at: public/img/login-hero.png
+ *
  * RELATED FILES:
- *    - public/css/loader.css (matching preloader styling)
- *    - public/login.html (login page structure)
- * 
+ *   - public/login.html
+ *   - public/scripts/login.js
+ *   - public/css/loader.css
+ *
  * ============================================================================
  */
-/* =====================================================
-   DreamTavern Login - Crystal Ball / Scrying Theme
-   Based on original SillyTavern login.css
-   ===================================================== */
 
-/* === ORIGINAL STRUCTURE (keep intact) === */
+/* ===================================================================
+   0. RESET — override base SillyTavern styles for login page
+   =================================================================== */
+
+body.login {
+    background: #08080f !important;
+    position: relative;
+    overflow: hidden;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Inter', 'Noto Sans', sans-serif;
+}
+
 body.login #shadow_popup {
     opacity: 1;
     display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent !important;
+    position: relative;
+    z-index: 10;
+    width: 100%;
+    min-height: 100vh;
+    padding: 20px;
 }
 
-body.login .logo {
-    max-width: 40px;
-    border-radius: 8px;
-    box-shadow: 0 0 20px rgba(206, 147, 216, 0.5);
+/* Remove any default dialogue_popup styling */
+body.login #dialogue_popup {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    max-width: none !important;
+    max-height: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    position: static !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    transform: none !important;
+    z-index: auto !important;
+    overflow: visible !important;
 }
+
+body.login #dialogue_popup_holder {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+body.login #dialogue_popup_text {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+body.login #dialogue_popup::before {
+    display: none !important;
+}
+
+/* ===================================================================
+   1. CINEMATIC BACKGROUND LAYERS
+   =================================================================== */
+
+body.login .login-bg-image {
+    position: fixed;
+    inset: 0;
+    background: url('../img/login-hero.png') center top / cover no-repeat;
+    filter: blur(16px) brightness(0.3) saturate(1.3);
+    transform: scale(1.15);
+    z-index: 0;
+}
+
+body.login .login-vignette {
+    position: fixed;
+    inset: 0;
+    background:
+        radial-gradient(ellipse at center, transparent 20%, rgba(8,8,15,0.8) 100%),
+        linear-gradient(to bottom, rgba(8,8,15,0.4) 0%, transparent 25%, transparent 75%, rgba(8,8,15,0.5) 100%);
+    z-index: 1;
+    pointer-events: none;
+}
+
+body.login .login-ambient {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse at 25% 55%, rgba(255,160,60,0.05) 0%, transparent 50%),
+        radial-gradient(ellipse at 75% 35%, rgba(206,147,216,0.04) 0%, transparent 45%);
+    animation: dt-ambient-pulse 6s ease-in-out infinite;
+}
+
+@keyframes dt-ambient-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* ===================================================================
+   2. PARTICLES — Ember Sparks + Purple Mist
+   =================================================================== */
+
+body.login .login-spark {
+    position: fixed;
+    width: 2px;
+    height: 2px;
+    border-radius: 50%;
+    background: rgba(255,180,80,0.45);
+    pointer-events: none;
+    z-index: 3;
+    animation: dt-spark-rise linear infinite;
+}
+
+@keyframes dt-spark-rise {
+    0%   { transform: translateY(0) scale(1); opacity: 0; }
+    10%  { opacity: 0.7; }
+    50%  { opacity: 0.35; }
+    100% { transform: translateY(-100vh) scale(0.3); opacity: 0; }
+}
+
+body.login .login-particle {
+    position: fixed;
+    width: 3px;
+    height: 3px;
+    background: rgba(206,147,216,0.3);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 3;
+    animation: dt-float-up linear infinite;
+}
+
+@keyframes dt-float-up {
+    0%   { transform: translateY(100vh) scale(0); opacity: 0; }
+    10%  { opacity: 0.6; }
+    90%  { opacity: 0.3; }
+    100% { transform: translateY(-10vh) scale(1); opacity: 0; }
+}
+
+/* ===================================================================
+   3. LOGIN PANEL — Frosted Glass Container
+   =================================================================== */
+
+body.login .login-panel {
+    display: flex;
+    width: 840px;
+    max-width: 95vw;
+    min-height: 540px;
+    border-radius: 24px;
+    overflow: hidden;
+    background: rgba(14, 14, 28, 0.7);
+    backdrop-filter: blur(32px) saturate(1.5);
+    -webkit-backdrop-filter: blur(32px) saturate(1.5);
+    border: 1.5px solid rgba(206,147,216,0.18);
+    box-shadow:
+        0 0 80px rgba(255,160,60,0.06),
+        0 0 160px rgba(206,147,216,0.05),
+        0 35px 70px rgba(0,0,0,0.45),
+        inset 0 1px 0 rgba(255,255,255,0.05);
+    position: relative;
+    z-index: 10;
+    animation:
+        dt-panel-in 0.9s cubic-bezier(0.16,1,0.3,1) both,
+        dt-panel-glow 5s ease-in-out infinite 0.9s;
+}
+
+@keyframes dt-panel-in {
+    from { transform: translateY(35px) scale(0.95); opacity: 0; filter: blur(6px); }
+    to   { transform: translateY(0) scale(1); opacity: 1; filter: blur(0); }
+}
+
+@keyframes dt-panel-glow {
+    0%, 100% {
+        box-shadow:
+            0 0 80px rgba(255,160,60,0.06),
+            0 0 160px rgba(206,147,216,0.05),
+            0 35px 70px rgba(0,0,0,0.45),
+            inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    50% {
+        box-shadow:
+            0 0 100px rgba(255,160,60,0.09),
+            0 0 180px rgba(206,147,216,0.07),
+            0 35px 70px rgba(0,0,0,0.45),
+            inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+}
+
+/* Gold highlight on top edge */
+body.login .login-panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg,
+        transparent,
+        rgba(255,180,80,0.2) 20%,
+        rgba(206,147,216,0.25) 40%,
+        rgba(255,255,255,0.12) 50%,
+        rgba(206,147,216,0.25) 60%,
+        rgba(255,180,80,0.2) 80%,
+        transparent);
+    z-index: 5;
+    pointer-events: none;
+}
+
+/* ===================================================================
+   4. IMAGE SIDE — Hero Display
+   =================================================================== */
+
+body.login .login-image-side {
+    width: 45%;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+body.login .login-image-side img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: top center;
+    display: block;
+}
+
+/* Gradient fade into form side */
+body.login .login-image-side::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 90px;
+    background: linear-gradient(to right, transparent, rgba(14,14,28,0.85));
+    pointer-events: none;
+}
+
+/* Bottom fade */
+body.login .login-image-side::before {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 100px;
+    background: linear-gradient(to top, rgba(14,14,28,0.6), transparent);
+    pointer-events: none;
+    z-index: 2;
+}
+
+/* ===================================================================
+   5. FORM SIDE — Layout
+   =================================================================== */
+
+body.login .login-form-side {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 44px 38px;
+    position: relative;
+    min-width: 0;
+}
+
+body.login #userSelectBlock {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+body.login #userListBlock {
+    width: 100%;
+}
+
+/* ===================================================================
+   6. BRAND — Title & Subtitle
+   =================================================================== */
 
 body.login #logoBlock {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    margin: 0 0 28px 0;
+    padding: 0;
+    border: none;
+}
+
+body.login #logoBlock .brand-title {
+    font-family: 'Cinzel', serif;
+    font-size: 1.7rem;
+    font-weight: 600;
+    color: #e1bee7;
+    letter-spacing: 2px;
+    text-shadow: 0 0 30px rgba(206,147,216,0.35);
+    line-height: 1.2;
+}
+
+body.login #logoBlock .brand-subtitle {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.85rem;
+    color: rgba(255,200,140,0.55);
+    font-style: italic;
+    font-weight: 400;
+    letter-spacing: 0.5px;
+}
+
+/* Hide the old logo image if it somehow appears */
+body.login #logoBlock .logo {
+    display: none;
+}
+
+/* ===================================================================
+   7. LOGIN MODE PROMPTS
+   =================================================================== */
+
+body.login #normalLoginPrompt,
+body.login #discreetLoginPrompt {
+    /* Hidden — brand subtitle handles the messaging now.
+       JS still toggles these; we just visually suppress them. */
+    display: none !important;
+}
+
+/* ===================================================================
+   8. FORM FIELDS — Labels & Inputs
+   =================================================================== */
+
+body.login .field-label {
+    display: block;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: rgba(206,147,216,0.65);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 6px;
+}
+
+body.login .text_pole {
+    width: 100%;
+    padding: 13px 16px !important;
+    background: rgba(206,147,216,0.05) !important;
+    border: 1px solid rgba(206,147,216,0.18) !important;
+    border-radius: 12px !important;
+    color: #fff !important;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.93rem;
+    transition: all 0.3s ease;
+    outline: none !important;
+    margin: 0 0 16px 0 !important;
+}
+
+body.login .text_pole::placeholder {
+    color: rgba(206,147,216,0.3) !important;
+}
+
+body.login .text_pole:focus {
+    border-color: rgba(206,147,216,0.45) !important;
+    box-shadow: 0 0 20px rgba(206,147,216,0.1), inset 0 0 10px rgba(206,147,216,0.03) !important;
+    background: rgba(206,147,216,0.07) !important;
+}
+
+body.login .text_pole:-webkit-autofill,
+body.login .text_pole:-webkit-autofill:hover,
+body.login .text_pole:-webkit-autofill:focus,
+body.login .text_pole:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 1000px rgba(14, 14, 28, 0.95) inset !important;
+    -webkit-text-fill-color: #fff !important;
+    caret-color: #fff;
+    transition: background-color 5000s ease-in-out 0s;
+}
+
+/* Password field wrapper */
+body.login .password-wrapper {
+    position: relative;
+    width: 100%;
+}
+
+body.login .password-wrapper .text_pole {
+    padding-right: 44px !important;
+}
+
+body.login .eye-toggle {
+    position: absolute;
+    right: 14px;
+    top: 50%;
+    transform: translateY(-70%);
+    color: rgba(206,147,216,0.35);
+    cursor: pointer;
+    font-size: 0.88rem;
+    transition: color 0.2s;
+    z-index: 2;
+    line-height: 1;
+}
+
+body.login .eye-toggle:hover {
+    color: rgba(206,147,216,0.65);
+}
+
+/* ===================================================================
+   9. FORGOT PASSWORD LINK
+   =================================================================== */
+
+body.login #recoverPassword {
+    display: block;
+    text-align: right;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.76rem;
+    color: #ffb74d !important;
+    text-decoration: none;
+    margin-top: -8px;
+    margin-bottom: 18px;
+    transition: all 0.3s ease;
+}
+
+body.login #recoverPassword:hover {
+    color: #ffd54f !important;
+    text-shadow: 0 0 10px rgba(255,183,77,0.3);
+}
+
+/* ===================================================================
+   10. TWO-FACTOR AUTH UI (Prep)
+   =================================================================== */
+
+body.login .twofa-section {
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    background: rgba(121,134,203,0.05);
+    border: 1px solid rgba(121,134,203,0.12);
+    border-radius: 12px;
+    width: 100%;
+}
+
+body.login .twofa-header {
+    display: flex;
     align-items: center;
-    margin: 0 auto;
-    gap: 12px;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+body.login .twofa-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: rgba(121,134,203,0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.6rem;
+    color: #9fa8da;
+}
+
+body.login .twofa-label {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #9fa8da;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+}
+
+body.login .twofa-badge {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.58rem;
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: rgba(255,183,77,0.1);
+    color: #ffb74d;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    margin-left: auto;
+}
+
+body.login .twofa-inputs {
+    display: flex;
+    gap: 7px;
+    justify-content: center;
+}
+
+body.login .twofa-box {
+    width: 42px;
+    height: 50px;
+    text-align: center;
+    font-size: 1.25rem;
+    font-weight: 600;
+    font-family: 'Inter', monospace;
+    background: rgba(121,134,203,0.06);
+    border: 1px solid rgba(121,134,203,0.18);
+    border-radius: 10px;
+    color: #fff;
+    outline: none;
+    transition: all 0.3s ease;
+}
+
+body.login .twofa-box:focus {
+    border-color: rgba(121,134,203,0.45);
+    box-shadow: 0 0 14px rgba(121,134,203,0.12);
+    background: rgba(121,134,203,0.1);
+}
+
+body.login .twofa-box::placeholder {
+    color: rgba(121,134,203,0.2);
+}
+
+/* ===================================================================
+   11. LOGIN BUTTON
+   =================================================================== */
+
+body.login .menu_button {
+    width: 100%;
+    padding: 14px 0 !important;
+    border: 1px solid rgba(206,147,216,0.22) !important;
+    border-radius: 12px !important;
+    background: linear-gradient(135deg, rgba(206,147,216,0.22), rgba(255,160,60,0.15)) !important;
+    color: #e1bee7 !important;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.93rem;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+    text-align: center;
+}
+
+body.login .menu_button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(206,147,216,0.15), 0 0 20px rgba(255,160,60,0.08);
+    border-color: rgba(206,147,216,0.38) !important;
+    background: linear-gradient(135deg, rgba(206,147,216,0.3), rgba(255,160,60,0.2)) !important;
+}
+
+body.login .menu_button:active {
+    transform: translateY(0);
+}
+
+/* Recovery buttons — smaller side-by-side */
+body.login .flexGap10 .menu_button {
+    width: auto;
+    padding: 10px 28px !important;
+}
+
+/* ===================================================================
+   12. USER AVATAR SELECT (Normal Login Mode)
+   =================================================================== */
+
+body.login #userList {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 16px;
 }
 
 body.login .userSelect {
     display: flex;
     flex-direction: column;
     color: #e1bee7;
-    border: 1px solid rgba(206, 147, 216, 0.3);
-    border-radius: 12px;
-    padding: 10px 12px;
+    border: 1px solid rgba(206,147,216,0.2);
+    border-radius: 14px;
+    padding: 12px 14px;
     width: 30%;
+    min-width: 100px;
     cursor: pointer;
-    margin: 5px;
     transition: all 0.3s ease;
     align-items: center;
     justify-content: center;
     text-align: center;
     overflow: hidden;
-    background: rgba(206, 147, 216, 0.08);
+    background: rgba(206,147,216,0.06);
+}
+
+body.login .userSelect:hover {
+    background: rgba(206,147,216,0.15);
+    border-color: rgba(206,147,216,0.45);
+    box-shadow: 0 0 25px rgba(206,147,216,0.2);
+    transform: translateY(-2px);
 }
 
 body.login .userSelect .userName,
@@ -69,196 +615,215 @@ body.login .userSelect .userHandle {
     white-space: nowrap;
 }
 
-body.login .userSelect:hover {
-    background: rgba(206, 147, 216, 0.2);
-    border-color: rgba(206, 147, 216, 0.5);
-    box-shadow: 0 0 25px rgba(206, 147, 216, 0.3);
-    transform: translateY(-2px);
-}
-
-body.login #handleEntryBlock,
-body.login #passwordEntryBlock,
-body.login #passwordRecoveryBlock {
-    margin: 8px 2px;
-}
-
-/* === DREAMTAVERN THEME ADDITIONS === */
-
-/* Background with mist effect */
-body.login {
-    background: radial-gradient(ellipse at center, #1a1a2e 0%, #0a0a12 70%) !important;
-    position: relative;
-    overflow: hidden;
-}
-
-/* Animated mist layer */
-body.login::before {
-    content: '';
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: 
-        radial-gradient(ellipse at 20% 80%, rgba(206, 147, 216, 0.08) 0%, transparent 50%),
-        radial-gradient(ellipse at 80% 20%, rgba(121, 134, 203, 0.08) 0%, transparent 50%),
-        radial-gradient(ellipse at 60% 60%, rgba(206, 147, 216, 0.05) 0%, transparent 40%);
-    animation: mist-move 8s ease-in-out infinite;
-    pointer-events: none;
-    z-index: 0;
-}
-
-@keyframes mist-move {
-    0%, 100% { transform: translateX(0) translateY(0); opacity: 1; }
-    50% { transform: translateX(20px) translateY(-20px); opacity: 0.7; }
-}
-
-/* Center the popup vertically */
-body.login #shadow_popup {
-    align-items: center !important;
-    justify-content: center !important;
-    background: transparent !important;
-}
-
-/* Login box styling - Crystal Ball */
-body.login #dialogue_popup {
-    background: rgba(25, 25, 45, 0.92) !important;
-    border-radius: 20px !important;
-    border: 2px solid rgba(206, 147, 216, 0.25) !important;
-    box-shadow: 
-        0 0 50px rgba(206, 147, 216, 0.15),
-        0 0 100px rgba(121, 134, 203, 0.1),
-        inset 0 0 30px rgba(206, 147, 216, 0.03) !important;
-    backdrop-filter: blur(10px);
-    max-width: 420px !important;
-    width: 90% !important;
-}
-
-/* Crystal highlight effect */
-body.login #dialogue_popup::before {
-    content: '';
-    position: absolute;
-    top: 8%;
-    left: 15%;
-    width: 25px;
-    height: 25px;
-    background: radial-gradient(circle, rgba(255,255,255,0.15) 0%, transparent 70%);
-    border-radius: 50%;
-    filter: blur(3px);
-    pointer-events: none;
-}
-
-/* Welcome title */
-body.login #logoBlock span {
-    color: #e1bee7 !important;
-    text-shadow: 0 0 20px rgba(206, 147, 216, 0.5);
-    font-size: 1.3rem;
-    letter-spacing: 1px;
-}
-
-/* Subtitles */
-body.login #normalLoginPrompt,
-body.login #discreetLoginPrompt {
-    color: rgba(206, 147, 216, 0.8) !important;
-    font-style: italic;
-}
-
-/* User name/handle colors */
 body.login .userSelect .userName {
     color: #e1bee7;
     font-weight: 500;
+    font-size: 0.85rem;
 }
 
 body.login .userSelect .userHandle {
-    color: rgba(159, 168, 218, 0.7);
+    color: rgba(159,168,218,0.6);
+    font-size: 0.72rem;
 }
 
-/* Avatar styling */
 body.login .userSelect .avatar img {
     border-radius: 50%;
-    border: 2px solid rgba(206, 147, 216, 0.4);
-    box-shadow: 0 0 15px rgba(206, 147, 216, 0.3);
+    border: 2px solid rgba(206,147,216,0.3);
+    box-shadow: 0 0 15px rgba(206,147,216,0.2);
     transition: all 0.3s ease;
+    max-width: 60px;
 }
 
 body.login .userSelect:hover .avatar img {
-    border-color: rgba(206, 147, 216, 0.7);
-    box-shadow: 0 0 25px rgba(206, 147, 216, 0.5);
+    border-color: rgba(206,147,216,0.6);
+    box-shadow: 0 0 25px rgba(206,147,216,0.4);
 }
 
-/* Input fields */
-body.login .text_pole {
-    background: rgba(206, 147, 216, 0.08) !important;
-    border: 1px solid rgba(206, 147, 216, 0.3) !important;
-    border-radius: 8px !important;
-    color: #fff !important;
-    padding: 12px 16px !important;
-    transition: all 0.3s ease;
+/* ===================================================================
+   13. PASSWORD RECOVERY
+   =================================================================== */
+
+body.login #recoverMessage {
+    color: rgba(206,147,216,0.7);
+    font-style: italic;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+    text-align: center;
 }
 
-body.login .text_pole::placeholder {
-    color: rgba(206, 147, 216, 0.5) !important;
+body.login #passwordRecoveryBlock {
+    width: 100%;
 }
 
-body.login .text_pole:focus {
-    border-color: rgba(206, 147, 216, 0.6) !important;
-    box-shadow: 0 0 15px rgba(206, 147, 216, 0.2) !important;
-    outline: none !important;
+body.login #passwordRecoveryBlock .text_pole {
+    width: 100%;
 }
 
-/* Forgot password link */
-body.login #recoverPassword {
-    color: #ffb74d !important;
-    text-decoration: none;
-    transition: all 0.3s ease;
-}
+/* ===================================================================
+   14. ERROR MESSAGE
+   =================================================================== */
 
-body.login #recoverPassword:hover {
-    color: #ffd54f !important;
-    text-shadow: 0 0 10px rgba(255, 183, 77, 0.4);
-    text-decoration: underline;
-}
-
-/* Login button */
-body.login .menu_button {
-    background: rgba(206, 147, 216, 0.2) !important;
-    color: #e1bee7 !important;
-    border: 1px solid rgba(206, 147, 216, 0.4) !important;
-    border-radius: 8px !important;
-    padding: 10px 30px !important;
-    transition: all 0.3s ease;
-}
-
-body.login .menu_button:hover {
-    background: rgba(206, 147, 216, 0.35) !important;
-    box-shadow: 0 0 25px rgba(206, 147, 216, 0.3);
-    transform: translateY(-1px);
-}
-
-/* Error message styling */
 body.login #errorMessage {
     color: #ef9a9a !important;
+    font-size: 0.8rem;
+    text-align: center;
+    min-height: 18px;
+    margin-top: 10px;
 }
 
-/* Recovery block styling */
-body.login #recoverMessage {
-    color: rgba(206, 147, 216, 0.8);
+body.login #errorMessage:empty {
+    display: none;
+}
+
+/* ===================================================================
+   15. FOOTER
+   =================================================================== */
+
+body.login .login-footer {
+    margin-top: 18px;
+    text-align: center;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    color: rgba(206,147,216,0.25);
+    letter-spacing: 0.5px;
     font-style: italic;
 }
 
-/* Responsive */
-@media (max-width: 600px) {
+/* ===================================================================
+   16. HANDLE & PASSWORD ENTRY BLOCKS — Layout fixes
+   =================================================================== */
+
+body.login #handleEntryBlock,
+body.login #passwordEntryBlock {
+    width: 100%;
+    margin: 0 !important;
+    gap: 0 !important;
+    align-items: stretch !important;
+}
+
+body.login #passwordEntryBlock .flex-container {
+    margin-top: 4px;
+}
+
+/* ===================================================================
+   16. RESPONSIVE — Tablet
+   =================================================================== */
+
+@media (max-width: 1024px) and (min-width: 701px) {
+    body.login #shadow_popup {
+        padding: 30px 20px;
+    }
+
+    body.login .login-panel {
+        width: 100%;
+        max-width: 760px;
+    }
+
+    body.login .login-image-side {
+        width: 280px;
+        min-width: 280px;
+    }
+}
+
+/* ===================================================================
+   17. RESPONSIVE — Mobile
+   =================================================================== */
+
+@media (max-width: 700px) {
+    body.login {
+        overflow-y: auto;
+        overflow-x: hidden;
+        align-items: flex-start;
+    }
+
+    body.login #shadow_popup {
+        min-height: auto;
+        align-items: flex-start;
+        padding: 14px 12px 22px;
+    }
+
+    body.login .login-panel {
+        flex-direction: column;
+        width: 95vw;
+        max-width: 420px;
+        min-height: auto;
+        margin: 8px 0;
+    }
+
+    body.login .login-image-side {
+        width: 100%;
+        height: 240px;
+        flex-shrink: 0;
+    }
+
+    /* Remove the right-side gradient fade on mobile (image is on top) */
+    body.login .login-image-side::after {
+        display: none;
+    }
+
+    body.login .login-image-side::before {
+        height: 80px;
+    }
+
+    body.login .login-form-side {
+        width: 100%;
+        padding: 26px 24px 30px;
+        flex: 0;
+        justify-content: flex-start;
+    }
+
+    body.login #logoBlock .brand-title {
+        font-size: 1.4rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
+    }
+
+    body.login .twofa-box {
+        width: 38px;
+        height: 44px;
+        font-size: 1.1rem;
+    }
+
     body.login .userSelect {
         width: 45%;
-    }
-    
-    body.login #logoBlock span {
-        font-size: 1.1rem;
     }
 }
 
 @media (max-width: 400px) {
+    body.login .login-form-side {
+        padding: 22px 18px 26px;
+    }
+
+    body.login #logoBlock .brand-title {
+        font-size: 1.2rem;
+    }
+
+    body.login .twofa-box {
+        width: 34px;
+        height: 40px;
+        font-size: 1rem;
+    }
+
     body.login .userSelect {
         width: 90%;
+    }
+}
+
+/* ===================================================================
+   18. REDUCED MOTION — Accessibility
+   =================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+    body.login .login-panel {
+        animation: none !important;
+    }
+
+    body.login .login-spark,
+    body.login .login-particle,
+    body.login .login-ambient {
+        animation: none !important;
+        display: none !important;
     }
 }

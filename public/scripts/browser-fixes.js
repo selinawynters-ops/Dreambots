@@ -63,6 +63,38 @@ function addSafariPatch() {
     if (isIOS || isMobileSafari || isDesktopSafari) {
         document.body.classList.add('safari');
     }
+
+}
+
+function addIOSDrawerTapFix() {
+    // iOS Safari only synthesizes a click from a tap for elements that have
+    // either cursor:pointer (set in ios-fixes.css) OR a direct non-delegated
+    // click listener. The jQuery delegated handler on document is not enough.
+    // Adding an empty direct listener is the proven, side-effect-free fix:
+    // iOS sees the listener, marks the element as interactive, and synthesizes
+    // the click — the jQuery delegated handler then fires as normal.
+    const isIOS = /iP(hone|ad|od)/i.test(navigator.userAgent) ||
+                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!isIOS) return;
+
+    const holder = document.getElementById('top-settings-holder');
+    if (!holder) return;
+
+    const noop = function () {};
+
+    // Apply to all toggles that already exist.
+    holder.querySelectorAll('.drawer-toggle').forEach(el => {
+        el.addEventListener('click', noop);
+    });
+
+    // Cover any toggles that might be injected after init (e.g. by extensions).
+    holder.addEventListener('touchstart', function (e) {
+        const toggle = e.target.closest('.drawer-toggle');
+        if (toggle && !toggle._iosFixApplied) {
+            toggle.addEventListener('click', noop);
+            toggle._iosFixApplied = true;
+        }
+    }, { passive: true });
 }
 
 function applyBrowserFixes() {
@@ -72,15 +104,31 @@ function applyBrowserFixes() {
 
     if (isMobile()) {
         const fixFunkyPositioning = () => {
+            // Skip the hack while an input/textarea is focused. Mobile keyboard
+            // show/hide fires a 'resize' event; running the position:fixed hack
+            // during keyboard toggle reflows the chat and causes scroll jumps.
+            const active = document.activeElement;
+            if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+                return;
+            }
             console.debug('[Mobile] Device viewport change detected.');
+            // Preserve chat scroll position across the position:fixed hack so
+            // viewport-size changes (keyboard dismiss, etc.) don't bump the
+            // user away from the message they were reading.
+            const chat = document.getElementById('chat');
+            const chatScroll = chat?.scrollTop ?? 0;
             document.documentElement.style.position = 'fixed';
-            requestAnimationFrame(() => document.documentElement.style.position = '');
+            requestAnimationFrame(() => {
+                document.documentElement.style.position = '';
+                if (chat) chat.scrollTop = chatScroll;
+            });
         };
         window.addEventListener('resize', fixFunkyPositioning);
         window.addEventListener('orientationchange', fixFunkyPositioning);
     }
 
     addSafariPatch();
+    addIOSDrawerTapFix();
 }
 
 export { isFirefox, applyBrowserFixes };

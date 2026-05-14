@@ -29,6 +29,8 @@
                 <div class="flex-container flexGap10 alignItemsCenter">
                     <i class="hasPassword fa-solid fa-lock" title="This account is password protected."></i>
                     <i class="noPassword fa-solid fa-lock-open" title="This account is not password protected."></i>
+                    <i class="hasTwoFactor fa-solid fa-shield-halved" title="This account has 2FA enabled."></i>
+                    <i class="noTwoFactor fa-solid fa-shield" title="This account does not have 2FA enabled."></i>
                     <h3 class="userName margin0"></h3>
                     <small class="userHandle">&nbsp;</small>
                 </div>
@@ -71,6 +73,9 @@
                     </div>
                     <div class="userChangePasswordButton menu_button" title="Change user password.">
                         <i class="fa-fw fa-solid fa-key"></i>
+                    </div>
+                    <div class="userDisableTwoFactorButton menu_button" title="Disable user 2FA.">
+                        <i class="fa-fw fa-solid fa-shield-virus"></i>
                     </div>
                     <div class="userDelete menu_button warning" title="Delete user account.">
                         <i class="fa-fw fa-solid fa-trash"></i>

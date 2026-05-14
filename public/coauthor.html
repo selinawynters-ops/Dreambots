@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Co-Author Station · DreamTavern</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Raleway:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --midnight: #0b0a16;
+    --deep: #100f22;
+    --card: #181630;
+    --border: rgba(100,160,220,0.16);
+    --border-bright: rgba(120,180,255,0.32);
+    --teal: #26c6da;
+    --indigo: #5c6bc0;
+    --violet: #7c4dff;
+    --lavender: #b39ddb;
+    --sky: #80deea;
+    --text-primary: #dff0f8;
+    --text-secondary: #8eb8cc;
+    --text-muted: #476070;
+    --pending: #ffd54f;
+    --approved: #80cbc4;
+    --rejected: #ef9a9a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--midnight);
+    color: var(--text-primary);
+    font-family: 'Raleway', sans-serif;
+    font-weight: 300;
+    min-height: 100vh;
+  }
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,0.5) 0%, transparent 100%),
+      radial-gradient(1px 1px at 30% 60%, rgba(128,222,234,0.3) 0%, transparent 100%),
+      radial-gradient(1px 1px at 72% 20%, rgba(255,255,255,0.45) 0%, transparent 100%),
+      radial-gradient(1px 1px at 88% 75%, rgba(128,222,234,0.35) 0%, transparent 100%),
+      radial-gradient(1px 1px at 50% 92%, rgba(255,255,255,0.3) 0%, transparent 100%),
+      radial-gradient(1.5px 1.5px at 5% 40%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 60% 5%, rgba(128,222,234,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 95% 35%, rgba(255,255,255,0.35) 0%, transparent 100%);
+    pointer-events:none; z-index:0;
+  }
+  body::after {
+    content:'';
+    position:fixed;
+    top:-30%; left:-10%; width:120%; height:70%;
+    background:radial-gradient(ellipse at 60% 60%, rgba(38,198,218,0.05) 0%, transparent 55%),
+               radial-gradient(ellipse at 30% 40%, rgba(92,107,192,0.04) 0%, transparent 50%);
+    pointer-events:none; z-index:0;
+    animation:aShift 14s ease-in-out infinite alternate;
+  }
+  @keyframes aShift { 0%{transform:translateX(0)} 100%{transform:translateX(2%)} }
+
+  .app { position:relative; z-index:1; max-width:760px; margin:0 auto; padding:0 20px 60px; }
+
+  /* Header */
+  header { text-align:center; padding:36px 0 28px; }
+  header::after { content:''; display:block; width:140px; height:1px; background:linear-gradient(90deg,transparent,var(--teal),transparent); margin:18px auto 0; }
+  .role-badge { display:inline-flex; align-items:center; gap:6px; background:rgba(38,198,218,0.08); border:1px solid rgba(38,198,218,0.25); border-radius:20px; padding:4px 12px; font-size:9px; letter-spacing:0.25em; text-transform:uppercase; color:var(--sky); margin-bottom:10px; }
+  .site-title { font-family:'Cinzel Decorative',serif; font-size:clamp(12px,2.5vw,16px); letter-spacing:0.3em; color:var(--sky); text-transform:uppercase; opacity:0.8; }
+  .page-title { font-family:'Cormorant Garamond',serif; font-size:clamp(26px,5vw,36px); font-weight:300; font-style:italic; margin-top:4px; }
+  .page-sub { font-size:10px; letter-spacing:0.2em; color:var(--text-muted); text-transform:uppercase; margin-top:4px; }
+  .header-icon { width:38px; height:38px; margin:0 auto 8px; display:block; opacity:0.85; }
+
+  /* Tabs */
+  .tab-nav { display:flex; gap:4px; background:var(--deep); border:1px solid var(--border); border-radius:12px; padding:4px; margin-bottom:24px; }
+  .tab-btn { flex:1; padding:10px 14px; border:none; border-radius:9px; background:transparent; color:var(--text-muted); font-family:'Raleway',sans-serif; font-size:11px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; }
+  .tab-btn:hover { color:var(--text-secondary); }
+  .tab-btn.active { background:linear-gradient(135deg,rgba(38,198,218,0.15),rgba(92,107,192,0.1)); color:var(--sky); border:1px solid var(--border-bright); box-shadow:0 0 14px rgba(38,198,218,0.1); }
+
+  /* Panels */
+  .panel { display:none; animation:fadeIn 0.3s ease; }
+  .panel.active { display:block; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+
+  /* Cards */
+  .glass-card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:22px; margin-bottom:18px; position:relative; overflow:hidden; }
+  .glass-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(38,198,218,0.25),transparent); }
+
+  /* Identity strip */
+  .identity-strip { display:flex; align-items:center; gap:12px; background:rgba(38,198,218,0.05); border:1px solid rgba(38,198,218,0.15); border-radius:10px; padding:12px 16px; margin-bottom:20px; }
+  .user-av { width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:17px; flex-shrink:0; border:2px solid rgba(38,198,218,0.3); background:linear-gradient(135deg,#1e1e4a,#0b0a16); }
+  .user-name { font-size:14px; font-weight:500; }
+  .user-meta { font-size:10px; color:var(--text-muted); letter-spacing:0.08em; }
+  .auth-pill { margin-left:auto; font-size:9px; letter-spacing:0.12em; padding:3px 9px; border-radius:20px; font-weight:600; background:rgba(128,203,196,0.12); color:var(--approved); border:1px solid rgba(128,203,196,0.25); }
+
+  /* Section label */
+  .section-label { font-size:10px; letter-spacing:0.25em; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; display:flex; align-items:center; gap:10px; }
+  .section-label::after { content:''; flex:1; height:1px; background:var(--border); }
+
+  /* My-chars grid */
+  .my-chars-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+  .my-char-card { background:var(--deep); border:1px solid var(--border); border-radius:12px; padding:14px 16px; cursor:pointer; transition:border-color 0.2s, box-shadow 0.2s; }
+  .my-char-card:hover { border-color:var(--border-bright); box-shadow:0 0 18px rgba(38,198,218,0.08); }
+  .my-char-card .cc-av { font-size:22px; margin-bottom:8px; }
+  .my-char-card .cc-name { font-family:'Cormorant Garamond',serif; font-size:14px; font-weight:400; margin-bottom:3px; }
+  .my-char-card .cc-meta { font-size:10px; color:var(--text-muted); }
+  .my-char-card .cc-pending { display:inline-flex; margin-top:8px; font-size:9px; letter-spacing:0.1em; text-transform:uppercase; padding:2px 7px; border-radius:10px; background:rgba(255,213,79,0.1); color:var(--pending); border:1px solid rgba(255,213,79,0.2); }
+
+  /* How-it-works */
+  .how-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+  .how-step { background:var(--deep); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .how-step .icon { font-size:20px; margin-bottom:6px; }
+  .how-step .label { font-size:11px; font-weight:500; margin-bottom:4px; color:var(--sky); }
+  .how-step .desc { font-size:11px; color:var(--text-muted); line-height:1.6; }
+
+  /* Submit form */
+  .char-pick { display:flex; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap; }
+  .char-av { width:46px; height:46px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; border:2px solid var(--border-bright); box-shadow:0 0 12px rgba(38,198,218,0.15); background:linear-gradient(135deg,#1a1540,#0b0a16); }
+  .char-info h3 { font-family:'Cormorant Garamond',serif; font-size:18px; font-weight:400; }
+  .char-info p { font-size:11px; color:var(--text-muted); margin-top:2px; }
+  /* ── Searchable Select ─────────────────────────────────────────────────── */
+  .ss-wrap { position:relative; margin-left:auto; min-width:210px; max-width:290px; }
+  #ss-lb { margin-left:0; max-width:100%; width:100%; }
+  .ss-trig { display:flex; align-items:center; gap:8px; padding:9px 12px; background:var(--deep); border:1px solid var(--border); border-radius:8px; cursor:pointer; user-select:none; transition:border-color 0.2s, box-shadow 0.2s; }
+  .ss-trig:hover, .ss-trig.open { border-color:var(--border-bright); box-shadow:0 0 10px rgba(38,198,218,0.08); }
+  .ss-val { flex:1; font-size:12px; font-family:'Raleway',sans-serif; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); }
+  .ss-val.has-val { color:var(--text-secondary); }
+  .ss-arr { font-size:9px; color:var(--text-muted); flex-shrink:0; transition:transform 0.18s; }
+  .ss-trig.open .ss-arr { transform:rotate(180deg); }
+  .ss-dd { position:fixed; background:var(--deep); border:1px solid var(--border-bright); border-radius:10px; box-shadow:0 10px 36px rgba(0,0,0,0.55); z-index:9999; overflow:hidden; display:none; }
+  .ss-dd.open { display:block; animation:fadeIn 0.14s ease; }
+  .ss-srch { display:block; width:100%; padding:9px 13px; background:rgba(0,0,0,0.28); border:none; border-bottom:1px solid var(--border); color:var(--text-primary); font-family:'Raleway',sans-serif; font-size:12px; outline:none; }
+  .ss-srch::placeholder { color:var(--text-muted); font-style:italic; }
+  .ss-list { max-height:220px; overflow-y:auto; }
+  .ss-list::-webkit-scrollbar { width:4px; }
+  .ss-list::-webkit-scrollbar-track { background:transparent; }
+  .ss-list::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+  .ss-opt { padding:9px 13px; font-size:12px; font-family:'Cormorant Garamond',serif; color:var(--text-secondary); cursor:pointer; transition:background 0.12s, color 0.12s; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; outline:none; }
+  .ss-opt:hover, .ss-opt:focus { background:rgba(38,198,218,0.09); color:var(--text-primary); }
+  .ss-opt.ss-selected { color:var(--sky); background:rgba(38,198,218,0.06); }
+  .ss-opt.ss-selected::before { content:'✓ '; font-size:10px; }
+  .ss-nores { padding:12px 13px; font-size:11px; color:var(--text-muted); font-style:italic; text-align:center; }
+
+  .hint-note { font-size:11px; color:var(--text-muted); font-style:italic; line-height:1.65; padding:10px 14px; border-left:2px solid rgba(38,198,218,0.3); background:rgba(38,198,218,0.04); border-radius:0 8px 8px 0; margin-bottom:18px; }
+
+  /* Locked (current value) fields */
+  .locked-field { background:rgba(0,0,0,0.2); border:1px solid rgba(255,255,255,0.05); border-radius:8px; padding:10px 13px; margin-bottom:12px; }
+  .locked-label { font-size:9px; letter-spacing:0.2em; text-transform:uppercase; color:var(--text-muted); margin-bottom:5px; display:flex; align-items:center; gap:6px; }
+  .locked-label::before { content:'🔒'; font-size:9px; }
+  .locked-text { font-family:'Cormorant Garamond',serif; font-size:13px; color:rgba(255,255,255,0.35); font-style:italic; line-height:1.55; }
+
+  /* Form */
+  .field-group { margin-bottom:16px; }
+  label { display:block; font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:var(--text-muted); margin-bottom:7px; }
+  textarea, input[type="text"] { width:100%; background:var(--deep); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-family:'Cormorant Garamond',serif; font-size:14px; font-weight:300; padding:10px 13px; outline:none; transition:border-color 0.2s; resize:vertical; }
+  textarea { min-height:80px; }
+  textarea:focus, input[type="text"]:focus { border-color:var(--border-bright); box-shadow:0 0 10px rgba(38,198,218,0.08); }
+  .field-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media(max-width:560px){.field-grid{grid-template-columns:1fr;}}
+
+  /* Buttons */
+  .btn-row { display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; margin-top:4px; }
+  .btn { padding:9px 20px; border-radius:8px; border:none; font-family:'Raleway',sans-serif; font-size:10px; font-weight:600; letter-spacing:0.15em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; }
+  .btn-ghost { background:transparent; border:1px solid var(--border); color:var(--text-muted); }
+  .btn-ghost:hover { border-color:var(--border-bright); color:var(--text-secondary); }
+  .btn-submit { background:linear-gradient(135deg,var(--indigo),rgba(38,198,218,0.6)); color:#fff; box-shadow:0 4px 16px rgba(38,198,218,0.2); }
+  .btn-submit:hover { box-shadow:0 4px 24px rgba(38,198,218,0.35); transform:translateY(-1px); }
+  .btn-submit:disabled { opacity:0.5; cursor:not-allowed; transform:none; }
+
+  /* My-submissions */
+  .sub-item { background:var(--deep); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-bottom:12px; }
+  .sub-header { display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+  .sub-char { font-family:'Cormorant Garamond',serif; font-style:italic; font-size:15px; }
+  .sub-time { margin-left:auto; font-size:10px; color:var(--text-muted); }
+  .sub-fields { display:flex; gap:5px; flex-wrap:wrap; }
+  .field-chip { font-size:9px; letter-spacing:0.1em; text-transform:uppercase; padding:2px 7px; border-radius:4px; background:rgba(128,222,234,0.08); border:1px solid rgba(128,222,234,0.18); color:var(--sky); }
+  .pill { display:inline-flex; align-items:center; gap:4px; font-size:9px; letter-spacing:0.12em; text-transform:uppercase; padding:3px 9px; border-radius:20px; font-weight:600; }
+  .pill-pending { background:rgba(255,213,79,0.1); color:var(--pending); border:1px solid rgba(255,213,79,0.25); }
+  .pill-approved { background:rgba(128,203,196,0.1); color:var(--approved); border:1px solid rgba(128,203,196,0.25); }
+  .pill-rejected { background:rgba(239,154,154,0.1); color:var(--rejected); border:1px solid rgba(239,154,154,0.25); }
+  .rejection-note { margin-top:8px; font-size:11px; color:var(--rejected); opacity:0.8; font-style:italic; padding:7px 10px; background:rgba(239,154,154,0.05); border-radius:6px; border:1px solid rgba(239,154,154,0.15); }
+  .approval-note { margin-top:8px; font-size:11px; color:var(--approved); opacity:0.8; font-style:italic; padding:7px 10px; background:rgba(128,203,196,0.05); border-radius:6px; border:1px solid rgba(128,203,196,0.15); }
+
+  /* Success screen */
+  .success-screen { text-align:center; padding:40px 20px; display:none; animation:fadeIn 0.4s ease; }
+  .success-screen.show { display:block; }
+  .success-icon { font-size:40px; margin-bottom:12px; }
+  .success-title { font-family:'Cormorant Garamond',serif; font-size:24px; font-style:italic; margin-bottom:8px; color:var(--approved); }
+  .success-sub { font-size:12px; color:var(--text-muted); line-height:1.7; }
+
+  /* Empty state */
+  .empty-state { text-align:center; padding:36px 20px; color:var(--text-muted); }
+  .empty-state .icon { font-size:28px; margin-bottom:8px; opacity:0.35; }
+  .empty-state p { font-size:12px; font-style:italic; }
+
+  /* Toast */
+  .toast { position:fixed; bottom:24px; right:24px; background:var(--card); border:1px solid var(--border-bright); border-radius:12px; padding:12px 18px; font-size:12px; color:var(--text-primary); box-shadow:0 8px 32px rgba(0,0,0,0.4); transform:translateY(70px); opacity:0; transition:all 0.35s cubic-bezier(0.34,1.56,0.64,1); z-index:100; display:flex; align-items:center; gap:8px; max-width:300px; }
+  .toast.show { transform:translateY(0); opacity:1; }
+
+  /* Loading */
+  .loading { text-align:center; padding:30px; color:var(--text-muted); font-size:12px; font-style:italic; }
+
+  /* Edit-type switcher */
+  .edit-type-switch { display:flex; gap:0; border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:18px; }
+  .edit-type-btn { flex:1; padding:8px 14px; border:none; background:transparent; color:var(--text-muted); font-family:'Raleway',sans-serif; font-size:10px; font-weight:500; letter-spacing:0.12em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; }
+  .edit-type-btn.active { background:linear-gradient(135deg,rgba(38,198,218,0.18),rgba(92,107,192,0.12)); color:var(--sky); }
+
+  /* Lorebook entries editor */
+  .lb-list { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+  .lb-entry { background:rgba(0,0,0,0.15); border:1px solid var(--border); border-radius:10px; overflow:hidden; transition:border-color 0.2s; }
+  .lb-entry.pending-delete { border-color:rgba(239,154,154,0.45); }
+  .lb-entry.pending-add { border-color:rgba(128,203,196,0.45); }
+  .lb-entry.modified { border-color:rgba(255,213,79,0.35); }
+  .lb-entry-hdr { display:flex; align-items:center; gap:8px; padding:10px 13px; cursor:pointer; user-select:none; }
+  .lb-entry-hdr:hover { background:rgba(255,255,255,0.025); }
+  .lb-toggle { font-size:11px; color:var(--text-muted); width:14px; flex-shrink:0; transition:transform 0.15s; }
+  .lb-toggle.open { transform:rotate(90deg); }
+  .lb-entry-title { flex:1; font-family:'Cormorant Garamond',serif; font-size:13px; }
+  .lb-entry-uid { font-size:9px; color:var(--text-muted); }
+  .lb-tag { font-size:9px; letter-spacing:0.08em; padding:1px 6px; border-radius:4px; margin-left:4px; }
+  .lb-tag-edit { background:rgba(255,213,79,0.12); color:var(--pending); border:1px solid rgba(255,213,79,0.2); }
+  .lb-tag-del { background:rgba(239,154,154,0.1); color:var(--rejected); border:1px solid rgba(239,154,154,0.2); }
+  .lb-tag-add { background:rgba(128,203,196,0.1); color:var(--approved); border:1px solid rgba(128,203,196,0.2); }
+  .lb-entry-body { padding:0 13px 13px; display:none; }
+  .lb-entry-body.open { display:block; }
+  .lb-field { margin-bottom:10px; }
+  .lb-field label { font-size:9px; letter-spacing:0.18em; text-transform:uppercase; color:var(--text-muted); display:block; margin-bottom:5px; }
+  .lb-field textarea, .lb-field input[type="text"] { width:100%; background:rgba(0,0,0,0.25); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:'Cormorant Garamond',serif; font-size:13px; padding:8px 10px; outline:none; transition:border-color 0.2s; resize:vertical; }
+  .lb-field textarea { min-height:70px; }
+  .lb-field textarea:focus, .lb-field input[type="text"]:focus { border-color:var(--border-bright); }
+  .lb-disable-row { display:flex; align-items:center; gap:7px; margin-top:8px; }
+  .lb-disable-row input[type="checkbox"] { accent-color:var(--indigo); width:14px; height:14px; cursor:pointer; }
+  .lb-disable-row label { font-size:11px; color:var(--text-muted); cursor:pointer; }
+  .lb-delete-row { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); display:flex; align-items:center; gap:7px; }
+  .lb-delete-row input[type="checkbox"] { accent-color:var(--rejected); width:14px; height:14px; cursor:pointer; }
+  .lb-delete-row label { font-size:11px; color:var(--rejected); cursor:pointer; }
+  .btn-lb-add { display:block; width:100%; padding:10px; border:1px dashed rgba(38,198,218,0.3); border-radius:8px; background:transparent; color:var(--teal); font-size:11px; letter-spacing:0.15em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; margin-bottom:14px; font-family:'Raleway',sans-serif; }
+  .btn-lb-add:hover { background:rgba(38,198,218,0.06); border-color:rgba(38,198,218,0.5); }
+  .lb-empty { text-align:center; padding:28px 16px; color:var(--text-muted); font-size:12px; font-style:italic; }
+
+  /* Co-Author Station readability pass */
+  :root {
+    --coauthor-font-bump: 5px;
+  }
+
+  .tab-btn { font-size:calc(11px + var(--coauthor-font-bump)); }
+  .user-name,
+  .my-char-card .cc-name,
+  .char-info h3,
+  .sub-char,
+  .lb-entry-title { font-size:calc(14px + var(--coauthor-font-bump)); }
+  .ss-val,
+  .ss-srch,
+  .ss-opt,
+  .locked-text,
+  textarea,
+  input[type="text"],
+  .toast,
+  .loading,
+  .how-step .desc,
+  .hint-note,
+  .rejection-note,
+  .approval-note,
+  .success-sub,
+  .empty-state p,
+  .sub-note,
+  .lb-field textarea,
+  .lb-field input[type="text"],
+  .lb-disable-row label,
+  .lb-delete-row label,
+  .lb-empty { font-size:calc(12px + var(--coauthor-font-bump)); }
+  .page-sub,
+  .user-meta,
+  .section-label,
+  .my-char-card .cc-meta,
+  .my-char-card .cc-pending,
+  .how-step .label,
+  .locked-label,
+  label,
+  .btn,
+  .sub-time,
+  .field-chip,
+  .pill,
+  .edit-type-btn,
+  .lb-toggle,
+  .lb-entry-uid,
+  .lb-tag,
+  .lb-field label,
+  .btn-lb-add,
+  #pending-count,
+  #panel-my-chars [style*="font-size:12px"],
+  #panel-my-chars [style*="font-size:11px"],
+  #panel-my-chars [style*="font-size:10px"],
+  #panel-submit [style*="font-size:9px"],
+  #panel-request [style*="font-size:12px"],
+  #panel-request [style*="font-size:9px"],
+  #panel-my-subs [style*="font-size:11px"] { font-size:calc(10px + var(--coauthor-font-bump)) !important; }
+  .role-badge { font-size:calc(9px + var(--coauthor-font-bump)); }
+  .site-title { font-size:clamp(17px, 3vw, 21px); }
+  .page-title { font-size:clamp(31px, 6vw, 41px); }
+  .success-title,
+  #request-success-card [style*="font-size:24px"] { font-size:calc(24px + var(--coauthor-font-bump)) !important; }
+
+  .tab-nav {
+    flex-wrap:nowrap;
+    overflow-x:auto;
+    overflow-y:hidden;
+    scrollbar-width:thin;
+    -webkit-overflow-scrolling:touch;
+  }
+
+  .tab-nav::-webkit-scrollbar {
+    height:8px;
+  }
+
+  .tab-nav::-webkit-scrollbar-thumb {
+    background:rgba(128, 222, 234, 0.22);
+    border-radius:999px;
+  }
+
+  .tab-btn {
+    flex:1 0 180px;
+    min-width:180px;
+    white-space:nowrap;
+  }
+
+  .glass-card,
+  .panel,
+  .identity-strip,
+  .char-pick,
+  .sub-header,
+  .lb-entry-hdr,
+  .btn-row {
+    min-width:0;
+  }
+
+  @media (max-width: 900px) {
+    .app {
+      padding:0 16px 44px;
+    }
+
+    .glass-card {
+      padding:18px;
+    }
+  }
+
+  @media (max-width: 700px) {
+    .tab-btn {
+      flex:0 0 auto;
+      min-width:220px;
+    }
+
+    .identity-strip,
+    .char-pick {
+      align-items:flex-start;
+    }
+
+    .auth-pill,
+    .ss-wrap {
+      margin-left:0;
+    }
+
+    .ss-wrap,
+    #ss-lb {
+      min-width:100%;
+      max-width:100%;
+      width:100%;
+    }
+
+    .btn-row {
+      justify-content:stretch;
+    }
+
+    .btn-row .btn {
+      flex:1 1 220px;
+    }
+  }
+
+  @media (max-width: 560px) {
+    .app {
+      padding:0 12px 36px;
+    }
+
+    header {
+      padding:26px 0 22px;
+    }
+
+    .tab-nav {
+      margin-bottom:18px;
+      padding:5px;
+    }
+
+    .tab-btn {
+      min-width:240px;
+      padding:12px 16px;
+    }
+
+    .glass-card {
+      padding:16px;
+      overflow-x:auto;
+    }
+
+    .my-chars-grid,
+    .how-grid,
+    .field-grid {
+      display:flex;
+      flex-direction:column;
+    }
+
+    .sub-header,
+    .identity-strip,
+    .char-pick,
+    .lb-entry-hdr {
+      flex-wrap:wrap;
+    }
+
+    .sub-time {
+      margin-left:0;
+      width:100%;
+    }
+
+    .toast {
+      right:12px;
+      left:12px;
+      max-width:none;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <!-- Inline constellation book icon -->
+    <svg class="header-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+      <defs>
+        <radialGradient id="bgE" cx="50%" cy="50%" r="60%"><stop offset="0%" stop-color="#12102a"/><stop offset="100%" stop-color="#070610"/></radialGradient>
+        <linearGradient id="coverLeft" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#2e2060"/><stop offset="100%" stop-color="#1a1540"/></linearGradient>
+        <linearGradient id="coverRight" x1="100%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#1a3a50"/><stop offset="100%" stop-color="#0f1e30"/></linearGradient>
+        <linearGradient id="pageLeft" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1e1848"/><stop offset="100%" stop-color="#161240"/></linearGradient>
+        <linearGradient id="pageRight" x1="100%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#0f2a3e"/><stop offset="100%" stop-color="#0a1828"/></linearGradient>
+        <linearGradient id="spineGrad" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#7c4dff"/><stop offset="100%" stop-color="#26c6da"/></linearGradient>
+        <filter id="glowE"><feGaussianBlur stdDeviation="1.3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <rect width="64" height="64" rx="14" fill="url(#bgE)"/>
+      <circle cx="7" cy="8" r="0.6" fill="white" opacity="0.4"/><circle cx="55" cy="7" r="0.5" fill="#b39ddb" opacity="0.5"/><circle cx="59" cy="52" r="0.6" fill="white" opacity="0.35"/><circle cx="5" cy="55" r="0.5" fill="#80deea" opacity="0.4"/>
+      <path d="M 8 48 Q 7 50 8 52 L 30 54 L 30 18 L 8 16 Z" fill="url(#coverLeft)" stroke="#3a2a70" stroke-width="0.5"/>
+      <path d="M 56 48 Q 57 50 56 52 L 34 54 L 34 18 L 56 16 Z" fill="url(#coverRight)" stroke="#0f2a4a" stroke-width="0.5"/>
+      <path d="M 10 46 Q 9 48 10 50 L 30 52 L 30 20 L 10 18 Z" fill="url(#pageLeft)" stroke="#4a3080" stroke-width="0.4"/>
+      <path d="M 54 46 Q 55 48 54 50 L 34 52 L 34 20 L 54 18 Z" fill="url(#pageRight)" stroke="#0f3050" stroke-width="0.4"/>
+      <path d="M 30 20 L 30 52 L 34 52 L 34 20 Z" fill="url(#spineGrad)" opacity="0.6"/>
+      <line x1="32" y1="20" x2="32" y2="52" stroke="white" stroke-width="0.4" opacity="0.3"/>
+      <g filter="url(#glowE)">
+        <circle cx="15" cy="26" r="1.1" fill="#b39ddb" opacity="0.9"/><circle cx="24" cy="30" r="0.9" fill="#9575cd" opacity="0.85"/><circle cx="18" cy="36" r="1.0" fill="#7c4dff" opacity="0.9"/><circle cx="26" cy="42" r="0.8" fill="#b39ddb" opacity="0.8"/>
+        <line x1="15" y1="26" x2="24" y2="30" stroke="#b39ddb" stroke-width="0.5" stroke-opacity="0.55"/><line x1="24" y1="30" x2="18" y2="36" stroke="#9575cd" stroke-width="0.5" stroke-opacity="0.55"/><line x1="18" y1="36" x2="26" y2="42" stroke="#7c4dff" stroke-width="0.5" stroke-opacity="0.55"/>
+        <circle cx="15" cy="26" r="0.4" fill="white" opacity="0.9"/><circle cx="18" cy="36" r="0.4" fill="white" opacity="0.85"/>
+      </g>
+      <g filter="url(#glowE)">
+        <circle cx="49" cy="26" r="1.1" fill="#4dd0e1" opacity="0.9"/><circle cx="40" cy="30" r="0.9" fill="#26c6da" opacity="0.85"/><circle cx="46" cy="36" r="1.0" fill="#5c6bc0" opacity="0.9"/><circle cx="38" cy="42" r="0.8" fill="#4dd0e1" opacity="0.8"/>
+        <line x1="49" y1="26" x2="40" y2="30" stroke="#4dd0e1" stroke-width="0.5" stroke-opacity="0.55"/><line x1="40" y1="30" x2="46" y2="36" stroke="#26c6da" stroke-width="0.5" stroke-opacity="0.55"/><line x1="46" y1="36" x2="38" y2="42" stroke="#5c6bc0" stroke-width="0.5" stroke-opacity="0.55"/>
+        <circle cx="49" cy="26" r="0.4" fill="white" opacity="0.9"/><circle cx="46" cy="36" r="0.4" fill="white" opacity="0.85"/>
+      </g>
+    </svg>
+    <div class="role-badge">✦ Co-Author Access</div>
+    <div class="site-title">DreamTavern · Co-Author Station</div>
+    <h1 class="page-title">Your Writing Studio</h1>
+    <p class="page-sub">Propose edits · Track submissions · Collaborate</p>
+  </header>
+
+  <div class="tab-nav">
+    <button class="tab-btn active" id="tab-my-chars" onclick="switchTab('my-chars',this)">My Characters</button>
+    <button class="tab-btn" id="tab-submit" onclick="switchTab('submit',this)">Submit Edit</button>
+    <button class="tab-btn" id="tab-my-subs" onclick="switchTab('my-subs',this)">My Submissions <span id="pending-count" style="background:rgba(255,213,79,0.2);color:var(--pending);border-radius:10px;padding:1px 6px;font-size:9px;margin-left:3px;display:none;"></span></button>
+    <button class="tab-btn" id="tab-request" onclick="switchTab('request',this)">Request Access</button>
+  </div>
+
+  <!-- MY CHARACTERS -->
+  <div class="panel active" id="panel-my-chars">
+    <div class="glass-card">
+      <div class="identity-strip">
+        <div class="user-av" id="user-avatar-icon">✦</div>
+        <div>
+          <div class="user-name" id="user-display-name">Loading…</div>
+          <div class="user-meta">Co-Author · DreamTavern</div>
+        </div>
+        <span class="auth-pill">✓ Authorized</span>
+      </div>
+      <div class="section-label">Characters I Can Edit</div>
+      <div id="chars-grid" class="my-chars-grid">
+        <div class="loading">Loading your characters…</div>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <div class="section-label">How It Works</div>
+      <div class="how-grid">
+        <div class="how-step"><div class="icon">🔍</div><div class="label">0. Request Access</div><div class="desc">Not assigned yet? Use Request Access to ask an admin to add you.</div></div>
+        <div class="how-step"><div class="icon">✍️</div><div class="label">1. Write Your Edit</div><div class="desc">Fill in any character or lorebook fields you'd like to change.</div></div>
+        <div class="how-step"><div class="icon">📬</div><div class="label">2. Submit for Review</div><div class="desc">Your edit goes to the admin queue for approval.</div></div>
+        <div class="how-step"><div class="icon">🌟</div><div class="label">3. Goes Live</div><div class="desc">If approved, your changes push to all DreamTavern users.</div></div>
+      </div>
+    </div>
+
+    <!-- Request-access promo strip -->
+    <div class="glass-card" style="background:linear-gradient(135deg,rgba(38,198,218,0.06),rgba(92,107,192,0.04));border-color:rgba(38,198,218,0.18);">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <div style="font-size:22px;">🔍</div>
+        <div style="flex:1;">
+          <div style="font-size:12px;font-weight:500;color:var(--sky);margin-bottom:3px;">Want to contribute to more characters?</div>
+          <div style="font-size:11px;color:var(--text-muted);line-height:1.55;">Use <strong style="color:var(--text-secondary);">Request Access</strong> to browse available characters and send the admin a request — you'll be notified as soon as it's reviewed.</div>
+        </div>
+        <button class="btn btn-submit" style="flex-shrink:0;white-space:nowrap;" onclick="switchTab('request',document.getElementById('tab-request'))">Request Access →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SUBMIT EDIT -->
+  <div class="panel" id="panel-submit">
+    <div class="glass-card" id="submit-form-wrap">
+      <div class="section-label">Submitting As</div>
+      <div class="identity-strip" style="margin-bottom:20px;">
+        <div class="user-av">✦</div>
+        <div>
+          <div class="user-name" id="submit-user-name">…</div>
+          <div class="user-meta">Co-Author · Edit will go to admin for review</div>
+        </div>
+        <span class="auth-pill">✓ Authorized</span>
+      </div>
+
+      <div class="section-label">Select Character</div>
+      <div class="char-pick">
+        <div class="char-av" id="selected-char-av">📖</div>
+        <div class="char-info">
+          <h3 id="selected-char-name">—</h3>
+          <p>You have edit access</p>
+        </div>
+        <div class="ss-wrap" id="ss-char">
+          <div class="ss-trig" id="ss-char-trig" onclick="ssToggle('ss-char')" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+            <span class="ss-val" id="ss-char-val">— Select a character —</span>
+            <span class="ss-arr">▾</span>
+          </div>
+          <div class="ss-dd" id="ss-char-dd">
+            <input class="ss-srch" id="ss-char-srch" type="text" placeholder="Type to filter…" autocomplete="off"
+                   oninput="ssFilter('ss-char',this.value)"
+                   onkeydown="ssSrchKey('ss-char',event)">
+            <div class="ss-list" id="ss-char-list" role="listbox"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Edit type switcher -->
+      <div class="section-label" style="margin-top:4px;">What Would You Like to Edit?</div>
+      <div class="edit-type-switch" id="edit-type-switch">
+        <button class="edit-type-btn active" id="et-char" onclick="setEditType('character',this)">✎ Character Fields</button>
+        <button class="edit-type-btn" id="et-lore" onclick="setEditType('lorebook',this)">📚 Lorebook Entries</button>
+      </div>
+
+      <!-- CHARACTER FIELDS PANEL -->
+      <div id="char-fields-panel">
+        <div id="current-values-wrap" style="display:none;">
+          <div class="section-label">Current Values <span style="font-size:9px;color:var(--text-muted);font-style:italic;letter-spacing:0;text-transform:none;">(read-only — for reference)</span></div>
+          <div id="current-values-list"></div>
+        </div>
+
+        <div class="section-label" style="margin-top:4px;">Your Proposed Changes</div>
+        <p class="hint-note">Only fill in the fields you want to change. Blank fields won't be submitted. Your edit will be reviewed before going live.</p>
+
+        <div class="field-group">
+          <label>Description</label>
+          <textarea id="f-description" placeholder="Propose a new description…"></textarea>
+        </div>
+        <div class="field-grid">
+          <div class="field-group">
+            <label>Personality</label>
+            <textarea id="f-personality" placeholder="Propose personality changes…" style="min-height:70px;"></textarea>
+          </div>
+          <div class="field-group">
+            <label>Scenario / First Message</label>
+            <textarea id="f-scenario" placeholder="Propose a scenario…" style="min-height:70px;"></textarea>
+          </div>
+        </div>
+        <div class="field-grid">
+          <div class="field-group">
+            <label>Example Dialogue</label>
+            <textarea id="f-mes_example" placeholder="Propose dialogue examples…" style="min-height:70px;"></textarea>
+          </div>
+          <div class="field-group">
+            <label>System Prompt</label>
+            <textarea id="f-system_prompt" placeholder="Any system-level notes…" style="min-height:70px;"></textarea>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Creator Notes</label>
+          <textarea id="f-creator_notes" placeholder="Notes about this character's creation, lore, or intent…" style="min-height:60px;"></textarea>
+        </div>
+      </div>
+
+      <!-- LOREBOOK ENTRIES PANEL -->
+      <div id="lorebook-panel" style="display:none;">
+        <p class="hint-note" id="lb-hint">Select a character above to see its lorebooks.</p>
+
+        <!-- Lorebook selector (shown once a character is picked) -->
+        <div id="lb-picker-wrap" style="display:none;margin-bottom:18px;">
+          <div class="section-label">Select Lorebook</div>
+          <div class="ss-wrap" id="ss-lb" style="max-width:100%;margin-left:0;">
+            <div class="ss-trig" id="ss-lb-trig" onclick="ssToggle('ss-lb')" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+              <span class="ss-val" id="ss-lb-val">— Select a lorebook —</span>
+              <span class="ss-arr">▾</span>
+            </div>
+            <div class="ss-dd" id="ss-lb-dd">
+              <input class="ss-srch" id="ss-lb-srch" type="text" placeholder="Type to filter…" autocomplete="off"
+                     oninput="ssFilter('ss-lb',this.value)"
+                     onkeydown="ssSrchKey('ss-lb',event)">
+              <div class="ss-list" id="ss-lb-list" role="listbox"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="lb-entries-wrap" style="display:none;">
+          <div class="section-label">Lorebook Entries <span id="lb-name-label" style="font-size:9px;color:var(--text-muted);font-style:italic;letter-spacing:0;text-transform:none;"></span></div>
+          <p class="hint-note" style="margin-bottom:12px;">Edit entries below, or add a new one. Mark entries for deletion with the checkbox. Only changed entries will be included in your submission.</p>
+          <div class="lb-list" id="lb-list"></div>
+          <button class="btn-lb-add" onclick="addNewLbEntry()">+ Add New Entry</button>
+        </div>
+      </div>
+
+      <!-- Shared note + buttons -->
+      <div class="field-group">
+        <label>Note to Admin <span style="color:var(--text-muted);font-size:9px;">(optional)</span></label>
+        <input type="text" id="f-notes" placeholder="Explain what you changed and why…"/>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" onclick="clearForm()">Clear</button>
+        <button class="btn btn-submit" id="submit-btn" onclick="submitEdit()">✦ Submit for Review</button>
+      </div>
+    </div>
+
+    <!-- Success screen -->
+    <div class="success-screen" id="success-screen">
+      <div class="success-icon">📬</div>
+      <div class="success-title">Edit Submitted!</div>
+      <p class="success-sub" id="success-sub-text">Your proposed changes are now in the admin's review queue.<br><br>You can track the status under <strong>My Submissions</strong>. If approved, your changes will be pushed to all DreamTavern users.</p>
+      <br>
+      <button class="btn btn-submit" style="margin-top:8px;" onclick="resetForm()">✦ Submit Another Edit</button>
+    </div>
+  </div>
+
+  <!-- MY SUBMISSIONS -->
+  <div class="panel" id="panel-my-subs">
+    <div class="glass-card">
+      <div class="section-label">My Submission History</div>
+      <div id="my-subs-list">
+        <div class="loading">Loading submissions…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- REQUEST ACCESS -->
+  <div class="panel" id="panel-request">
+
+    <!-- Success screen (hidden by default) -->
+    <div class="glass-card" id="request-success-card" style="display:none;">
+      <div style="text-align:center;padding:40px 20px;">
+        <div style="font-size:38px;margin-bottom:12px;">✦</div>
+        <div style="font-family:'Cormorant Garamond',serif;font-size:24px;font-style:italic;margin-bottom:8px;color:var(--approved);">Request Submitted</div>
+        <p style="font-size:12px;color:var(--text-muted);line-height:1.7;margin-bottom:20px;">Your co-author access request has been sent to the admin for review.<br>You'll receive a notification in your push inbox when it's decided.</p>
+        <button class="btn btn-submit" onclick="showRequestForm()">↩ Submit Another Request</button>
+      </div>
+    </div>
+
+    <!-- Request form -->
+    <div class="glass-card" id="request-form-card">
+      <div class="section-label">Request Co-Author Access</div>
+      <p class="hint-note" style="margin-bottom:16px;">Select any character from the DreamTavern library and send the admin a short note explaining why you'd like to contribute. Once approved, the character will appear in your <em>My Characters</em> tab.</p>
+
+      <label style="margin-bottom:8px;">Character</label>
+      <div class="ss-wrap" id="ss-rchar" style="margin:0 0 16px;min-width:100%;max-width:100%;width:100%;">
+        <div class="ss-trig" id="ss-rchar-trig" onclick="ssToggle('ss-rchar')" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+          <span class="ss-val" id="ss-rchar-val">— Select a character —</span>
+          <span class="ss-arr">▾</span>
+        </div>
+        <div class="ss-dd" id="ss-rchar-dd">
+          <input class="ss-srch" id="ss-rchar-srch" type="text" placeholder="Type to filter…" autocomplete="off"
+                 oninput="ssFilter('ss-rchar',this.value)"
+                 onkeydown="ssSrchKey('ss-rchar',event)">
+          <div class="ss-list" id="ss-rchar-list" role="listbox"></div>
+        </div>
+      </div>
+
+      <label style="margin-bottom:8px;">Message to Admin <span style="opacity:0.45;text-transform:none;letter-spacing:0;">(optional)</span></label>
+      <textarea id="request-msg" placeholder="Tell the admin why you'd like to co-author this character, any relevant experience, or what you plan to contribute…" style="min-height:90px;"></textarea>
+
+      <div class="btn-row" style="margin-top:16px;">
+        <button class="btn btn-ghost" onclick="clearRequestForm()">Clear</button>
+        <button class="btn btn-submit" onclick="submitAccessRequest()">✦ Submit Request</button>
+      </div>
+    </div>
+
+    <!-- My past requests -->
+    <div class="glass-card">
+      <div class="section-label">My Access Requests</div>
+      <div id="my-requests-list">
+        <div class="loading">Loading…</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="t-icon">✦</span><span id="t-msg">Done!</span></div>
+
+<script>
+  // ── State ─────────────────────────────────────────────────────────────────
+  let csrfToken = '';
+  let assignments = [];   // { character_file, character_display_name, current_fields, pending_count }
+  let currentEditType = 'character';  // 'character' | 'lorebook'
+  let lorebookData = null;            // { lorebook_name, entries: {...} } from server
+  let lbEntryCounter = 0;            // counter for new entries not yet on server
+  let selectedAssignment = null;
+
+  const FIELD_LABELS = {
+    description: 'Description',
+    personality: 'Personality',
+    scenario: 'Scenario',
+    mes_example: 'Example Dialogue',
+    system_prompt: 'System Prompt',
+    creator_notes: 'Creator Notes',
+  };
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  async function init() {
+    await getCsrf();
+    await loadUserInfo();
+    await loadAssignments();
+  }
+
+  async function getCsrf() {
+    try {
+      const r = await fetch('/csrf-token', { credentials: 'include' });
+      csrfToken = (await r.json()).token || '';
+    } catch { /* no csrf — some endpoints may not need it */ }
+  }
+
+  function postHeaders() {
+    return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
+  }
+
+  async function loadUserInfo() {
+    try {
+      const r = await fetch('/api/users/me', { credentials: 'include' });
+      if (r.ok) {
+        const data = await r.json();
+        const name = data?.profile?.name || data?.profile?.handle || 'Co-Author';
+        document.getElementById('user-display-name').textContent = name;
+        document.getElementById('submit-user-name').textContent = name;
+        // Simple initial for avatar
+        document.getElementById('user-avatar-icon').textContent = name.charAt(0).toUpperCase();
+      }
+    } catch { /* use defaults */ }
+  }
+
+  async function loadAssignments() {
+    try {
+      const r = await fetch('/api/coauthors/my-assignments', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify({}),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        renderCharsGrid([]);
+        return;
+      }
+      assignments = data.assignments || [];
+      renderCharsGrid(assignments);
+      populateCharSelector(assignments);
+      updatePendingBadge(assignments);
+    } catch (err) {
+      renderCharsGrid([]);
+      showToast('⚠', 'Could not load your characters.');
+    }
+  }
+
+  function updatePendingBadge(asgns) {
+    const total = asgns.reduce((n, a) => n + (a.pending_count || 0), 0);
+    const badge = document.getElementById('pending-count');
+    if (total > 0) {
+      badge.textContent = total;
+      badge.style.display = 'inline';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  // ── My Characters tab ─────────────────────────────────────────────────────
+  const CHAR_EMOJIS = ['🌙','🦅','🌿','⚔️','🌸','🐉','🔮','🌊','🦋','✨'];
+
+  function renderCharsGrid(asgns) {
+    const grid = document.getElementById('chars-grid');
+    if (!asgns.length) {
+      grid.innerHTML = `
+        <div style="grid-column:1/-1;">
+          <div class="empty-state" style="padding-bottom:12px;">
+            <div class="icon">📭</div>
+            <p>You haven't been assigned to any characters yet.</p>
+          </div>
+          <div style="text-align:center;padding-bottom:20px;">
+            <button class="btn btn-submit" onclick="switchTab('request',document.getElementById('tab-request'))">
+              🔍 Request Co-Author Access
+            </button>
+            <p style="font-size:10px;color:var(--text-muted);margin-top:8px;letter-spacing:0.05em;">
+              Browse available characters and send a request to the admin.
+            </p>
+          </div>
+        </div>`;
+      return;
+    }
+    grid.innerHTML = asgns.map((a, i) => `
+      <div class="my-char-card" onclick="openSubmitFor(${i})">
+        <div class="cc-av">${CHAR_EMOJIS[i % CHAR_EMOJIS.length]}</div>
+        <div class="cc-name">${esc(a.character_display_name)}</div>
+        <div class="cc-meta">Edit access granted</div>
+        ${a.pending_count ? `<div class="cc-pending">${a.pending_count} pending</div>` : ''}
+      </div>
+    `).join('');
+  }
+
+  function openSubmitFor(idx) {
+    const assignment = assignments[idx];
+    if (!assignment) return;
+    // Pre-select this character in the Submit tab
+    ssSelect('ss-char', idx);
+    onCharSelected();
+    switchTab('submit', document.getElementById('tab-submit'));
+  }
+
+  // ── Submit Edit tab ───────────────────────────────────────────────────────
+  function populateCharSelector(asgns) {
+    ssInit('ss-char',
+      asgns.map(a => ({ value: a.character_registry_key || a.character_file, label: a.character_display_name, data: a })),
+      '— Select a character —');
+  }
+
+  function onCharSelected() {
+    const characterKey = ssGet('ss-char');
+    selectedAssignment = assignments.find(a => (a.character_registry_key || a.character_file) === characterKey) || null;
+
+    document.getElementById('selected-char-name').textContent =
+      selectedAssignment ? selectedAssignment.character_display_name : '—';
+    document.getElementById('selected-char-av').textContent =
+      selectedAssignment ? CHAR_EMOJIS[assignments.indexOf(selectedAssignment) % CHAR_EMOJIS.length] : '📖';
+
+    renderCurrentValues(selectedAssignment);
+
+    // Reset lorebook state on character change
+    lorebookData = null;
+    lbEntryCounter = 0;
+    document.getElementById('lb-picker-wrap').style.display = 'none';
+    document.getElementById('lb-entries-wrap').style.display = 'none';
+    document.getElementById('lb-hint').textContent = selectedAssignment
+      ? 'Loading lorebooks…'
+      : 'Select a character above to see its lorebooks.';
+    document.getElementById('lb-hint').style.display = 'block';
+    document.getElementById('lb-name-label').textContent = '';
+    document.getElementById('lb-list').innerHTML = '';
+    ssInit('ss-lb', [], '— Select a lorebook —');
+
+    // If lorebook tab is currently visible, trigger a load
+    if (currentEditType === 'lorebook' && selectedAssignment) {
+      loadLorebookData(selectedAssignment.character_file);
+    }
+  }
+
+  function renderCurrentValues(asgn) {
+    const wrap = document.getElementById('current-values-wrap');
+    const list = document.getElementById('current-values-list');
+    if (!asgn || !asgn.current_fields) { wrap.style.display = 'none'; return; }
+
+    const fields = asgn.current_fields;
+    const nonEmpty = Object.entries(FIELD_LABELS).filter(([k]) => fields[k]);
+    if (!nonEmpty.length) { wrap.style.display = 'none'; return; }
+
+    list.innerHTML = nonEmpty.map(([k, label]) => `
+      <div class="locked-field">
+        <div class="locked-label">${label}</div>
+        <div class="locked-text">${esc(fields[k]).substring(0, 300)}${fields[k].length > 300 ? '…' : ''}</div>
+      </div>
+    `).join('');
+    wrap.style.display = 'block';
+  }
+
+  // ── Edit-type switcher ────────────────────────────────────────────────────
+  function setEditType(type, btn) {
+    currentEditType = type;
+    document.querySelectorAll('.edit-type-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    if (type === 'character') {
+      document.getElementById('char-fields-panel').style.display = 'block';
+      document.getElementById('lorebook-panel').style.display = 'none';
+    } else {
+      document.getElementById('char-fields-panel').style.display = 'none';
+      document.getElementById('lorebook-panel').style.display = 'block';
+      if (selectedAssignment && !lorebookData) {
+        loadLorebookData(selectedAssignment.character_file);
+      }
+    }
+  }
+
+  // ── Lorebook loading — step 1: fetch list, populate picker ───────────────
+  async function loadLorebookData(charFile) {
+    const hint       = document.getElementById('lb-hint');
+    const pickerWrap = document.getElementById('lb-picker-wrap');
+    const entriesWrap = document.getElementById('lb-entries-wrap');
+
+    hint.textContent = 'Loading lorebooks…';
+    hint.style.display = 'block';
+    pickerWrap.style.display = 'none';
+    entriesWrap.style.display = 'none';
+    lorebookData = null;
+
+    try {
+      const r = await fetch('/api/coauthors/lorebook-list', {
+        method: 'POST', credentials: 'include', headers: postHeaders(),
+        body: JSON.stringify({
+          target_character_file: charFile,
+          owner_handle: selectedAssignment?.owner_handle || '',
+          character_registry_key: selectedAssignment?.character_registry_key || '',
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        hint.textContent = data.error || 'Could not load lorebook list.';
+        return;
+      }
+      if (!data.lorebooks || data.lorebooks.length === 0) {
+        hint.textContent = 'No lorebooks found for this character — you can only edit character fields.';
+        return;
+      }
+
+      hint.style.display = 'none';
+      pickerWrap.style.display = 'block';
+
+      // Populate lorebook picker — linked lorebook shown with ✦ marker
+      ssInit('ss-lb',
+        data.lorebooks.map(lb => ({
+          value: lb.lorebook_name,
+          label: lb.is_linked ? `✦ ${lb.lorebook_name}` : lb.lorebook_name,
+        })),
+        '— Select a lorebook —');
+
+      // Auto-select the linked lorebook if there is one
+      if (data.linked_lorebook_name) {
+        const linkedIdx = data.lorebooks.findIndex(lb => lb.lorebook_name === data.linked_lorebook_name);
+        if (linkedIdx !== -1) {
+          ssSelect('ss-lb', linkedIdx);
+          await loadLorebookEntries(charFile, data.linked_lorebook_name);
+        }
+      }
+    } catch (err) {
+      hint.textContent = 'Network error loading lorebooks.';
+    }
+  }
+
+  // ── Lorebook loading — step 2: fetch entries for chosen lorebook ──────────
+  async function loadLorebookEntries(charFile, lorebookName) {
+    const entriesWrap = document.getElementById('lb-entries-wrap');
+    const hint        = document.getElementById('lb-hint');
+    entriesWrap.style.display = 'none';
+    hint.textContent = `Loading "${lorebookName}"…`;
+    hint.style.display = 'block';
+    lorebookData = null;
+    lbEntryCounter = 0;
+    document.getElementById('lb-list').innerHTML = '';
+
+    try {
+      const r = await fetch('/api/coauthors/lorebook-data', {
+        method: 'POST', credentials: 'include', headers: postHeaders(),
+        body: JSON.stringify({
+          target_character_file: charFile,
+          lorebook_name: lorebookName,
+          owner_handle: selectedAssignment?.owner_handle || '',
+          character_registry_key: selectedAssignment?.character_registry_key || '',
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        hint.textContent = data.error || 'Could not load lorebook entries.';
+        return;
+      }
+      if (!data.entries) {
+        hint.textContent = `"${lorebookName}" has no entries yet.`;
+        lorebookData = { lorebook_name: lorebookName, entries: {} };
+        document.getElementById('lb-name-label').textContent = `— ${lorebookName}`;
+        entriesWrap.style.display = 'block';
+        renderLorebookEntries({});
+        hint.style.display = 'none';
+        return;
+      }
+      lorebookData = data;
+      hint.style.display = 'none';
+      document.getElementById('lb-name-label').textContent = `— ${lorebookName}`;
+      entriesWrap.style.display = 'block';
+      renderLorebookEntries(data.entries);
+    } catch (err) {
+      hint.textContent = 'Network error loading lorebook entries.';
+    }
+  }
+
+  // ── Lorebook rendering ────────────────────────────────────────────────────
+  function renderLorebookEntries(entries) {
+    const list = document.getElementById('lb-list');
+    const entryKeys = Object.keys(entries).sort((a, b) => (entries[a].uid || 0) - (entries[b].uid || 0));
+    if (!entryKeys.length) {
+      list.innerHTML = '<div class="lb-empty">No entries found in this lorebook.</div>';
+      return;
+    }
+    list.innerHTML = entryKeys.map(k => renderLbEntry(k, entries[k], false)).join('');
+  }
+
+  function renderLbEntry(key, entry, isNew) {
+    const uid = entry.uid ?? key;
+    const title = entry.comment || `Entry ${uid}`;
+    const keyStr = Array.isArray(entry.key) ? entry.key.join(', ') : '';
+    const keysecStr = Array.isArray(entry.keysecondary) ? entry.keysecondary.join(', ') : '';
+    const addTag = isNew ? '<span class="lb-tag lb-tag-add">NEW</span>' : '';
+    const deleteSection = isNew ? '' : `
+      <div class="lb-delete-row">
+        <input type="checkbox" id="lb-del-${key}" onchange="onLbDeleteToggle('${key}')">
+        <label for="lb-del-${key}">Mark this entry for deletion</label>
+      </div>`;
+    return `
+      <div class="lb-entry${isNew ? ' pending-add' : ''}" id="lb-entry-${key}">
+        <div class="lb-entry-hdr" onclick="toggleLbEntry('${key}')">
+          <span class="lb-toggle" id="lb-tog-${key}">▶</span>
+          <span class="lb-entry-title" id="lb-title-${key}">${esc(title)}</span>
+          ${!isNew ? `<span class="lb-entry-uid">uid ${uid}</span>` : ''}
+          ${addTag}
+        </div>
+        <div class="lb-entry-body" id="lb-body-${key}">
+          <div class="lb-field">
+            <label>Name / Comment</label>
+            <input type="text" id="lb-comment-${key}" value="${esc(entry.comment || '')}" oninput="onLbChange('${key}')">
+          </div>
+          <div class="lb-field">
+            <label>Content</label>
+            <textarea id="lb-content-${key}" oninput="onLbChange('${key}')">${esc(entry.content || '')}</textarea>
+          </div>
+          <div class="lb-field">
+            <label>Trigger Keywords <span style="color:var(--text-muted);font-size:9px;">(comma-separated)</span></label>
+            <input type="text" id="lb-key-${key}" value="${esc(keyStr)}" oninput="onLbChange('${key}')">
+          </div>
+          <div class="lb-field">
+            <label>Secondary Keywords <span style="color:var(--text-muted);font-size:9px;">(comma-separated, optional)</span></label>
+            <input type="text" id="lb-keysec-${key}" value="${esc(keysecStr)}" oninput="onLbChange('${key}')">
+          </div>
+          <div class="lb-disable-row">
+            <input type="checkbox" id="lb-disable-${key}" ${entry.disable ? 'checked' : ''} onchange="onLbChange('${key}')">
+            <label for="lb-disable-${key}">Disabled (entry inactive)</label>
+          </div>
+          ${deleteSection}
+        </div>
+      </div>`;
+  }
+
+  function toggleLbEntry(key) {
+    const body = document.getElementById(`lb-body-${key}`);
+    const tog = document.getElementById(`lb-tog-${key}`);
+    if (!body) return;
+    const isOpen = body.classList.contains('open');
+    body.classList.toggle('open', !isOpen);
+    tog.classList.toggle('open', !isOpen);
+    tog.textContent = isOpen ? '▶' : '▶'; // stays as arrow; CSS rotates it
+  }
+
+  function onLbChange(key) {
+    // Update displayed title to reflect comment field changes
+    const commentEl = document.getElementById(`lb-comment-${key}`);
+    const titleEl = document.getElementById(`lb-title-${key}`);
+    if (commentEl && titleEl) {
+      const newTitle = commentEl.value.trim() || `Entry ${key}`;
+      titleEl.textContent = newTitle;
+    }
+    // Mark entry as modified visually (if not new/deleted)
+    const entryEl = document.getElementById(`lb-entry-${key}`);
+    const isNew = entryEl?.classList.contains('pending-add');
+    const isDel = entryEl?.classList.contains('pending-delete');
+    if (entryEl && !isNew && !isDel) entryEl.classList.add('modified');
+  }
+
+  function onLbDeleteToggle(key) {
+    const cb = document.getElementById(`lb-del-${key}`);
+    const entryEl = document.getElementById(`lb-entry-${key}`);
+    if (!entryEl) return;
+    if (cb?.checked) {
+      entryEl.classList.add('pending-delete');
+      entryEl.classList.remove('modified');
+    } else {
+      entryEl.classList.remove('pending-delete');
+      onLbChange(key); // re-evaluate modified state
+    }
+  }
+
+  function addNewLbEntry() {
+    lbEntryCounter++;
+    const newKey = `new_${lbEntryCounter}`;
+    const newEntry = { uid: null, comment: '', content: '', key: [], keysecondary: [], disable: false };
+    const list = document.getElementById('lb-list');
+    const emptyEl = list.querySelector('.lb-empty');
+    if (emptyEl) emptyEl.remove();
+    const div = document.createElement('div');
+    div.innerHTML = renderLbEntry(newKey, newEntry, true);
+    list.appendChild(div.firstElementChild);
+    // Auto-open the new entry
+    toggleLbEntry(newKey);
+  }
+
+  /**
+   * Collect lorebook changes from the current DOM state.
+   * Returns null if nothing changed, or an array of change objects.
+   */
+  function collectLorebookChanges() {
+    const changes = [];
+    const origEntries = lorebookData?.entries || {};
+
+    // Check each DOM entry
+    document.querySelectorAll('.lb-entry').forEach(el => {
+      const id = el.id.replace('lb-entry-', '');
+      const isNew = el.classList.contains('pending-add');
+      const isDel = el.classList.contains('pending-delete');
+
+      const comment = document.getElementById(`lb-comment-${id}`)?.value.trim() || '';
+      const content = document.getElementById(`lb-content-${id}`)?.value || '';
+      const keyRaw = document.getElementById(`lb-key-${id}`)?.value || '';
+      const keysecRaw = document.getElementById(`lb-keysec-${id}`)?.value || '';
+      const disable = document.getElementById(`lb-disable-${id}`)?.checked || false;
+
+      const keyArr = keyRaw.split(',').map(s => s.trim()).filter(Boolean);
+      const keysecArr = keysecRaw.split(',').map(s => s.trim()).filter(Boolean);
+
+      if (isNew) {
+        changes.push({
+          action: 'add',
+          entry_uid: null,
+          proposed: { comment, content, key: keyArr, keysecondary: keysecArr, disable },
+        });
+      } else {
+        // Find original uid from entry element data
+        const uidEl = el.querySelector('.lb-entry-uid');
+        const uidText = uidEl?.textContent || '';
+        const uid = parseInt(uidText.replace('uid ', ''), 10);
+
+        if (isDel) {
+          changes.push({ action: 'delete', entry_uid: uid });
+        } else if (el.classList.contains('modified')) {
+          changes.push({
+            action: 'edit',
+            entry_uid: uid,
+            proposed: { comment, content, key: keyArr, keysecondary: keysecArr, disable },
+          });
+        }
+      }
+    });
+
+    return changes;
+  }
+
+  function clearForm() {
+    ['description','personality','scenario','mes_example','system_prompt','creator_notes'].forEach(f => {
+      document.getElementById('f-' + f).value = '';
+    });
+    document.getElementById('f-notes').value = '';
+    // Reset lorebook editor (re-render from current lorebookData without losing picker state)
+    if (lorebookData) renderLorebookEntries(lorebookData.entries);
+    lbEntryCounter = 0;
+    document.getElementById('lb-list').querySelectorAll('.lb-entry').forEach(el => {
+      el.classList.remove('modified','pending-delete');
+      el.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+    });
+  }
+
+  async function submitEdit() {
+    if (!selectedAssignment) {
+      showToast('⚠', 'Please select a character first.');
+      return;
+    }
+    const notes = document.getElementById('f-notes').value.trim();
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+
+    let body;
+
+    if (currentEditType === 'lorebook') {
+      // ── Lorebook submission ────────────────────────────────────────────────
+      const selectedLorebookName = ssGet('ss-lb');
+      if (!lorebookData || !selectedLorebookName) {
+        showToast('⚠', 'Select a lorebook first.');
+        btn.disabled = false; btn.textContent = '✦ Submit for Review';
+        return;
+      }
+      const changes = collectLorebookChanges();
+      if (!changes || changes.length === 0) {
+        showToast('⚠', 'No lorebook changes detected. Edit some entries first.');
+        btn.disabled = false; btn.textContent = '✦ Submit for Review';
+        return;
+      }
+      body = {
+        target_character_file: selectedAssignment.character_file,
+        owner_handle: selectedAssignment.owner_handle,
+        character_registry_key: selectedAssignment.character_registry_key,
+        edit_type: 'lorebook',
+        lorebook_name: lorebookData?.lorebook_name || ssGet('ss-lb') || '',
+        lorebook_changes: changes,
+        notes,
+      };
+    } else {
+      // ── Character fields submission ────────────────────────────────────────
+      const proposed = {};
+      ['description','personality','scenario','mes_example','system_prompt','creator_notes'].forEach(f => {
+        const val = document.getElementById('f-' + f).value.trim();
+        if (val) proposed[f] = val;
+      });
+      if (!Object.keys(proposed).length) {
+        showToast('⚠', 'Fill in at least one field to submit.');
+        btn.disabled = false; btn.textContent = '✦ Submit for Review';
+        return;
+      }
+      body = {
+        target_character_file: selectedAssignment.character_file,
+        owner_handle: selectedAssignment.owner_handle,
+        character_registry_key: selectedAssignment.character_registry_key,
+        edit_type: 'character',
+        proposed_fields: proposed,
+        notes,
+      };
+    }
+
+    try {
+      const r = await fetch('/api/coauthors/submit-edit', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        showToast('✕', data.error || 'Submission failed.');
+        return;
+      }
+      // Show success screen
+      document.getElementById('submit-form-wrap').style.display = 'none';
+      const typeLabel = currentEditType === 'lorebook' ? 'lorebook changes' : 'proposed changes';
+      document.getElementById('success-sub-text').innerHTML =
+        `Your ${typeLabel} to <em>${esc(selectedAssignment.character_display_name)}</em> are now in the admin's review queue.<br><br>You can track the status under <strong>My Submissions</strong>. If approved, your changes will be pushed to all DreamTavern users.`;
+      document.getElementById('success-screen').classList.add('show');
+      // Refresh assignments to update pending count
+      await loadAssignments();
+    } catch (err) {
+      showToast('✕', 'Network error — please try again.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '✦ Submit for Review';
+    }
+  }
+
+  function resetForm() {
+    clearForm();
+    document.getElementById('submit-form-wrap').style.display = 'block';
+    document.getElementById('success-screen').classList.remove('show');
+    // Reset to character tab
+    setEditType('character', document.getElementById('et-char'));
+  }
+
+  // ── My Submissions tab ────────────────────────────────────────────────────
+  async function loadMySubmissions() {
+    const list = document.getElementById('my-subs-list');
+    list.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const r = await fetch('/api/coauthors/my-submissions', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify({}),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>Could not load submissions.</p></div>'; return; }
+      renderMySubmissions(data.submissions || []);
+    } catch {
+      list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>Could not load submissions.</p></div>';
+    }
+  }
+
+  function renderMySubmissions(subs) {
+    const list = document.getElementById('my-subs-list');
+    if (!subs.length) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No submissions yet. Go to Submit Edit to propose your first change!</p></div>';
+      return;
+    }
+    list.innerHTML = subs.map(s => {
+      const pillClass = s.status === 'pending' ? 'pill-pending' : s.status === 'approved' ? 'pill-approved' : 'pill-rejected';
+      const pillIcon = s.status === 'pending' ? '⏳' : s.status === 'approved' ? '✓' : '✕';
+      const pillLabel = s.status === 'pending' ? 'Pending' : s.status === 'approved' ? 'Approved' : 'Rejected';
+      const isLorebook = s.edit_type === 'lorebook';
+      let chips = '';
+      if (isLorebook) {
+        chips = `<span class="field-chip">📚 Lorebook</span>` +
+          (s.lorebook_name ? `<span class="field-chip">${esc(s.lorebook_name)}</span>` : '') +
+          (s.lorebook_changes || []).slice(0, 3).map(c =>
+            `<span class="field-chip">${esc(c.action)}: ${esc(c.original?.comment || (c.action==='add' ? 'new entry' : `uid ${c.entry_uid}`))}</span>`
+          ).join('') +
+          (s.lorebook_changes?.length > 3 ? `<span class="field-chip">+${s.lorebook_changes.length - 3} more</span>` : '');
+      } else {
+        chips = (s.changed_fields || []).map(f => `<span class="field-chip">${esc(FIELD_LABELS[f] || f)}</span>`).join('');
+      }
+      let statusMsg = '';
+      if (s.status === 'pending') statusMsg = `<div style="font-size:11px;color:var(--text-muted);margin-top:8px;font-style:italic;">Awaiting admin review…</div>`;
+      else if (s.status === 'approved') statusMsg = `<div class="approval-note">✓ ${isLorebook ? 'Lorebook entries updated' : 'Changes are live'} — pushed to all users.</div>`;
+      else if (s.status === 'rejected') statusMsg = `<div class="rejection-note">Admin note: "${esc(s.reply || 'No note provided.')}"</div>`;
+      return `
+        <div class="sub-item">
+          <div class="sub-header">
+            <span class="sub-char">${esc(s.character_display_name || s.target_character_file)}</span>
+            <span class="sub-time">${timeAgo(s.created_at)}</span>
+            <span class="pill ${pillClass}">${pillIcon} ${pillLabel}</span>
+          </div>
+          <div class="sub-fields">${chips}</div>
+          ${s.notes ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;font-style:italic;">"${esc(s.notes)}"</div>` : ''}
+          ${statusMsg}
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ── Searchable Select engine ──────────────────────────────────────────────
+  const _ssOpts = {};   // { wrapId: [{value, label}] }
+  const _ssSel  = {};   // { wrapId: {value, label, idx} }
+
+  function ssInit(wrapId, opts, placeholder) {
+    _ssOpts[wrapId] = opts || [];
+    _ssSel[wrapId]  = { value: '', label: '', idx: -1, data: null };
+    const list = document.getElementById(wrapId + '-list');
+    if (list) list.innerHTML = opts.length
+      ? opts.map((o, i) => `<div class="ss-opt" tabindex="0" data-i="${i}"
+            onclick="ssSelect('${wrapId}',${i})"
+            onkeydown="ssOptKey('${wrapId}',${i},event)"
+          >${esc(o.label)}</div>`).join('')
+      : '<div class="ss-nores">No options available</div>';
+    const valEl = document.getElementById(wrapId + '-val');
+    if (valEl) { valEl.textContent = placeholder || '— Select —'; valEl.classList.remove('has-val'); }
+  }
+
+  function ssToggle(wrapId) {
+    const dd   = document.getElementById(wrapId + '-dd');
+    const trig = document.getElementById(wrapId + '-trig');
+    if (!dd) return;
+    if (dd.classList.contains('open')) { ssClose(wrapId); return; }
+    // Close any other open dropdowns
+    document.querySelectorAll('.ss-dd.open').forEach(el => {
+      const ow = el.id.replace('-dd','');
+      if (ow !== wrapId) ssClose(ow);
+    });
+    // Position fixed below the trigger
+    const rect = trig.getBoundingClientRect();
+    dd.style.left  = rect.left + 'px';
+    dd.style.width = rect.width + 'px';
+    dd.style.top   = (rect.bottom + 4) + 'px';
+    dd.classList.add('open');
+    trig.classList.add('open');
+    trig.setAttribute('aria-expanded', 'true');
+    const srch = document.getElementById(wrapId + '-srch');
+    if (srch) { srch.value = ''; ssFilter(wrapId, ''); srch.focus(); }
+  }
+
+  function ssClose(wrapId) {
+    const dd   = document.getElementById(wrapId + '-dd');
+    const trig = document.getElementById(wrapId + '-trig');
+    dd?.classList.remove('open');
+    trig?.classList.remove('open');
+    trig?.setAttribute('aria-expanded', 'false');
+  }
+
+  function ssFilter(wrapId, term) {
+    const list = document.getElementById(wrapId + '-list');
+    if (!list) return;
+    const t = term.trim().toLowerCase();
+    let visible = 0;
+    list.querySelectorAll('.ss-opt').forEach(el => {
+      const i = parseInt(el.dataset.i, 10);
+      const label = (_ssOpts[wrapId]?.[i]?.label || '').toLowerCase();
+      const show = !t || label.includes(t);
+      el.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    let noRes = list.querySelector('.ss-nores');
+    if (!visible) {
+      if (!noRes) { noRes = document.createElement('div'); noRes.className = 'ss-nores'; list.appendChild(noRes); }
+      noRes.textContent = t ? 'No matches found' : 'No options available';
+      noRes.style.display = '';
+    } else if (noRes) noRes.style.display = 'none';
+  }
+
+  function ssSelect(wrapId, idx) {
+    const opt = _ssOpts[wrapId]?.[idx];
+    if (!opt) return;
+    _ssSel[wrapId] = { value: opt.value, label: opt.label, idx, data: opt.data || null };
+    const valEl = document.getElementById(wrapId + '-val');
+    if (valEl) { valEl.textContent = opt.label; valEl.classList.add('has-val'); }
+    // Mark selected in list
+    const list = document.getElementById(wrapId + '-list');
+    list?.querySelectorAll('.ss-opt').forEach(el => {
+      el.classList.toggle('ss-selected', parseInt(el.dataset.i, 10) === idx);
+    });
+    ssClose(wrapId);
+    // Fire semantic event
+    document.dispatchEvent(new CustomEvent('ss:change', { detail: { wrapId, ...opt } }));
+  }
+
+  function ssGet(wrapId)      { return _ssSel[wrapId]?.value || ''; }
+  function ssGetLabel(wrapId) { return _ssSel[wrapId]?.label || ''; }
+  function ssGetData(wrapId)  { return _ssSel[wrapId]?.data || null; }
+
+  // Keyboard: search input
+  function ssSrchKey(wrapId, e) {
+    const list = document.getElementById(wrapId + '-list');
+    const first = list?.querySelector('.ss-opt:not([style*="display: none"])');
+    if (e.key === 'ArrowDown') { e.preventDefault(); first?.focus(); }
+    else if (e.key === 'Escape') ssClose(wrapId);
+    else if (e.key === 'Enter' && first) { e.preventDefault(); first.click(); }
+  }
+
+  // Keyboard: option item
+  function ssOptKey(wrapId, idx, e) {
+    const list = document.getElementById(wrapId + '-list');
+    const visible = Array.from(list?.querySelectorAll('.ss-opt:not([style*="display: none"])') || []);
+    const pos = visible.indexOf(e.currentTarget);
+    if (e.key === 'ArrowDown')  { e.preventDefault(); visible[pos + 1]?.focus(); }
+    else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (pos === 0) document.getElementById(wrapId + '-srch')?.focus();
+      else visible[pos - 1]?.focus();
+    }
+    else if (e.key === 'Enter')  { e.preventDefault(); ssSelect(wrapId, idx); }
+    else if (e.key === 'Escape') ssClose(wrapId);
+  }
+
+  // Close on outside click
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.ss-wrap') && !e.target.closest('.ss-dd')) {
+      document.querySelectorAll('.ss-dd.open').forEach(el => ssClose(el.id.replace('-dd','')));
+    }
+  });
+
+  // ss:change → trigger app-level handlers
+  document.addEventListener('ss:change', e => {
+    if (e.detail.wrapId === 'ss-char') onCharSelected();
+    if (e.detail.wrapId === 'ss-lb' && selectedAssignment) {
+      // Reset entries before loading new lorebook
+      lbEntryCounter = 0;
+      loadLorebookEntries(selectedAssignment.character_file, e.detail.value);
+    }
+  });
+
+  // ── Request Access tab ────────────────────────────────────────────────────
+  let availableChars = [];
+
+  async function loadAvailableChars() {
+    try {
+      const r = await fetch('/api/coauthors/available-characters', {
+        method: 'POST', credentials: 'include', headers: postHeaders(), body: '{}',
+      });
+      const data = await r.json();
+      availableChars = data.characters || [];
+      ssInit('ss-rchar', availableChars.map(c => ({
+        value: c.character_registry_key || c.character_file,
+        label: c.character_display_name
+          + (c.has_pending_request ? ' ⏳' : '')
+          + ` · ${c.owner_handle}`,
+        data: {
+          character_registry_key: c.character_registry_key || '',
+          character_file: c.character_file,
+          owner_handle: c.owner_handle,
+          character_display_name: c.character_display_name,
+          has_pending_request: c.has_pending_request,
+        },
+      })), '— Select a character —');
+    } catch {
+      ssInit('ss-rchar', [], '— Could not load characters —');
+    }
+  }
+
+  async function loadMyRequests() {
+    const list = document.getElementById('my-requests-list');
+    list.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const r = await fetch('/api/coauthors/my-requests', {
+        method: 'POST', credentials: 'include', headers: postHeaders(), body: '{}',
+      });
+      const data = await r.json();
+      renderMyRequests(data.requests || []);
+    } catch {
+      list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>Could not load requests.</p></div>';
+    }
+  }
+
+  function renderMyRequests(reqs) {
+    const list = document.getElementById('my-requests-list');
+    if (!reqs.length) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">🔍</div><p>No requests yet. Use the form above to request access to a character.</p></div>';
+      return;
+    }
+    list.innerHTML = reqs.map(req => {
+      const pillClass = req.status === 'pending' ? 'pill-pending' : req.status === 'approved' ? 'pill-approved' : 'pill-rejected';
+      const pillIcon  = req.status === 'pending' ? '⏳' : req.status === 'approved' ? '✓' : '✕';
+      const pillLabel = req.status === 'pending' ? 'Pending' : req.status === 'approved' ? 'Approved' : 'Declined';
+      let statusMsg = '';
+      if (req.status === 'pending') {
+        statusMsg = `<div style="font-size:11px;color:var(--text-muted);margin-top:8px;font-style:italic;">Awaiting admin review…</div>`;
+      } else if (req.status === 'approved') {
+        statusMsg = `<div class="approval-note">✓ Approved! This character now appears in your <em>My Characters</em> tab.</div>`;
+      } else {
+        statusMsg = req.reply
+          ? `<div class="rejection-note">Admin note: "${esc(req.reply)}"</div>`
+          : `<div class="rejection-note">Request declined.</div>`;
+      }
+      return `
+        <div class="sub-item">
+          <div class="sub-header">
+            <span class="sub-char">${esc(req.character_display_name || req.character_file)}</span>
+            <span class="sub-time">${timeAgo(req.created_at)}</span>
+            <span class="pill ${pillClass}">${pillIcon} ${pillLabel}</span>
+          </div>
+          ${req.message ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;font-style:italic;">"${esc(req.message)}"</div>` : ''}
+          ${statusMsg}
+        </div>
+      `;
+    }).join('');
+  }
+
+  async function submitAccessRequest() {
+    const selectedCharacterKey = ssGet('ss-rchar');
+    if (!selectedCharacterKey) { showToast('⚠', 'Please select a character first.'); return; }
+    const charData = ssGetData('ss-rchar');
+    if (charData?.has_pending_request) {
+      showToast('⚠', 'You already have a pending request for this character.');
+      return;
+    }
+    const message = (document.getElementById('request-msg').value || '').trim();
+    try {
+      const r = await fetch('/api/coauthors/request-access', {
+        method: 'POST', credentials: 'include', headers: postHeaders(),
+        body: JSON.stringify({
+          character_file: charData?.character_file || '',
+          owner_handle: charData?.owner_handle || '',
+          character_registry_key: charData?.character_registry_key || selectedCharacterKey,
+          message,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { showToast('✕', data.error || 'Could not submit request.'); return; }
+      // Show success screen
+      document.getElementById('request-form-card').style.display = 'none';
+      document.getElementById('request-success-card').style.display = '';
+      loadMyRequests();
+      loadAvailableChars(); // refresh so submitted char shows ⏳
+    } catch { showToast('✕', 'Network error.'); }
+  }
+
+  function clearRequestForm() {
+    ssInit('ss-rchar', availableChars.map(c => ({
+      value: c.character_registry_key || c.character_file,
+      label: c.character_display_name + (c.has_pending_request ? ' ⏳' : '') + ` · ${c.owner_handle}`,
+      data: {
+        character_registry_key: c.character_registry_key || '',
+        character_file: c.character_file,
+        owner_handle: c.owner_handle,
+        character_display_name: c.character_display_name,
+        has_pending_request: c.has_pending_request,
+      },
+    })), '— Select a character —');
+    document.getElementById('request-msg').value = '';
+  }
+
+  function showRequestForm() {
+    document.getElementById('request-success-card').style.display = 'none';
+    document.getElementById('request-form-card').style.display = '';
+    clearRequestForm();
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  function switchTab(name, btn) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('panel-' + name).classList.add('active');
+    if (btn) btn.classList.add('active');
+    if (name === 'my-subs') loadMySubmissions();
+    if (name === 'request') { loadAvailableChars(); loadMyRequests(); }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function esc(str) {
+    return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function timeAgo(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    const m = Math.floor(diff / 60000);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  }
+
+  function showToast(icon, msg) {
+    const t = document.getElementById('toast');
+    document.getElementById('t-icon').textContent = icon;
+    document.getElementById('t-msg').textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+
+  init();
+</script>
+</body>
+</html>

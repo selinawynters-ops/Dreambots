@@ -2,42 +2,42 @@
  * ============================================================================
  * DREAMTAVERN CUSTOMIZATION - World Info Frontend (Admin Controls & Hidden Lorebooks)
  * ============================================================================
- * 
+ *
  * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
- * 
+ *
  * 1. ADMIN-ONLY LOREBOOK PUSH/SHARE:
  *    - Import getCurrentUserHandle() and isAdmin() from user.js
  *    - Push/Share buttons only visible to admin users
  *    - Non-admin users cannot push lorebooks to others
- * 
+ *
  * 2. HIDDEN LOREBOOK SUPPORT FOR NON-ADMINS:
  *    - Non-admin users see hidden character-seeded lorebooks as "(hidden entries)"
  *    - Prefix lorebook names with "9z" for WorldInfoInfo extension detection
  *    - MutationObserver strips "9z" prefix from UI display
  *    - Badge counts remain accurate (full array length preserved)
- * 
+ *
  * 3. WORLDINFOINFO EXTENSION INTEGRATION:
  *    - ensureWiiPanelObserver() - Sets up mutation observer for panel changes
  *    - Automatically strips "9z" prefix from lorebook headers in extension panel
  *    - Seamless integration without modifying extension code
- * 
+ *
  * 4. PERMISSION-BASED UI:
  *    - Admin users see all lorebooks with full edit access
  *    - Non-admin users see pushed lorebooks as character-embedded (locked)
  *    - Hidden lorebooks collapsed into single placeholder for privacy
- * 
+ *
  * RELATED FILES:
  *    - src/endpoints/worldinfo.js (backend push system)
  *    - src/endpoints/characters.js (character protection)
  *    - public/index.html (push/share button UI)
- * 
+ *
  * ============================================================================
  */
 
 import { Fuse } from '../lib.js';
 
-import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1, isCharacterDefinitionLocked, applyCharacterDefinitionLockState, getCharacters, setCharacterId, selectCharacterById } from '../script.js';
-import { download, debounce, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName } from './utils.js';
+import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1, isCharacterDefinitionLocked, applyCharacterDefinitionLockState, getCharacters, setCharacterId, selectCharacterById, select_rm_characters } from '../script.js';
+import { download, debounce, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName, startsWithMatcher } from './utils.js';
 import { extension_settings, getContext } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
 import { isMobile } from './RossAscends-mods.js';
@@ -105,6 +105,9 @@ export let selected_world_info = [];
 export let world_names;
 const hidden_world_name_set = new Set();
 const HIDDEN_LOREBOOK_PLACEHOLDER = '(hidden entries)';
+export const HIDDEN_LORE_BEFORE_PLACEHOLDER = '[[DREAMTAVERN_HIDDEN_LORE_BEFORE]]';
+export const HIDDEN_LORE_AFTER_PLACEHOLDER = '[[DREAMTAVERN_HIDDEN_LORE_AFTER]]';
+export const HIDDEN_LORE_ACTIVATIONS_HEADER = 'x-dreamtavern-hidden-lore-activations';
 export let world_info_depth = 2;
 
 function normalizeHiddenLorebookName(name) {
@@ -188,6 +191,29 @@ function getCharacterPushExtensionBySuffix(character, suffix) {
     return undefined;
 }
 
+function getCharacterAuxWorldBooks(character, fileName) {
+    const primaryWorld = String(character?.data?.extensions?.world || '').trim();
+    const books = [];
+
+    const settingsAuxBooks = world_info.charLore?.find((entry) => entry.name === fileName)?.extraBooks;
+    if (Array.isArray(settingsAuxBooks)) {
+        books.push(...settingsAuxBooks);
+    }
+
+    const pushAuxBooks = getCharacterPushExtensionBySuffix(character, 'aux_lorebooks');
+    if (Array.isArray(pushAuxBooks)) {
+        books.push(...pushAuxBooks);
+    }
+
+    const pushBundleBooks = getCharacterPushExtensionBySuffix(character, 'bundle_lorebooks');
+    if (Array.isArray(pushBundleBooks)) {
+        books.push(...pushBundleBooks);
+    }
+
+    return normalizeArray(books.map((name) => String(name || '').trim()).filter(Boolean))
+        .filter((name) => name !== primaryWorld);
+}
+
 function getWorldInfoExtensionBySuffix(data, suffix) {
     const ext = data?.extensions || {};
     const exactKeys = [suffix, `dreamtavern_${suffix}`];
@@ -205,6 +231,83 @@ function getWorldInfoExtensionBySuffix(data, suffix) {
     }
 
     return undefined;
+}
+
+function isAdminPrefixedLorebookName(name) {
+    const value = String(name || '').trim();
+    if (!value) return false;
+    if (/^ADMIN-.+/iu.test(value)) return true;
+    return /^ADMIN[a-z0-9._-]+-.+/iu.test(value);
+}
+
+function stripAdminLorebookPrefix(name) {
+    const value = String(name || '').trim();
+    if (!value) return '';
+    if (/^ADMIN-.+/iu.test(value)) {
+        return value.slice('ADMIN-'.length).trim();
+    }
+
+    const match = /^ADMIN([a-z0-9._-]+)-(.+)$/iu.exec(value);
+    if (match) {
+        return String(match[2] || '').trim();
+    }
+
+    return value;
+}
+
+function getLorebookNamingValidationError(name) {
+    const value = String(name || '').trim();
+    if (!value) {
+        return 'Lorebook name cannot be empty.';
+    }
+    if (/^dd-/u.test(value)) {
+        return /^dd-[a-z0-9._-]+-.+/u.test(value)
+            ? ''
+            : 'This lorebook name causes interference and must be renamed. Allowed prefixes are plain names, dd-{user-handle}-{BookName}, ADMIN-{BookName}, or ADMIN{user-handle}-{BookName}.';
+    }
+    if (/^ADMIN/u.test(value) || /^admin/u.test(value)) {
+        return isAdminPrefixedLorebookName(value)
+            ? ''
+            : 'This lorebook name causes interference and must be renamed. Allowed prefixes are plain names, dd-{user-handle}-{BookName}, ADMIN-{BookName}, or ADMIN{user-handle}-{BookName}.';
+    }
+    return '';
+}
+
+function getSubmissionLorebookNamingValidationError(name) {
+    const value = String(name || '').trim();
+    const genericError = getLorebookNamingValidationError(value);
+    if (genericError) return genericError;
+    if (!value) return '';
+
+    const currentHandle = String(getCurrentUserHandle() || '').trim().toLowerCase();
+    const currentUserIsAdmin = Boolean(isAdmin());
+
+    if (value.startsWith('dd-') && !currentUserIsAdmin) {
+        if (!currentHandle || !value.startsWith(`dd-${currentHandle}-`)) {
+            return `Your lorebook name must use your own dd-${currentHandle || '{user-handle}'}- prefix or stay plain before submission.`;
+        }
+    }
+
+    if (isAdminPrefixedLorebookName(value)) {
+        if (!currentUserIsAdmin) {
+            return 'Only admins can submit lorebooks with ADMIN prefixes.';
+        }
+        if (currentHandle && currentHandle !== 'default-user') {
+            const expectedPrefix = `ADMIN${currentHandle}-`;
+            if (!value.startsWith(expectedPrefix)) {
+                return `Admin submissions to the true admin must use the ${expectedPrefix}{BookName} naming convention.`;
+            }
+        }
+    }
+
+    return '';
+}
+
+function isPotentialHiddenPushWorldName(name) {
+    const worldName = normalizeHiddenLorebookName(name);
+    if (!worldName) return false;
+    const normalizedWorldName = worldName.toLowerCase();
+    return normalizedWorldName.startsWith('admin-') || normalizedWorldName.startsWith('dd-') || isAdminPrefixedLorebookName(worldName);
 }
 
 function isTrueishFlag(value) {
@@ -269,11 +372,246 @@ function mapLoadedWorldInfoEntries(data, worldName) {
         }));
 }
 
+function getRestrictedHiddenLoreContextForGeneration(chat, globalScanData) {
+    /** @type {Set<string>} */
+    const hiddenWorlds = new Set();
+    const shouldIncludeHiddenWorld = (worldName) => {
+        const normalizedWorldName = String(worldName || '').trim();
+        if (!normalizedWorldName) return false;
+        return isHiddenPushedLorebookForDropdown(normalizedWorldName)
+            || isPotentialHiddenPushWorldName(normalizedWorldName);
+    };
+
+    const character = characters[this_chid];
+    const primaryWorld = String(character?.data?.extensions?.world || '').trim();
+    if (shouldIncludeHiddenWorld(primaryWorld)) {
+        hiddenWorlds.add(primaryWorld);
+    }
+
+    const fileName = this_chid !== undefined && this_chid !== null ? getCharaFilename(this_chid) : '';
+    for (const worldName of getCharacterAuxWorldBooks(character, fileName)) {
+        if (shouldIncludeHiddenWorld(worldName)) {
+            hiddenWorlds.add(worldName);
+        }
+    }
+
+    for (const chatWorld of getChatLorebooks()) {
+        if (shouldIncludeHiddenWorld(chatWorld)) {
+            hiddenWorlds.add(chatWorld);
+        }
+    }
+
+    const personaWorld = String(power_user.persona_description_lorebook || '').trim();
+    if (shouldIncludeHiddenWorld(personaWorld)) {
+        hiddenWorlds.add(personaWorld);
+    }
+
+    for (const selectedWorld of selected_world_info) {
+        if (shouldIncludeHiddenWorld(selectedWorld)) {
+            hiddenWorlds.add(selectedWorld);
+        }
+    }
+
+    if (!hiddenWorlds.size) {
+        return null;
+    }
+
+    return {
+        hidden_world_names: [...hiddenWorlds],
+        chat: [...chat],
+        global_scan_data: { ...globalScanData },
+    };
+}
+
+function isRestrictedHiddenWorldInfoEntry(entry, currentHandle = getCurrentUserHandle()) {
+    if (!entry || typeof entry !== 'object') return false;
+
+    const worldName = String(entry.world || '').trim();
+    const normalizedWorldName = normalizeHiddenLorebookName(worldName);
+    const isConventionHiddenBook = normalizedWorldName
+        ? hidden_world_name_set.has(normalizedWorldName)
+        : false;
+    const isFlagHiddenBook = isHiddenLorebookRestrictedForUser(entry, currentHandle);
+
+    return isConventionHiddenBook || isFlagHiddenBook;
+}
+
+function sanitizeWorldInfoEntryForClient(entry, currentHandle = getCurrentUserHandle()) {
+    if (!entry || typeof entry !== 'object') return entry;
+    if (!isRestrictedHiddenWorldInfoEntry(entry, currentHandle)) {
+        return { ...entry };
+    }
+
+    return {
+        uid: entry.uid,
+        world: entry.world,
+        disable: entry.disable,
+        position: entry.position,
+        role: entry.role,
+        depth: entry.depth,
+        outletName: entry.outletName,
+        sticky: entry.sticky,
+        cooldown: entry.cooldown,
+        delay: entry.delay,
+        constant: entry.constant,
+        useProbability: entry.useProbability,
+        probability: entry.probability,
+        _stwii_source_world: entry._stwii_source_world,
+        _stwii_lorebook_hidden: true,
+        _stwii_redacted: true,
+        _dreamtavern_restricted: true,
+        _stw_hidden_restricted: true,
+    };
+}
+
+function sanitizeWorldInfoEntryListForClient(entries, currentHandle = getCurrentUserHandle()) {
+    if (!Array.isArray(entries)) return [];
+    return entries.map((entry) => sanitizeWorldInfoEntryForClient(entry, currentHandle));
+}
+
+function sanitizeWorldInfoEntryMapForClient(entries, currentHandle = getCurrentUserHandle()) {
+    if (!(entries instanceof Map)) return new Map();
+    return new Map(
+        Array.from(entries.entries()).map(([key, value]) => [key, sanitizeWorldInfoEntryForClient(value, currentHandle)]),
+    );
+}
+
+function sanitizeWorldInfoScanDoneArgsForClient(args, currentHandle = getCurrentUserHandle()) {
+    if (!args || typeof args !== 'object') return args;
+
+    const sanitizedNewAll = sanitizeWorldInfoEntryListForClient(args.new?.all, currentHandle);
+    const sanitizedNewSuccessful = sanitizeWorldInfoEntryListForClient(args.new?.successful, currentHandle);
+    const sanitizedActivatedEntries = sanitizeWorldInfoEntryMapForClient(args.activated?.entries, currentHandle);
+    const hasRestrictedHiddenLore = sanitizedNewAll.some((entry) => entry?._stwii_redacted)
+        || sanitizedNewSuccessful.some((entry) => entry?._stwii_redacted)
+        || Array.from(sanitizedActivatedEntries.values()).some((entry) => entry?._stwii_redacted);
+
+    return {
+        ...args,
+        new: {
+            ...args.new,
+            all: sanitizedNewAll,
+            successful: sanitizedNewSuccessful,
+        },
+        activated: {
+            ...args.activated,
+            entries: sanitizedActivatedEntries,
+            text: hasRestrictedHiddenLore ? '[Redacted: hidden lorebook content]' : args.activated?.text,
+        },
+        sortedEntries: sanitizeWorldInfoEntryListForClient(args.sortedEntries, currentHandle),
+    };
+}
+
+export function getServerHiddenLoreActivationsFromResponse(response) {
+    const encoded = response?.headers?.get?.(HIDDEN_LORE_ACTIVATIONS_HEADER);
+    if (!encoded) {
+        return [];
+    }
+
+    try {
+        const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+        const decoded = new TextDecoder().decode(bytes);
+        const parsed = JSON.parse(decoded);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        return parsed
+            .map((item) => {
+                if (typeof item === 'string') {
+                    const world = String(item || '').trim();
+                    return world ? { world, count: 1 } : null;
+                }
+
+                if (!item || typeof item !== 'object') {
+                    return null;
+                }
+
+                const world = String(item.world || item.name || '').trim();
+                const count = Number(item.count);
+                if (!world) {
+                    return null;
+                }
+
+                return {
+                    world,
+                    count: Number.isFinite(count) && count > 0 ? Math.trunc(count) : 1,
+                };
+            })
+            .filter(Boolean);
+    } catch (error) {
+        console.warn('[WI] Failed to decode hidden lore activation header:', error);
+        return [];
+    }
+}
+
+export function clearServerHiddenLoreActivations() {
+    delete chat_metadata.dreamtavernHiddenLoreActivationEntries;
+    delete chat_metadata.stwiiLastAddedCount;
+}
+
+export async function emitServerHiddenLoreActivations(worldActivations) {
+    const normalizedWorldActivations = (worldActivations || [])
+        .map((item) => {
+            if (typeof item === 'string') {
+                const world = normalizeHiddenLorebookName(item);
+                return world ? { world, count: 1 } : null;
+            }
+
+            if (!item || typeof item !== 'object') {
+                return null;
+            }
+
+            const world = normalizeHiddenLorebookName(item.world || item.name || '');
+            const count = Number(item.count);
+            if (!world) {
+                return null;
+            }
+
+            return {
+                world,
+                count: Number.isFinite(count) && count > 0 ? Math.max(1, Math.trunc(count)) : 1,
+            };
+        })
+        .filter(Boolean);
+
+    if (!normalizedWorldActivations.length) {
+        return;
+    }
+
+    const entries = [];
+    let totalOrder = 0;
+    for (const { world, count } of normalizedWorldActivations) {
+        for (let index = 0; index < count; index++) {
+            entries.push({
+                uid: `server_hidden_${totalOrder}_${index}_${getStringHash(`${world}:${index}`)}`,
+                world: `9z${world}`,
+                key: [],
+                keysecondary: [],
+                comment: '~(hidden entries)~',
+                position: world_info_position.before,
+                order: totalOrder,
+                _stwii_source_world: world,
+                _stwii_lorebook_hidden: true,
+                _stwii_redacted: true,
+                _dreamtavern_restricted: true,
+                _stw_hidden_restricted: true,
+            });
+            totalOrder++;
+        }
+    }
+
+    chat_metadata.stwiiLastAddedCount = entries.length;
+    chat_metadata.dreamtavernHiddenLoreActivationEntries = entries.map(entry => ({ ...entry }));
+    await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, entries);
+    ensureWiiPanelObserver();
+}
+
 function isPushedCharacterRecord(character) {
     if (!character) return false;
     const worldName = String(character?.data?.extensions?.world || '').trim().toLowerCase();
     if (isTrueishFlag(getCharacterPushExtensionBySuffix(character, 'pushed'))) return true;
-    if (worldName.startsWith('admin-')) return true;
+    if (isAdminPrefixedLorebookName(worldName)) return true;
     if (worldName.startsWith('dd-')) return true;
     return false;
 }
@@ -315,7 +653,7 @@ function autoLinkPushedLorebook(chid) {
     const charName = String(character?.name || character?.data?.name || '').trim().toLowerCase();
     const candidates = Array.from(world_names || []).filter(Boolean).filter(worldName => {
         const name = String(worldName);
-        return name.startsWith('ADMIN-') || name.startsWith('dd-');
+        return isAdminPrefixedLorebookName(name) || name.startsWith('dd-');
     });
 
     const preferred = candidates.find(worldName => {
@@ -384,6 +722,55 @@ let updateEditor = (navigation, flashOnNav = true) => { console.debug('Triggered
 export const worldInfoFilter = new FilterHelper(() => updateEditor());
 export const SORT_ORDER_KEY = 'world_info_sort_order';
 export const METADATA_KEY = 'world_info';
+const CHAT_LOREBOOK_LIMIT = 4;
+
+function getChatLorebooks() {
+    const rawValue = chat_metadata[METADATA_KEY];
+    const availableWorlds = Array.isArray(world_names) ? world_names : [];
+    const names = normalizeArray((Array.isArray(rawValue) ? rawValue : [rawValue])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean));
+    return names.filter((name) => availableWorlds.includes(name));
+}
+
+function getVisibleChatLorebooks() {
+    return getChatLorebooks()
+        .filter((name) => !isHiddenPushedLorebookForDropdown(name))
+        .slice(0, CHAT_LOREBOOK_LIMIT);
+}
+
+function getHiddenChatLorebooks() {
+    return getChatLorebooks()
+        .filter((name) => isHiddenPushedLorebookForDropdown(name));
+}
+
+function getPrimaryChatLorebook() {
+    return getChatLorebooks()[0] ?? '';
+}
+
+function getPrimaryVisibleChatLorebook() {
+    return getVisibleChatLorebooks()[0] ?? '';
+}
+
+function setChatLorebooks(names, { preserveHidden = true } = {}) {
+    const visible = normalizeArray((Array.isArray(names) ? names : [names])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean))
+        .filter((name) => !isHiddenPushedLorebookForDropdown(name))
+        .slice(0, CHAT_LOREBOOK_LIMIT);
+    const hidden = preserveHidden ? getHiddenChatLorebooks() : [];
+    const next = normalizeArray([...visible, ...hidden]);
+
+    if (next.length === 0) {
+        delete chat_metadata[METADATA_KEY];
+    } else if (next.length === 1) {
+        chat_metadata[METADATA_KEY] = next[0];
+    } else {
+        chat_metadata[METADATA_KEY] = next;
+    }
+
+    $('.chat_lorebook_button').toggleClass('world_set', next.length > 0);
+}
 
 export const DEFAULT_DEPTH = 4;
 export const DEFAULT_WEIGHT = 100;
@@ -1198,9 +1585,21 @@ function ensureWiiPanelObserver() {
         if (!sourceWorldName || !isHiddenPushedLorebookForDropdown(sourceWorldName)) return;
 
         element.dataset.hiddenLorebookSourceName = sourceWorldName;
-        element.textContent = normalizedText;
-        element.setAttribute('title', normalizedText);
         element.dataset.hiddenLorebookRedacted = 'true';
+        element.setAttribute('title', `${sourceWorldName} ~${HIDDEN_LOREBOOK_PLACEHOLDER}~`);
+
+        if (element.dataset.hiddenLorebookRenderedName === sourceWorldName) return;
+
+        const titleSpan = document.createElement('span');
+        titleSpan.className = 'stwii-hidden-world-title';
+        titleSpan.textContent = sourceWorldName;
+
+        const noteSpan = document.createElement('span');
+        noteSpan.className = 'stwii-hidden-world-note';
+        noteSpan.textContent = `~${HIDDEN_LOREBOOK_PLACEHOLDER}~`;
+
+        element.replaceChildren(titleSpan, noteSpan);
+        element.dataset.hiddenLorebookRenderedName = sourceWorldName;
     };
 
     panel.querySelectorAll('.stwii--world').forEach(redactHiddenWorldHeader);
@@ -1235,12 +1634,25 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
     worldInfoBefore = activatedWorldInfo.worldInfoBefore;
     worldInfoAfter = activatedWorldInfo.worldInfoAfter;
     worldInfoString = worldInfoBefore + worldInfoAfter;
+    const loreExclusionInfo = activatedWorldInfo.loreExclusionInfo || {};
+    const hiddenLoreContext = getRestrictedHiddenLoreContextForGeneration(chat, globalScanData);
+
+    if (hiddenLoreContext?.hidden_world_names?.length) {
+        hasRestrictedHiddenLore = true;
+        worldInfoBefore = worldInfoBefore
+            ? `${HIDDEN_LORE_BEFORE_PLACEHOLDER}\n${worldInfoBefore}`
+            : HIDDEN_LORE_BEFORE_PLACEHOLDER;
+        worldInfoAfter = worldInfoAfter
+            ? `${worldInfoAfter}\n${HIDDEN_LORE_AFTER_PLACEHOLDER}`
+            : HIDDEN_LORE_AFTER_PLACEHOLDER;
+        worldInfoString = worldInfoBefore + worldInfoAfter;
+    }
 
     if (!isDryRun && activatedWorldInfo.allActivatedEntries && activatedWorldInfo.allActivatedEntries.size > 0) {
         const arg = Array.from(activatedWorldInfo.allActivatedEntries.values()).map(entry => ({ ...entry }));
         const handle = getCurrentUserHandle();
 
-        hasRestrictedHiddenLore = arg.some((entry) => {
+        hasRestrictedHiddenLore = hasRestrictedHiddenLore || arg.some((entry) => {
             const worldName = entry.world || '';
             const normalizedWorldName = normalizeHiddenLorebookName(worldName);
             const isConventionHiddenBook = hidden_world_name_set.has(normalizedWorldName);
@@ -1249,9 +1661,9 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
         });
 
         // Prefix hidden lorebook names with "9z" so the WorldInfoInfo
-        // extension's built-in isHiddenWorld() recognises them. Keep the
-        // source lorebook name in the label so users can still identify
-        // which hidden lorebook triggered the badge.
+        // extension's built-in isHiddenWorld() recognises them, but keep the
+        // raw lorebook name in the event payload so each hidden book remains
+        // its own group in the activation panel.
         for (const entry of arg) {
             const w = entry.world || '';
             const normalizedWorldName = normalizeHiddenLorebookName(w);
@@ -1259,15 +1671,16 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
             const isFlagHiddenBook = isHiddenLorebookRestrictedForUser(entry, handle);
             const isHiddenBook = isConventionHiddenBook || isFlagHiddenBook;
             if (isHiddenBook && !w.startsWith('9z')) {
-                entry._stwii_source_world = w;
-                entry.world = '9z' + getLorebookDropdownDisplayName(w);
+                entry._stwii_source_world = normalizedWorldName;
+                entry.world = '9z' + normalizedWorldName;
             }
         }
         // Ensure the panel observer is ready to strip the "9z" prefix
         // from displayed world-name headers after the extension renders.
         ensureWiiPanelObserver();
 
-        await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, arg);
+        const emittedEntries = sanitizeWorldInfoEntryListForClient(arg, handle);
+        await eventSource.emit(event_types.WORLD_INFO_ACTIVATED, emittedEntries);
     }
 
     return {
@@ -1275,11 +1688,13 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
         worldInfoBefore,
         worldInfoAfter,
         hasRestrictedHiddenLore,
+        hiddenLoreContext,
         worldInfoExamples: activatedWorldInfo.EMEntries ?? [],
         worldInfoDepth: activatedWorldInfo.WIDepthEntries ?? [],
         anBefore: activatedWorldInfo.ANBeforeEntries ?? [],
         anAfter: activatedWorldInfo.ANAfterEntries ?? [],
         outletEntries: activatedWorldInfo.outletEntries ?? {},
+        loreExclusionInfo,
     };
 }
 
@@ -1372,11 +1787,14 @@ export function setWorldInfoSettings(settings, data) {
 
     world_names.forEach((item, i) => {
         const displayName = getLorebookDropdownDisplayName(item);
-        const globalListOption = new Option(displayName, i.toString(), selected_world_info.includes(item), selected_world_info.includes(item));
-        globalListOption.dataset.worldName = item;
+        // Global activation dropdown: exclude hidden lorebooks from user-facing list.
+        if (!isHiddenPushedLorebookForDropdown(item)) {
+            const globalListOption = new Option(displayName, i.toString(), selected_world_info.includes(item), selected_world_info.includes(item));
+            globalListOption.dataset.worldName = item;
+            $('#world_info').append(globalListOption);
+        }
         const editorListOption = new Option(displayName, i.toString());
         editorListOption.dataset.worldName = item;
-        $('#world_info').append(globalListOption);
         $('#world_editor_select').append(editorListOption);
     });
 
@@ -1385,8 +1803,7 @@ export function setWorldInfoSettings(settings, data) {
     $('#world_editor_select').trigger('change');
 
     eventSource.on(event_types.CHAT_CHANGED, async () => {
-        const hasWorldInfo = !!chat_metadata[METADATA_KEY] && world_names.includes(chat_metadata[METADATA_KEY]);
-        $('.chat_lorebook_button').toggleClass('world_set', hasWorldInfo);
+        $('.chat_lorebook_button').toggleClass('world_set', getChatLorebooks().length > 0);
         // Pre-cache the world info data for the chat for quicker first prompt generation
         await getSortedEntries();
     });
@@ -1541,8 +1958,9 @@ function registerWorldInfoSlashCommands() {
             return '';
         }
 
-        if (chat_metadata[METADATA_KEY] && world_names.includes(chat_metadata[METADATA_KEY])) {
-            return chat_metadata[METADATA_KEY];
+        const chatWorld = getPrimaryChatLorebook();
+        if (chatWorld) {
+            return chatWorld;
         }
 
         if (isFalseBoolean(String(args.create))) {
@@ -1551,9 +1969,8 @@ function registerWorldInfoSlashCommands() {
 
         const name = await createWorldWithName(args.name, `Chat Book ${getCurrentChatId()}`.replace(/[^a-z0-9 -]/gi, '_').replace(/_{2,}/g, '_').substring(0, 64));
 
-        chat_metadata[METADATA_KEY] = name;
+        setChatLorebooks(name);
         await saveMetadata();
-        $('.chat_lorebook_button').addClass('world_set');
         return name;
     }
 
@@ -2441,13 +2858,16 @@ export async function updateWorldInfoList() {
 
         world_names.forEach((item, i) => {
             const displayName = getLorebookDropdownDisplayName(item);
-            const globalListOption = new Option(displayName, i.toString());
-            globalListOption.selected = selected_world_info.includes(item);
-            globalListOption.dataset.worldName = item;
+            // Global activation dropdown: exclude hidden lorebooks from user-facing list.
+            if (!isHiddenPushedLorebookForDropdown(item)) {
+                const globalListOption = new Option(displayName, i.toString());
+                globalListOption.selected = selected_world_info.includes(item);
+                globalListOption.dataset.worldName = item;
+                $('#world_info').append(globalListOption);
+            }
             const editorListOption = new Option(displayName, i.toString());
             editorListOption.selected = editorSelected === item;
             editorListOption.dataset.worldName = item;
-            $('#world_info').append(globalListOption);
             $('#world_editor_select').append(editorListOption);
         });
     }
@@ -4451,11 +4871,17 @@ async function _save(name, data) {
     // Prevent double saving if both immediate and debounced save are called
     cancelDebounce(saveWorldDebounced);
 
-    await fetch('/api/worldinfo/edit', {
+    console.log('[wi _save] name:', JSON.stringify(name), '| has data:', !!data, '| has entries:', !!(data?.entries), '| entries count:', Object.keys(data?.entries || {}).length);
+
+    const response = await fetch('/api/worldinfo/edit', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({ name: name, data: data }),
     });
+    if (!response.ok) {
+        const body = await response.text().catch(() => '(no body)');
+        console.error('[wi _save] FAILED', response.status, response.statusText, '| server said:', body);
+    }
     await eventSource.emit(event_types.WORLDINFO_UPDATED, name, data);
 }
 
@@ -4660,11 +5086,11 @@ async function getCharacterLore() {
         worldsToSearch.add(baseWorldName);
     }
 
-    // TODO: Maybe make the utility function not use the window context?
     const fileName = getCharaFilename(this_chid);
-    const extraCharLore = world_info.charLore?.find((e) => e.name === fileName);
-    if (extraCharLore) {
-        worldsToSearch = new Set([...worldsToSearch, ...extraCharLore.extraBooks]);
+    const extraWorldBooks = getCharacterAuxWorldBooks(character, fileName);
+    const chatWorlds = getChatLorebooks();
+    if (extraWorldBooks.length > 0) {
+        worldsToSearch = new Set([...worldsToSearch, ...extraWorldBooks]);
     }
 
     if (!worldsToSearch.size) {
@@ -4678,7 +5104,7 @@ async function getCharacterLore() {
             continue;
         }
 
-        if (chat_metadata[METADATA_KEY] === worldName) {
+        if (chatWorlds.includes(worldName)) {
             console.debug(`[WI] Character ${name}'s world ${worldName} is already activated in chat lore! Skipping...`);
             continue;
         }
@@ -4719,34 +5145,38 @@ async function getGlobalLore() {
 }
 
 async function getChatLore() {
-    const chatWorld = chat_metadata[METADATA_KEY];
+    const chatWorlds = getChatLorebooks();
 
-    if (!chatWorld) {
+    if (chatWorlds.length === 0) {
         return [];
     }
 
-    if (selected_world_info.includes(chatWorld)) {
-        console.debug(`[WI] Chat world ${chatWorld} is already activated in global world info! Skipping...`);
-        return [];
+    let entries = [];
+    for (const chatWorld of chatWorlds) {
+        if (selected_world_info.includes(chatWorld)) {
+            console.debug(`[WI] Chat world ${chatWorld} is already activated in global world info! Skipping...`);
+            continue;
+        }
+
+        const data = await loadWorldInfo(chatWorld);
+        const newEntries = mapLoadedWorldInfoEntries(data, chatWorld);
+        entries = entries.concat(newEntries);
     }
 
-    const data = await loadWorldInfo(chatWorld);
-    const entries = mapLoadedWorldInfoEntries(data, chatWorld);
-
-    console.debug(`[WI] Chat lore has ${entries.length} entries`, [chatWorld]);
+    console.debug(`[WI] Chat lore has ${entries.length} entries`, chatWorlds);
 
     return entries;
 }
 
 async function getPersonaLore() {
-    const chatWorld = chat_metadata[METADATA_KEY];
+    const chatWorlds = getChatLorebooks();
     const personaWorld = power_user.persona_description_lorebook;
 
     if (!personaWorld) {
         return [];
     }
 
-    if (chatWorld === personaWorld) {
+    if (chatWorlds.includes(personaWorld)) {
         console.debug(`[WI] Persona world ${personaWorld} is already activated in chat world! Skipping...`);
         return [];
     }
@@ -4913,6 +5343,14 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
     let failedProbabilityChecks = new Set();
     let allActivatedText = '';
 
+    // Track lore entries excluded due to budget limits
+    const loreExclusionInfo = {
+        totalEntriesScanned: 0,
+        entriesActivated: 0,
+        entriesExcludedByBudget: 0,
+        budgetExceededAt: null,
+    };
+
     let budget = Math.round(world_info_budget * maxContext / 100) || 1;
 
     if (world_info_budget_cap > 0 && budget > world_info_budget_cap) {
@@ -4967,7 +5405,11 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             let headerLogged = false;
             function log(...args) {
                 if (!headerLogged) {
-                    console.debug(`[WI] Entry ${entry.uid}`, `from '${entry.world}' processing`, entry);
+                    console.debug(
+                        `[WI] Entry ${entry.uid}`,
+                        `from '${entry.world}' processing`,
+                        sanitizeWorldInfoEntryForClient(entry),
+                    );
                     headerLogged = true;
                 }
                 console.debug(`[WI] Entry ${entry.uid}`, ...args);
@@ -5223,7 +5665,10 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
 
             const success = verifyProbability();
             if (!success) {
-                console.debug(`WI entry ${entry.uid} failed probability check, removing from activated entries`, entry);
+                console.debug(
+                    `WI entry ${entry.uid} failed probability check, removing from activated entries`,
+                    sanitizeWorldInfoEntryForClient(entry),
+                );
                 continue;
             }
 
@@ -5242,14 +5687,22 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
                     }
                     token_budget_overflowed = true;
                 }
+                // Track the excluded entry
+                loreExclusionInfo.entriesExcludedByBudget++;
+                loreExclusionInfo.budgetExceededAt = entry.uid;
                 continue;
             }
 
             allActivatedEntries.set(`${entry.world}.${entry.uid}`, entry);
-            console.debug(`[WI] Entry ${entry.uid} activation successful, adding to prompt`, entry);
+            console.debug(
+                `[WI] Entry ${entry.uid} activation successful, adding to prompt`,
+                sanitizeWorldInfoEntryForClient(entry),
+            );
         }
 
-        const successfulNewEntries = newEntries.filter(x => !failedProbabilityChecks.has(x));
+        // Only entries that were actually added to allActivatedEntries count as successful.
+        // This excludes probability failures and budget-excluded entries.
+        const successfulNewEntries = newEntries.filter(x => allActivatedEntries.get(`${x.world}.${x.uid}`) === x);
         const successfulNewEntriesForRecursion = successfulNewEntries.filter(x => !x.preventRecursion);
 
         console.debug(`[WI] --- LOOP #${count} RESULT ---`);
@@ -5258,7 +5711,10 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         } else if (!successfulNewEntries.length) {
             console.debug('[WI] Probability checks failed for all activated entries. No new entries activated.');
         } else {
-            console.debug(`[WI] Successfully activated ${successfulNewEntries.length} new entries to prompt. ${allActivatedEntries.size} total entries activated.`, successfulNewEntries);
+            console.debug(
+                `[WI] Successfully activated ${successfulNewEntries.length} new entries to prompt. ${allActivatedEntries.size} total entries activated.`,
+                sanitizeWorldInfoEntryListForClient(successfulNewEntries),
+            );
         }
 
         function logNextState(...args) {
@@ -5320,7 +5776,7 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         }
 
         // Fire an event after each scan loop, so extensions can hook into the current scanning state
-        const args = {
+        const scanDoneArgs = {
             state: {
                 current: curScanState,
                 next: scanState,
@@ -5345,18 +5801,22 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             },
             timedEffects,
         };
-        await eventSource.emit(event_types.WORLDINFO_SCAN_DONE, args);
+        const emittedScanDoneArgs = sanitizeWorldInfoScanDoneArgsForClient(scanDoneArgs);
+        await eventSource.emit(event_types.WORLDINFO_SCAN_DONE, emittedScanDoneArgs);
 
         // Some fields are allowed to be changed by listeners, those will be handled here manually. They can be updated via changed the args from the listeners.
         // Any array provided directly can be modified by updating it's elements, adding or removing elements. This has to be done consistently.
-        if (args.state.next !== scanState) {
-            logNextState('[WI] Scan state changed from', scanState, 'to', args.state.next);
-            scanState = args.state.next;
+        if (emittedScanDoneArgs.state.next !== scanState) {
+            logNextState('[WI] Scan state changed from', scanState, 'to', emittedScanDoneArgs.state.next);
+            scanState = emittedScanDoneArgs.state.next;
         }
-        allActivatedText = args.activated.text;
-        currentRecursionDelayLevel = args.recursionDelay.currentLevel;
-        budget = args.budget.current;
-        token_budget_overflowed = args.budget.overflowed;
+        const scanDoneHasRestrictedHiddenLore = emittedScanDoneArgs.activated?.text === '[Redacted: hidden lorebook content]';
+        if (!scanDoneHasRestrictedHiddenLore) {
+            allActivatedText = emittedScanDoneArgs.activated.text;
+        }
+        currentRecursionDelayLevel = emittedScanDoneArgs.recursionDelay.currentLevel;
+        budget = emittedScanDoneArgs.budget.current;
+        token_budget_overflowed = emittedScanDoneArgs.budget.overflowed;
     }
 
     console.debug('[WI] --- BUILDING PROMPT ---');
@@ -5377,8 +5837,25 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         const regexDepth = entry.position === world_info_position.atDepth ? (entry.depth ?? DEFAULT_DEPTH) : null;
         const content = getRegexedString(entry.content, regex_placement.WORLD_INFO, { depth: regexDepth, isMarkdown: false, isPrompt: true });
 
+        // Diagnostic: Log if content was modified by regex
+        if (content !== entry.content) {
+            if (isRestrictedHiddenWorldInfoEntry(entry)) {
+                console.warn(
+                    `[WI] Entry ${entry.uid} from '${entry.world}' was modified by regex script, but content logging is redacted for hidden lorebook entries. Original length: ${entry.content.length}, Modified length: ${content.length}.`,
+                );
+            } else {
+                console.warn(`[WI] Entry ${entry.uid} was modified by regex script. Original length: ${entry.content.length}, Modified length: ${content.length}. Entry: ${entry.uid} (${entry.world})`);
+                console.debug('[WI] Original:', entry.content.substring(0, 100));
+                console.debug('[WI] Modified:', content.substring(0, 100));
+            }
+        }
+
         if (!content) {
-            console.debug(`[WI] Entry ${entry.uid}`, 'skipped adding to prompt due to empty content', entry);
+            console.debug(
+                `[WI] Entry ${entry.uid}`,
+                'skipped adding to prompt due to empty content',
+                sanitizeWorldInfoEntryForClient(entry),
+            );
             return;
         }
 
@@ -5448,10 +5925,17 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
     buffer.resetExternalEffects();
     timedEffects.cleanUp();
 
-    console.log(`[WI] ${isDryRun ? 'Hypothetically adding' : 'Adding'} ${allActivatedEntries.size} entries to prompt`, Array.from(allActivatedEntries.values()));
+    console.log(
+        `[WI] ${isDryRun ? 'Hypothetically adding' : 'Adding'} ${allActivatedEntries.size} entries to prompt`,
+        sanitizeWorldInfoEntryListForClient(Array.from(allActivatedEntries.values())),
+    );
     console.debug(`[WI] --- DONE${isDryRun ? ' (DRY RUN)' : ''} ---`);
 
-    return { worldInfoBefore, worldInfoAfter, EMEntries, WIDepthEntries, ANBeforeEntries: ANTopEntries, ANAfterEntries: ANBottomEntries, outletEntries: WIOutletEntries, allActivatedEntries: new Set(allActivatedEntries.values()) };
+    // Track total scanned and activated for statistics
+    loreExclusionInfo.totalEntriesScanned = sortedEntries.length;
+    loreExclusionInfo.entriesActivated = allActivatedEntries.size;
+
+    return { worldInfoBefore, worldInfoAfter, EMEntries, WIDepthEntries, ANBeforeEntries: ANTopEntries, ANAfterEntries: ANBottomEntries, outletEntries: WIOutletEntries, allActivatedEntries: new Set(allActivatedEntries.values()), loreExclusionInfo };
 }
 
 /**
@@ -6162,10 +6646,10 @@ export function openWorldInfoEditor(worldName) {
  * @returns {Promise<void>}
  */
 export async function assignLorebookToChat(event) {
-    const selectedName = chat_metadata[METADATA_KEY];
+    const selectedNames = getVisibleChatLorebooks();
 
-    if (selectedName && event.altKey) {
-        openWorldInfoEditor(selectedName);
+    if (selectedNames.length > 0 && event.altKey) {
+        openWorldInfoEditor(getPrimaryVisibleChatLorebook());
         return;
     }
 
@@ -6176,28 +6660,41 @@ export async function assignLorebookToChat(event) {
     chatName.text(getCurrentChatId());
 
     for (const worldName of world_names) {
+        if (isHiddenPushedLorebookForDropdown(worldName)) continue;
         const option = document.createElement('option');
         option.value = worldName;
-        option.innerText = worldName;
-        option.selected = selectedName === worldName;
+        option.innerText = getLorebookDropdownDisplayName(worldName);
+        option.selected = selectedNames.includes(worldName);
         worldSelect.append(option);
     }
 
     worldSelect.on('change', function () {
-        const worldName = $(this).val();
-
-        if (worldName) {
-            chat_metadata[METADATA_KEY] = worldName;
-            $('.chat_lorebook_button').addClass('world_set');
-        } else {
-            delete chat_metadata[METADATA_KEY];
-            $('.chat_lorebook_button').removeClass('world_set');
-        }
-
+        const worldNames = normalizeArray($(this).val()).slice(0, CHAT_LOREBOOK_LIMIT);
+        setChatLorebooks(worldNames);
         saveMetadata();
     });
 
-    await callGenericPopup(template, POPUP_TYPE.TEXT);
+    // Open popup — callGenericPopup runs synchronously up to its first await (user
+    // confirmation), so by the time the next line executes the template content is
+    // already attached to the document and Select2 can initialise on it.
+    // dropdownParent must point to the <dialog> element so the dropdown renders
+    // above the modal backdrop instead of being hidden behind it.
+    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT);
+    const dlg = worldSelect.closest('dialog');
+    worldSelect.select2({
+        searchInputPlaceholder: t`Search lorebooks...`,
+        searchInputCssClass: 'text_pole',
+        width: '100%',
+        matcher: startsWithMatcher,
+        dropdownCssClass: 'wi-lorebook-dropdown',
+        dropdownParent: dlg.length ? dlg : $(document.body),
+        placeholder: t`No chat lorebooks linked. Select up to 4.`,
+        allowClear: true,
+        closeOnSelect: false,
+        maximumSelectionLength: CHAT_LOREBOOK_LIMIT,
+    });
+    await popupPromise;
+    worldSelect.select2('destroy');
 }
 
 /**
@@ -6389,6 +6886,8 @@ function updateAuxBooks(fileName, computeNext) {
 
 export function initWorldInfo() {
     setupPushWorkflowControls();
+    initLoreTreasuryInline();
+
     $('#world_info').on('mousedown change', async function (e) {
         // If there's no world names, don't do anything
         if (world_names.length === 0) {
@@ -6579,24 +7078,40 @@ export function initWorldInfo() {
 
     $(document).on('click', '.chat_lorebook_button', assignLorebookToChat);
 
-    // Not needed on mobile
+    // Lorebook selects — same Select2 options as the connection-profile model selectors
+    // so the UX is identical: search box at the top of the dropdown, works on all devices.
+    // dropdownCssClass gives the dropdown a stable hook for the mobile CSS rule that
+    // expands it to full panel width (Select2's JS .css() cannot beat CSS !important).
+    const lorebookSelect2Options = {
+        searchInputPlaceholder: t`Search lorebooks...`,
+        searchInputCssClass: 'text_pole',
+        width: '100%',
+        matcher: startsWithMatcher,
+        // wi-lorebook-single suppresses the global checkbox pseudo-elements
+        // (select2-overrides.css) which are only appropriate for the multi-select.
+        dropdownCssClass: 'wi-lorebook-dropdown wi-lorebook-single',
+    };
+
+    $('#world_editor_select').select2({
+        ...lorebookSelect2Options,
+        placeholder: t`--- Pick to Edit ---`,
+        searchInputPlaceholder: t`Search...`,
+        allowClear: true,
+        closeOnSelect: true,
+        multiple: false,
+    });
+
+    $('#world_info').select2({
+        ...lorebookSelect2Options,
+        dropdownCssClass: 'wi-lorebook-dropdown', // multi-select keeps checkboxes
+        placeholder: t`No Worlds active. Click here to select.`,
+        allowClear: true,
+        closeOnSelect: false,
+    });
+
+    // Clicking a selected tag in the multi-select opens the lorebook for editing.
+    // Uses hover/pointer events so limit to non-touch devices.
     if (!isMobile()) {
-        $('#world_editor_select').select2({
-            placeholder: t`--- Pick to Edit ---`,
-            searchInputPlaceholder: t`Search...`,
-            allowClear: true,
-            closeOnSelect: true,
-            multiple: false,
-        });
-
-        $('#world_info').select2({
-            width: '100%',
-            placeholder: t`No Worlds active. Click here to select.`,
-            allowClear: true,
-            closeOnSelect: false,
-        });
-
-        // Subscribe world loading to the select2 multiselect items (We need to target the specific select2 control)
         select2ChoiceClickSubscribe($('#world_info'), target => {
             const name = $(target).text();
             const selectedIndex = world_names.indexOf(name);
@@ -6702,6 +7217,7 @@ globalThis.setPushWorkflowControlsHidden = setPushWorkflowControlsHidden;
 function applyPushUiPref(pref) {
     pref = normalizePushUiPref(pref);
     const controls = $('#push_workflow_controls');
+    controls.toggleClass('push-controls-drawer-primary', !!pref.hidden);
     controls.toggle(!pref.hidden);
     controls.toggleClass('push-controls-collapsed', !!pref.collapsed);
     controls.toggleClass('push-controls-floating', !!pref.floating);
@@ -6750,10 +7266,12 @@ function bindPushUiDrag(pref) {
     if (!pref.floating || pref.hidden) return;
 
     let dragStarted = false;
-    
+
     controls.draggable({
         handle: '#topbar_push_drag',
+        cancel: '.push-workflow-action, .push-badge, #topbar_push_toggle, #topbar_push_reset',
         containment: 'window',
+        distance: 8,
         start: function (_event, _ui) {
             dragStarted = true;
             controls.addClass('ui-draggable-dragging');
@@ -6764,7 +7282,7 @@ function bindPushUiDrag(pref) {
             controls.css({ left: `${pref.left}px`, top: `${pref.top}px` });
             controls.removeClass('ui-draggable-dragging');
             setPushUiPref(pref);
-            
+
             if (dragStarted) {
                 toastr.success('Position saved', 'Push Controls', { timeOut: 1500 });
                 dragStarted = false;
@@ -6773,47 +7291,264 @@ function bindPushUiDrag(pref) {
     });
 }
 
-async function getPushNotificationState() {
-    try {
-        const res = await fetch('/api/worldinfo/push-notifications', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-        if (!res.ok) {
-            return { pending_count: 0, unread_count: 0, pending_unread_count: 0, inbox_unread_count: 0, pending: [], submission_updates: [], legacy: [] };
+function bindPushControlAction(selector, showState, handler) {
+    const button = $(selector);
+    let lastActivationAt = 0;
+    let pointerTrackingId = null;
+    let pointerStartX = 0;
+    let pointerStartY = 0;
+    let pointerMoved = false;
+    let touchTrackingId = null;
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchMoved = false;
+    const movementThreshold = 12;
+
+    const activate = async (event) => {
+        const now = Date.now();
+        if (now - lastActivationAt < 700) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
         }
-        return await res.json();
-    } catch {
-        return { pending_count: 0, unread_count: 0, pending_unread_count: 0, inbox_unread_count: 0, pending: [], submission_updates: [], legacy: [] };
+
+        lastActivationAt = now;
+        event.preventDefault();
+        event.stopPropagation();
+        await handler(event);
+    };
+
+    button
+        .toggle(showState)
+        .toggleClass('displayNone', !showState)
+        .off('click pointerdown pointermove pointerup pointercancel touchstart touchmove touchend touchcancel');
+
+    button.on('pointerdown', (event) => {
+        if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+        pointerTrackingId = event.pointerId;
+        pointerStartX = Number(event.clientX || 0);
+        pointerStartY = Number(event.clientY || 0);
+        pointerMoved = false;
+    });
+
+    button.on('pointermove', (event) => {
+        if (event.pointerId !== pointerTrackingId) return;
+        const deltaX = Math.abs(Number(event.clientX || 0) - pointerStartX);
+        const deltaY = Math.abs(Number(event.clientY || 0) - pointerStartY);
+        if (deltaX > movementThreshold || deltaY > movementThreshold) {
+            pointerMoved = true;
+        }
+    });
+
+    button.on('pointerup', async (event) => {
+        if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+        if (event.pointerId !== pointerTrackingId) return;
+        const moved = pointerMoved;
+        pointerTrackingId = null;
+        pointerMoved = false;
+        if (moved) return;
+        await activate(event);
+    });
+
+    button.on('pointercancel', () => {
+        pointerTrackingId = null;
+        pointerMoved = false;
+    });
+
+    button.on('touchstart', (event) => {
+        const touch = event.originalEvent?.changedTouches?.[0];
+        if (!touch) return;
+        touchTrackingId = touch.identifier;
+        touchStartX = Number(touch.clientX || 0);
+        touchStartY = Number(touch.clientY || 0);
+        touchMoved = false;
+    });
+
+    button.on('touchmove', (event) => {
+        const touches = Array.from(event.originalEvent?.changedTouches || []);
+        const touch = touches.find((item) => item.identifier === touchTrackingId);
+        if (!touch) return;
+        const deltaX = Math.abs(Number(touch.clientX || 0) - touchStartX);
+        const deltaY = Math.abs(Number(touch.clientY || 0) - touchStartY);
+        if (deltaX > movementThreshold || deltaY > movementThreshold) {
+            touchMoved = true;
+        }
+    });
+
+    button.on('touchend', async (event) => {
+        const touches = Array.from(event.originalEvent?.changedTouches || []);
+        const touch = touches.find((item) => item.identifier === touchTrackingId);
+        if (!touch) return;
+        touchTrackingId = null;
+        if (touchMoved) {
+            touchMoved = false;
+            return;
+        }
+        touchMoved = false;
+        await activate(event);
+    });
+
+    button.on('touchcancel', () => {
+        touchTrackingId = null;
+        touchMoved = false;
+    });
+
+    button.on('click', async (event) => {
+        if (Date.now() - lastActivationAt < 700) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        await handler(event);
+    });
+}
+
+const PUSH_NOTIFICATION_CACHE_TTL = 5000;
+const PUSH_USER_CACHE_TTL = 60000;
+const pushNotificationStateCache = {
+    expiresAt: 0,
+    promise: null,
+    value: null,
+};
+const pushUserCache = new Map();
+
+function createEmptyPushNotificationState() {
+    return {
+        pending_count: 0,
+        unread_count: 0,
+        pending_unread_count: 0,
+        inbox_unread_count: 0,
+        admin_pending_submissions: 0,
+        admin_unread_notes: 0,
+        pending: [],
+        submission_updates: [],
+        legacy: [],
+    };
+}
+
+function getUserAvatarImageUrl(handle) {
+    const normalizedHandle = String(handle || '').trim();
+    return normalizedHandle
+        ? `/api/worldinfo/user-avatar-img?handle=${encodeURIComponent(normalizedHandle)}`
+        : '/img/default-user.png';
+}
+
+function invalidatePushNotificationState() {
+    pushNotificationStateCache.expiresAt = 0;
+    pushNotificationStateCache.value = null;
+}
+
+async function getPushNotificationState(options = {}) {
+    const { force = false } = options;
+    const now = Date.now();
+
+    if (!force && pushNotificationStateCache.value && pushNotificationStateCache.expiresAt > now) {
+        return pushNotificationStateCache.value;
     }
+
+    if (!force && pushNotificationStateCache.promise) {
+        return pushNotificationStateCache.promise;
+    }
+
+    pushNotificationStateCache.promise = (async () => {
+        try {
+            const res = await fetch('/api/worldinfo/push-notifications', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+            });
+            const state = res.ok ? await res.json() : createEmptyPushNotificationState();
+            pushNotificationStateCache.value = state;
+            pushNotificationStateCache.expiresAt = Date.now() + PUSH_NOTIFICATION_CACHE_TTL;
+            return state;
+        } catch {
+            const emptyState = createEmptyPushNotificationState();
+            pushNotificationStateCache.value = emptyState;
+            pushNotificationStateCache.expiresAt = Date.now() + 1000;
+            return emptyState;
+        } finally {
+            pushNotificationStateCache.promise = null;
+        }
+    })();
+
+    return pushNotificationStateCache.promise;
+}
+
+async function refreshPushNotificationState() {
+    invalidatePushNotificationState();
+    const state = await getPushNotificationState({ force: true });
+    updatePushNotificationBadge(state);
+    return state;
 }
 
 function updatePushBadge(el, count) {
     if (!el) return;
     el.textContent = count > 99 ? '99+' : String(count);
     el.classList.toggle('show', count > 0);
+    el.closest('.push-drawer-link-badge')?.classList.toggle('has-push-alert', count > 0);
+}
+
+function closeOptionsDrawer() {
+    if (typeof globalThis.hideOptionsMenu === 'function') {
+        globalThis.hideOptionsMenu();
+        return;
+    }
+
+    const menu = $('#options');
+    if (!menu.length) return;
+    menu.stop(true, true).fadeOut(animation_duration);
 }
 
 function updatePushNotificationBadge(state) {
     // Keep badge semantics explicit:
     // - Bell: unread pending push items only
-    // - Submit: unread user inbox items
-    // - Admin Inbox: pending submissions
+    // - User Inbox: unread user inbox items
+    // - Admin Inbox: pending admin inbox items
     updatePushBadge(document.getElementById('topbar_push_notif_badge'), Number(state?.pending_unread_count || 0));
+    updatePushBadge(document.getElementById('option_push_notif_badge'), Number(state?.pending_unread_count || 0));
     updatePushBadge(document.getElementById('topbar_submit_badge'), Number(state?.inbox_unread_count || 0));
+    updatePushBadge(document.getElementById('option_submit_badge'), Number(state?.inbox_unread_count || 0));
     updatePushBadge(document.getElementById('topbar_admin_inbox_badge'), Number(state?.admin_pending_submissions || 0));
+    updatePushBadge(document.getElementById('option_admin_inbox_badge'), Number(state?.admin_pending_submissions || 0));
 
-    // Update title only - click handler is bound once during initialization
+    // Compatibility control: despite the legacy id, this button opens the user inbox modal.
     const submitBtn = document.getElementById('topbar_submit');
     if (submitBtn && Number(state?.inbox_unread_count || 0) > 0) {
         submitBtn.style.cursor = 'pointer';
-        submitBtn.title = `Submit to Admin (${state.inbox_unread_count} unread inbox item${state.inbox_unread_count !== 1 ? 's' : ''})`;
+        submitBtn.title = `Inbox (${state.inbox_unread_count} unread item${state.inbox_unread_count !== 1 ? 's' : ''})`;
         const badge = document.getElementById('topbar_submit_badge');
         if (badge) {
             badge.style.cursor = 'pointer';
         }
     } else if (submitBtn) {
-        submitBtn.title = 'Submit to Admin';
+        submitBtn.title = 'Inbox';
+    }
+
+    const drawerInboxBtn = document.getElementById('option_user_inbox');
+    if (drawerInboxBtn && Number(state?.inbox_unread_count || 0) > 0) {
+        drawerInboxBtn.title = `Inbox (${state.inbox_unread_count} unread item${state.inbox_unread_count !== 1 ? 's' : ''})`;
+    } else if (drawerInboxBtn) {
+        drawerInboxBtn.title = 'Inbox';
+    }
+
+    const drawerAdminInboxBtn = document.getElementById('option_push_inbox');
+    if (drawerAdminInboxBtn && Number(state?.admin_pending_submissions || 0) > 0) {
+        drawerAdminInboxBtn.title = `Push Inbox (${state.admin_pending_submissions} pending item${state.admin_pending_submissions !== 1 ? 's' : ''})`;
+    } else if (drawerAdminInboxBtn) {
+        drawerAdminInboxBtn.title = 'Push Inbox';
+    }
+
+    const drawerSubmitBtn = document.getElementById('option_submit_to_admin');
+    if (drawerSubmitBtn) {
+        drawerSubmitBtn.title = 'Submit to Admin';
+    }
+
+    const drawerNotificationsBtn = document.getElementById('option_push_notifs');
+    if (drawerNotificationsBtn && Number(state?.pending_unread_count || 0) > 0) {
+        drawerNotificationsBtn.title = `Push Notifications (${state.pending_unread_count} unread item${state.pending_unread_count !== 1 ? 's' : ''})`;
+    } else if (drawerNotificationsBtn) {
+        drawerNotificationsBtn.title = 'Push Notifications';
     }
 }
 
@@ -6883,10 +7618,26 @@ async function openUserInboxDetailModal(inboxId) {
     if (context.push_id) chips.push('<span class="push-inbox-chip">PUSH</span>');
     if (context.submission_id) chips.push('<span class="push-inbox-chip">SUBMISSION</span>');
 
+    const senderAvatar = senderHandle && senderHandle.toLowerCase() !== 'system'
+        ? getUserAvatarImageUrl(senderHandle)
+        : '/img/default-user.png';
+
+    const senderAvatarHtml = `
+        <div class="push-sender-header">
+            <img class="push-sender-avatar" src="${escapeHtml(senderAvatar)}"
+                 alt="${escapeHtml(item.from_name || senderHandle || 'Sender')}"
+                 onerror="this.src='/img/default-user.png'" />
+            <div>
+                <div class="push-sender-name">${escapeHtml(item.from_name || item.from_handle || 'System')}</div>
+                <div class="push-flow-meta" style="margin:0;">${formatPushTs(item.created_at)}</div>
+            </div>
+        </div>
+    `;
+
     const html = `
-        <div class="push-inbox-modal" style="min-width:480px;">
+        <div class="push-inbox-modal push-popup-layout">
             <h3 style="margin-top:0;">${escapeHtml(item.title || 'Inbox Item')}</h3>
-            <div class="push-flow-meta">From ${escapeHtml(item.from_name || item.from_handle || 'System')} • ${formatPushTs(item.created_at)}</div>
+            ${senderAvatarHtml}
             <div class="push-inbox-chip-row">${chips.join('')}</div>
             <div class="push-inbox-detail-body">${escapeHtml(item.body || '')}</div>
         </div>
@@ -6912,8 +7663,7 @@ async function openUserInboxDetailModal(inboxId) {
     const result = await popup.show();
     if (result === RESULT_REPLY) {
         await openUserSendAdminNoteModal(inboxId);
-        const refreshed = await getPushNotificationState();
-        updatePushNotificationBadge(refreshed);
+        await refreshPushNotificationState();
         return;
     }
 
@@ -6931,35 +7681,81 @@ async function openUserInboxDetailModal(inboxId) {
         if (!actionRes.ok) {
             toastr.error(await actionRes.text() || 'Failed to update inbox item', 'Inbox');
         }
+
+        await refreshPushNotificationState();
+        await openUserInboxModal();
+        return;
     }
 
-    const refreshed = await getPushNotificationState();
-    updatePushNotificationBadge(refreshed);
+    await refreshPushNotificationState();
 }
 
 
-async function fetchPushBotUsers({ adminsOnly = false } = {}) {
+async function fetchPushBotUsers({ adminsOnly = false, force = false } = {}) {
+    const cacheKey = adminsOnly ? 'admins' : 'all';
+    const cached = pushUserCache.get(cacheKey);
+    const now = Date.now();
+
+    if (!force && cached?.value && cached.expiresAt > now) {
+        return cached.value;
+    }
+
+    if (!force && cached?.promise) {
+        return cached.promise;
+    }
+
     const endpoints = adminsOnly
         ? ['/api/worldinfo/admin-handles', '/api/worldinfo/users/get', '/api/users/get']
         : ['/api/worldinfo/users/get', '/api/users/get'];
 
-    let lastError = '';
-    for (const url of endpoints) {
-        try {
-            const res = await fetch(url, { method: 'POST', headers: getRequestHeaders() });
-            if (!res.ok) {
-                lastError = await res.text().catch(() => `${res.status} ${res.statusText}`);
-                continue;
+    const requestPromise = (async () => {
+        let lastError = '';
+        for (const url of endpoints) {
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ include_avatars: false }),
+                });
+                if (!res.ok) {
+                    lastError = await res.text().catch(() => `${res.status} ${res.statusText}`);
+                    continue;
+                }
+                const data = await res.json();
+                if (!Array.isArray(data)) continue;
+                const users = data.filter(u => u && typeof u === 'object');
+                const filteredUsers = adminsOnly ? users.filter(u => u.admin) : users;
+                pushUserCache.set(cacheKey, {
+                    value: filteredUsers,
+                    expiresAt: Date.now() + PUSH_USER_CACHE_TTL,
+                    promise: null,
+                });
+                return filteredUsers;
+            } catch (err) {
+                lastError = String(err?.message || err || 'Unknown error');
             }
-            const data = await res.json();
-            if (!Array.isArray(data)) continue;
-            const users = data.filter(u => u && typeof u === 'object');
-            return adminsOnly ? users.filter(u => u.admin) : users;
-        } catch (err) {
-            lastError = String(err?.message || err || 'Unknown error');
+        }
+        throw new Error(lastError || 'Failed to retrieve users');
+    })();
+
+    pushUserCache.set(cacheKey, {
+        value: cached?.value || null,
+        expiresAt: cached?.expiresAt || 0,
+        promise: requestPromise,
+    });
+
+    try {
+        return await requestPromise;
+    } finally {
+        const latest = pushUserCache.get(cacheKey);
+        if (latest?.promise === requestPromise) {
+            pushUserCache.set(cacheKey, {
+                value: latest.value,
+                expiresAt: latest.expiresAt,
+                promise: null,
+            });
         }
     }
-    throw new Error(lastError || 'Failed to retrieve users');
 }
 
 async function openUserSendAdminNoteModal(onResponseToInboxId = null) {
@@ -6975,14 +7771,24 @@ async function openUserSendAdminNoteModal(onResponseToInboxId = null) {
         ? admins.map(a => `<option value="${escapeHtml(a.handle)}">${escapeHtml(a.name || a.handle)}</option>`).join('')
         : '<option value="">No admins available</option>';
 
+    // Use the image endpoint (stable URL) instead of embedding base64 — prevents flicker on swap
+    const firstHandle = admins[0]?.handle || '';
+    const avatarUrl = (handle) => getUserAvatarImageUrl(handle);
+
     const html = `
         <div class="push-popup-layout">
             <h3 style="margin-top:0;">Send Note to Admin</h3>
             <label class="push-inbox-label">Send To</label>
-            <select id="user_admin_note_target" class="text_pole" style="width:100%; margin-bottom:10px;">
-                ${adminOptions}
-            </select>
-            <label class="push-inbox-label">Message</label>
+            <div class="push-note-recipient-row">
+                <img id="user_note_admin_avatar" class="push-note-recipient-avatar"
+                     src="${avatarUrl(firstHandle)}"
+                     alt="Admin avatar"
+                     onerror="this.src='/img/default-user.png'" />
+                <select id="user_admin_note_target" class="text_pole" style="flex:1;">
+                    ${adminOptions}
+                </select>
+            </div>
+            <label class="push-inbox-label" style="margin-top:10px;">Message</label>
             <textarea id="user_admin_note_text" class="text_pole" style="width:100%; height:120px; resize:vertical;" placeholder="Your message to the admin..."></textarea>
         </div>
     `;
@@ -6993,6 +7799,12 @@ async function openUserSendAdminNoteModal(onResponseToInboxId = null) {
         wider: true,
     });
     decoratePushPopup(popup, 'user-admin-note');
+
+    // Update avatar URL on selection change — simple URL swap, no base64 thrashing
+    $(popup.dlg).on('change', '#user_admin_note_target', function () {
+        const selectedHandle = String($(this).val() || '');
+        $(popup.dlg).find('#user_note_admin_avatar').attr('src', avatarUrl(selectedHandle));
+    });
 
     const result = await popup.show();
     if (result !== POPUP_RESULT.AFFIRMATIVE) return;
@@ -7060,9 +7872,21 @@ async function openUserInboxModal() {
         const unreadClass = item.read_at ? '' : ' unread';
         const tag = inboxTypeTag(item.type);
         const body = inboxPreview(item.body || '');
+        const senderHandle = item.from_handle || '';
+        const senderAvatar = senderHandle && senderHandle !== 'system'
+            ? getUserAvatarImageUrl(senderHandle)
+            : null;
+        const avHtml = senderAvatar
+            ? `<img class="push-ni-av-img"
+                    src="${escapeHtml(senderAvatar)}"
+                    alt="${escapeHtml(item.from_name || senderHandle)}"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+               <i class="fa-solid ${inboxIcon(item.type)}" style="display:none;"></i>`
+            : `<i class="fa-solid ${inboxIcon(item.type)}"></i>`;
+
         return `
             <div class="push-ni${unreadClass}" data-inbox-id="${escapeHtml(item.inbox_id)}">
-                <div class="push-ni-av"><i class="fa-solid ${inboxIcon(item.type)}"></i></div>
+                <div class="push-ni-av">${avHtml}</div>
                 <div class="push-ni-body">
                     <div class="push-ni-title">${escapeHtml(item.title || 'Inbox Item')} <span class="push-tag ${inboxTagClass(item.type)}">${escapeHtml(tag)}</span></div>
                     <div class="push-ni-desc">${escapeHtml(body)}</div>
@@ -7082,6 +7906,7 @@ async function openUserInboxModal() {
 
     const RESULT_CLEAR_READ = POPUP_RESULT.CUSTOM1;
     const RESULT_CLEAR_ALL = POPUP_RESULT.CUSTOM2;
+    const RESULT_SUBMIT = POPUP_RESULT.CUSTOM3;
     const popup = new Popup(html, POPUP_TYPE.TEXT, '', {
         okButton: 'Close',
         rows: 1,
@@ -7089,6 +7914,7 @@ async function openUserInboxModal() {
         customButtons: [
             { text: 'Clear Read', result: RESULT_CLEAR_READ },
             { text: 'Clear All', result: RESULT_CLEAR_ALL },
+            { text: 'Submit to Admin', result: RESULT_SUBMIT },
         ],
     });
     decoratePushPopup(popup, 'user-inbox');
@@ -7115,13 +7941,16 @@ async function openUserInboxModal() {
         }
     }
 
-    const refreshed = await getPushNotificationState();
-    updatePushNotificationBadge(refreshed);
+    await refreshPushNotificationState();
+
+    if (result === RESULT_SUBMIT) {
+        await openSubmitToAdminModal();
+    }
 }
 
 async function openAdminNoteModal() {
     console.log('[AdminNote] Modal opened');
-    
+
     if (!isAdmin()) {
         console.warn('[AdminNote] User is not admin');
         toastr.warning('Only admins can send direct notes.', 'Admin Note');
@@ -7139,12 +7968,18 @@ async function openAdminNoteModal() {
         console.error('[AdminNote] Error fetching users:', err);
     }
 
-    const userRows = users.map(u => `
+    const userRows = users.map(u => {
+        // Use image endpoint URL — avoids embedding large base64 strings in HTML
+        const avatarSrc = getUserAvatarImageUrl(u.handle);
+        const avatarHtml = `<img class="push-note-target-avatar" src="${avatarSrc}" alt="${escapeHtml(u.name || u.handle)}" onerror="this.src='/img/default-user.png'" />`;
+        return `
         <label class="push-note-target">
             <input type="checkbox" class="admin_note_target" value="${escapeHtml(u.handle)}" />
+            ${avatarHtml}
             <span>${escapeHtml(u.name || u.handle)} <span style="opacity:0.6;">(${escapeHtml(u.handle)})</span></span>
         </label>
-    `).join('');
+    `;
+    }).join('');
 
     const html = `
         <div class="push-inbox-modal push-popup-layout">
@@ -7244,6 +8079,78 @@ async function openAdminNoteModal() {
 function decoratePushPopup(popup, mode = 'default') {
     if (!popup?.dlg) return;
 
+    const mobileScrollModes = new Set(['queue', 'submit']);
+    const bodyEl = popup.dlg.querySelector('.popup-body');
+    const contentEl = popup.dlg.querySelector('.popup-content');
+    const setImportantStyle = (element, property, value) => element.style.setProperty(property, value, 'important');
+
+    const applyMobilePushLayout = () => {
+        if (!(bodyEl instanceof HTMLElement) || !(contentEl instanceof HTMLElement)) return;
+
+        const isCompactViewport = window.matchMedia('(max-width: 640px), (max-height: 760px)').matches;
+        const shouldUseBodyScroll = isCompactViewport && mobileScrollModes.has(mode);
+
+        if (!shouldUseBodyScroll) {
+            popup.dlg.style.removeProperty('top');
+            popup.dlg.style.removeProperty('left');
+            popup.dlg.style.removeProperty('right');
+            popup.dlg.style.removeProperty('bottom');
+            popup.dlg.style.removeProperty('transform');
+            popup.dlg.style.removeProperty('width');
+            popup.dlg.style.removeProperty('max-width');
+            popup.dlg.style.removeProperty('height');
+            popup.dlg.style.removeProperty('max-height');
+            popup.dlg.style.removeProperty('overflow');
+            popup.dlg.style.removeProperty('overflow-y');
+            popup.dlg.style.removeProperty('overflow-x');
+
+            bodyEl.style.removeProperty('display');
+            bodyEl.style.removeProperty('height');
+            bodyEl.style.removeProperty('max-height');
+            bodyEl.style.removeProperty('min-height');
+            bodyEl.style.removeProperty('overflow');
+            bodyEl.style.removeProperty('overflow-y');
+            bodyEl.style.removeProperty('overflow-x');
+            bodyEl.style.removeProperty('-webkit-overflow-scrolling');
+            bodyEl.style.removeProperty('touch-action');
+
+            contentEl.style.removeProperty('flex');
+            contentEl.style.removeProperty('min-height');
+            contentEl.style.removeProperty('overflow');
+            contentEl.style.removeProperty('overflow-y');
+            contentEl.style.removeProperty('overflow-x');
+            return;
+        }
+
+        const viewportHeight = Math.max(320, Math.floor((window.visualViewport?.height || window.innerHeight) - 16));
+
+        setImportantStyle(popup.dlg, 'top', '8px');
+        setImportantStyle(popup.dlg, 'left', '50%');
+        setImportantStyle(popup.dlg, 'right', 'auto');
+        setImportantStyle(popup.dlg, 'bottom', 'auto');
+        setImportantStyle(popup.dlg, 'transform', 'translateX(-50%)');
+        setImportantStyle(popup.dlg, 'width', '92vw');
+        setImportantStyle(popup.dlg, 'max-width', '92vw');
+        setImportantStyle(popup.dlg, 'height', 'auto');
+        setImportantStyle(popup.dlg, 'max-height', `${viewportHeight}px`);
+        setImportantStyle(popup.dlg, 'overflow', 'hidden');
+
+        setImportantStyle(bodyEl, 'display', 'block');
+        setImportantStyle(bodyEl, 'height', 'auto');
+        setImportantStyle(bodyEl, 'max-height', `${Math.max(280, viewportHeight - 12)}px`);
+        setImportantStyle(bodyEl, 'min-height', '0');
+        setImportantStyle(bodyEl, 'overflow-y', 'auto');
+        setImportantStyle(bodyEl, 'overflow-x', 'hidden');
+        setImportantStyle(bodyEl, '-webkit-overflow-scrolling', 'touch');
+        setImportantStyle(bodyEl, 'touch-action', 'pan-y');
+
+        setImportantStyle(contentEl, 'flex', '0 0 auto');
+        setImportantStyle(contentEl, 'min-height', 'auto');
+        setImportantStyle(contentEl, 'overflow', 'visible');
+    };
+
+    const handleViewportChange = () => window.requestAnimationFrame(applyMobilePushLayout);
+
     const decorate = () => {
         const dlg = $(popup.dlg);
         if (!dlg.length) return;
@@ -7292,11 +8199,26 @@ function decoratePushPopup(popup, mode = 'default') {
                 }
             }
         });
+
+        applyMobilePushLayout();
     };
 
     decorate();
     setTimeout(decorate, 0);
     setTimeout(decorate, 80);
+
+    window.addEventListener('resize', handleViewportChange);
+    window.visualViewport?.addEventListener('resize', handleViewportChange);
+
+    const previousOnClose = popup.onClose;
+    popup.onClose = async (...args) => {
+        window.removeEventListener('resize', handleViewportChange);
+        window.visualViewport?.removeEventListener('resize', handleViewportChange);
+
+        if (typeof previousOnClose === 'function') {
+            await previousOnClose(...args);
+        }
+    };
 }
 
 function renderPushTargetRail(users) {
@@ -7306,7 +8228,11 @@ function renderPushTargetRail(users) {
 
     const userCards = users.map(u => `
         <button type="button" class="push-rail-card" data-handle="${escapeHtml(u.handle)}">
-            <i class="fa-solid fa-user"></i>
+            <img class="push-rail-card-avatar"
+                src="${escapeHtml(getUserAvatarImageUrl(u.handle))}"
+                alt="${escapeHtml(u.name || u.handle)}"
+                onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+            <i class="fa-solid fa-user" style="display:none;"></i>
             <span>${escapeHtml(u.name || u.handle)}</span>
         </button>
     `).join('');
@@ -7416,14 +8342,21 @@ async function openPushDetailModal(pushId) {
     const tagClass = isChar ? 'push-tag-char' : 'push-tag-lore';
     const titleLabel = isChar ? 'Character Update' : 'Lorebook Update';
     const isAnnouncement = !!item.is_public_announcement;
+    const lorebookBundle = Array.isArray(item.lorebook_bundle)
+        ? item.lorebook_bundle.filter(entry => entry?.pushed_lorebook_name)
+        : [];
+    const bundleLorebookNames = lorebookBundle.map(entry => String(entry.pushed_lorebook_name || '').trim()).filter(Boolean);
+    const primaryBundleLorebook = lorebookBundle.find(entry => String(entry.role || '').toLowerCase() === 'primary')?.pushed_lorebook_name || item.pushed_lorebook_name;
     const characterLabel = item.announcement_character_name || item.source_names?.character_label || item.char_label || item.pushed_lorebook_name || 'Character';
-    const cardTitle = isAnnouncement ? (item.announcement_title || 'NEW CHARACTER!! 🎉') : item.pushed_lorebook_name;
+    const cardTitle = isAnnouncement ? (item.announcement_title || '🎉 NEW CHARACTER!! 🎉') : primaryBundleLorebook;
     const cardDescription = isAnnouncement
         ? characterLabel
-        : (item.char_label || (isChar ? 'Updated character and lorebook content.' : 'Updated world lore.'));
+        : (bundleLorebookNames.length > 1
+            ? `${item.char_label || 'Updated character bundle'} (${bundleLorebookNames.length} lorebooks)`
+            : (item.char_label || (isChar ? 'Updated character and lorebook content.' : 'Updated world lore.')));
     const floralCharacterLabel = `🌸 ${characterLabel} 🌸`;
     const notesText = isAnnouncement
-        ? `<span style="font-size:20px; font-weight:bold;">NEW CHARACTER!! 🎉</span>\n<span style="font-size:20px; font-weight:bold;">${floralCharacterLabel}</span>`
+        ? `<span style="font-size:14px; font-weight:bold;">🎉 NEW CHARACTER!! 🎉</span>\n<span style="font-size:14px; font-weight:bold;">${floralCharacterLabel}</span>`
         : (item.notes || 'No notes provided.');
     const pushedByLabel = item.pushed_by_label || item.pushed_by_name || item.creator_handle || 'User';
     const originalCreator = item.original_creator_name || item.original_creator_handle || item.effective_creator || item.creator_handle || 'Unknown';
@@ -7431,13 +8364,29 @@ async function openPushDetailModal(pushId) {
     const okLabel = 'Yes — Import';
     const declineLabel = 'No';
 
+    // Character thumbnail — served via the push-char-thumb endpoint which
+    // validates the item belongs to this user before serving from the creator's dir.
+    const charThumbFile = (item.character_files || item.source_avatar_files || [])[0] || '';
+    const charAvHtml = `
+        <div class="push-cp-av-frame">
+            ${isChar && charThumbFile
+                ? `<img class="push-cp-av-img"
+                    src="/api/worldinfo/push-char-thumb?push_id=${encodeURIComponent(pushId)}&file=${encodeURIComponent(charThumbFile)}"
+                    alt="${escapeHtml(cardTitle)}"
+                    onerror="this.classList.add('push-cp-av-img-err'); this.nextElementSibling.classList.add('is-visible');" />`
+                : ''
+            }
+            <div class="push-cp-av-fallback${isChar && charThumbFile ? '' : ' is-visible'}"><i class="fa-solid ${charIcon}"></i></div>
+        </div>
+    `;
+
     const html = `
         <div class="push-popup-layout">
             <h3 style="margin-top:0;"><i class="fa-solid ${charIcon}" style="color:#a78bfa; font-size:14px;"></i> ${dialogTitle}</h3>
             <div class="push-cp">
-                <div class="push-cp-av"><i class="fa-solid ${charIcon}"></i></div>
+                <div class="push-cp-av">${charAvHtml}</div>
                 <div class="push-cp-info">
-                    <div class="push-cp-name" ${isAnnouncement ? 'style="font-size:20px;"' : ''}>${escapeHtml(cardTitle)} <span class="push-tag ${tagClass}">${tagText}</span></div>
+                    <div class="push-cp-name" ${isAnnouncement ? 'style="font-size:14px;"' : ''}>${escapeHtml(cardTitle)} <span class="push-tag ${tagClass}">${tagText}</span></div>
                     <div class="push-cp-by">Pushed by: ${escapeHtml(pushedByLabel)}</div>
                     <div class="push-cp-by">Submitted by original creator: ${escapeHtml(originalCreator)}</div>
                     <div class="push-cp-desc">${escapeHtml(cardDescription)}</div>
@@ -7446,6 +8395,7 @@ async function openPushDetailModal(pushId) {
             <div class="push-cl-box">
                 <div class="push-cl-title"><i class="fa-solid fa-scroll"></i> Update Notes</div>
                 <div class="push-cl-body">${isAnnouncement ? notesText.replace(/\n/g, '<br>') : escapeHtml(notesText).replace(/\n/g, '<br>')}</div>
+                ${bundleLorebookNames.length > 0 ? `<div class="push-cl-ver">Lorebooks: ${escapeHtml(bundleLorebookNames.join(', '))}</div>` : ''}
                 ${item.version ? `<div class="push-cl-ver">Version: ${escapeHtml(item.version)}</div>` : ''}
             </div>
             <div class="push-warn">
@@ -7477,11 +8427,29 @@ async function openPushDetailModal(pushId) {
         if (result === RESULT_CLOSE) return; // Close without action
     if (!action) return;
 
-    const actionRes = await fetch('/api/worldinfo/push-action', {
+    let actionRes = await fetch('/api/worldinfo/push-action', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({ push_id: pushId, action }),
     });
+
+    // Backend returns 409 when files already exist and overwrite was not requested.
+    // Prompt the user to confirm overwrite before retrying.
+    if (actionRes.status === 409 && action === 'accept') {
+        const confirmOverwrite = await callPopup(
+            'This character/lorebook already exists locally. Overwrite with the updated version?',
+            'confirm',
+        );
+        if (!confirmOverwrite) {
+            await refreshPushNotificationState();
+            return;
+        }
+        actionRes = await fetch('/api/worldinfo/push-action', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ push_id: pushId, action: 'overwrite' }),
+        });
+    }
 
     if (actionRes.ok) {
         let actionData = null;
@@ -7494,10 +8462,14 @@ async function openPushDetailModal(pushId) {
         if (resolvedAction === 'accept' || resolvedAction === 'overwrite') {
             const charCount = actionData?.applied?.characters?.length || 0;
             const lorebookName = actionData?.applied?.lorebook || '';
+            const bundledLorebooks = Array.isArray(actionData?.applied?.lorebooks) ? actionData.applied.lorebooks : (lorebookName ? [lorebookName] : []);
+            const secondaryLorebooks = Array.isArray(actionData?.applied?.secondary_lorebooks) ? actionData.applied.secondary_lorebooks : [];
 
             // Success message showing what was imported
             let successMessage = `Imported ${charCount} character(s)`;
-            if (lorebookName) {
+            if (bundledLorebooks.length > 1) {
+                successMessage += ` with ${bundledLorebooks.length} lorebooks`;
+            } else if (lorebookName) {
                 successMessage += ` with lorebook: ${lorebookName}`;
             }
             toastr.success(successMessage, 'Import Successful', { timeOut: 5000 });
@@ -7506,13 +8478,13 @@ async function openPushDetailModal(pushId) {
             await updateWorldInfoList();
             await getCharacters();
 
-            // Auto-select the first imported character through the normal selection flow
-            // so the recipient can interact with it immediately.
+            // Show the character list panel so the user can see the newly imported character.
             if (actionData?.applied?.characters?.[0]) {
                 const importedFileName = actionData.applied.characters[0];
                 const charIndex = characters.findIndex(c => c.avatar === importedFileName);
                 if (charIndex >= 0) {
-                    await selectCharacterById(charIndex, { switchMenu: true });
+                    // Navigate to the character list (not chat) so the recipient sees the new character.
+                    select_rm_characters();
 
                     const character = characters[charIndex] || characters[Number(this_chid)] || null;
                     if (!character) {
@@ -7534,6 +8506,10 @@ async function openPushDetailModal(pushId) {
                         }
                     }
 
+                    if (secondaryLorebooks.length > 0) {
+                        charSetAuxWorlds(importedFileName, secondaryLorebooks);
+                    }
+
                     // Show world button lit up
                     setWorldInfoButtonClass(charIndex);
 
@@ -7544,8 +8520,11 @@ async function openPushDetailModal(pushId) {
                         const creatorInfo = creatorHandle === currentHandle
                             ? ' (visible to you)'
                             : ' (hidden from dropdown)';
+                        const lorebookInfo = bundledLorebooks.length > 1
+                            ? `Lorebooks "${bundledLorebooks.join(', ')}"${creatorInfo}`
+                            : `Lorebook "${lorebookName}"${creatorInfo}`;
                         toastr.info(
-                            `Lorebook "${lorebookName}"${creatorInfo} linked to "${character.name || character.data?.name || 'Character'}"`,
+                            `${lorebookInfo} linked to "${character.name || character.data?.name || 'Character'}"`,
                             'Lorebook Linked',
                             { timeOut: 6000 },
                         );
@@ -7582,8 +8561,7 @@ async function openPushDetailModal(pushId) {
         toastr.error(err, 'Push');
     }
 
-    const refreshed = await getPushNotificationState();
-    updatePushNotificationBadge(refreshed);
+    await refreshPushNotificationState();
 }
 
 function statusTagClass(status) {
@@ -7595,10 +8573,9 @@ function statusTagClass(status) {
 }
 
 async function openPushNotificationsModal() {
-    const state = await getPushNotificationState();
-    updatePushNotificationBadge(state);
+    const state = await refreshPushNotificationState();
 
-    // Build a flat unified list of all notification items (demo pattern)
+    // Build a flat unified list of all notification items
     const rows = (state.pending || []).map(item => {
         const isChar = item.character_files?.length > 0;
         const icon = isChar ? 'fa-user-astronaut' : 'fa-book-atlas';
@@ -7607,18 +8584,34 @@ async function openPushNotificationsModal() {
         const unreadClass = item.unread ? ' unread' : '';
         const isAnnouncement = !!item.is_public_announcement;
         const rowTitle = isAnnouncement
-            ? (item.announcement_title || 'NEW CHARACTER!! 🎉')
+            ? (item.announcement_title || '🎉 NEW CHARACTER!! 🎉')
             : (item.pushed_lorebook_name || 'Notification');
         const announcementCharacter = item.announcement_character_name || item.source_names?.character_label || 'Character';
         const rowDesc = isAnnouncement
             ? `🌸 ${announcementCharacter} 🌸`
             : (item.notes || 'No notes');
+
+        // Show character PNG thumbnail when available; fallback to FA icon
+        const charThumbFile = (item.character_files || item.source_avatar_files || [])[0] || '';
+        const avHtml = `
+            <div class="push-ni-av-frame">
+                ${isChar && charThumbFile && item.push_id
+                    ? `<img class="push-ni-av-img"
+                        src="/api/worldinfo/push-char-thumb?push_id=${encodeURIComponent(item.push_id)}&file=${encodeURIComponent(charThumbFile)}"
+                        alt="${escapeHtml(rowTitle)}"
+                        onerror="this.classList.add('push-ni-av-img-err'); this.nextElementSibling.classList.add('is-visible');" />`
+                    : ''
+                }
+                <div class="push-ni-av-fallback${isChar && charThumbFile && item.push_id ? '' : ' is-visible'}"><i class="fa-solid ${icon}"></i></div>
+            </div>
+        `;
+
         return `
         <div class="push-ni${unreadClass}" data-push-id="${item.push_id}">
-            <div class="push-ni-av"><i class="fa-solid ${icon}"></i></div>
+            <div class="push-ni-av">${avHtml}</div>
             <div class="push-ni-body">
-                <div class="push-ni-title" ${isAnnouncement ? 'style="font-size:20px; font-weight:bold;"' : ''}>${escapeHtml(rowTitle)} <span class="push-tag ${tagClass}">${tag}</span></div>
-                <div class="push-ni-desc ${isAnnouncement ? 'push-ni-desc-announce' : ''}" ${isAnnouncement ? 'style="font-size:20px; font-weight:bold;"' : ''}>${escapeHtml(rowDesc)}</div>
+                <div class="push-ni-title" ${isAnnouncement ? 'style="font-size:14px; font-weight:bold;"' : ''}>${escapeHtml(rowTitle)} <span class="push-tag ${tagClass}">${tag}</span></div>
+                <div class="push-ni-desc ${isAnnouncement ? 'push-ni-desc-announce' : ''}" ${isAnnouncement ? 'style="font-size:14px; font-weight:bold;"' : ''}>${escapeHtml(rowDesc)}</div>
                 <div class="push-ni-time">${formatPushTs(item.created_at)}</div>
             </div>
         </div>`;
@@ -7669,29 +8662,305 @@ async function openPushNotificationsModal() {
         if (!clearRes.ok) {
             toastr.error(await clearRes.text() || 'Failed to clear notifications', 'Push');
         }
-        const refreshed = await getPushNotificationState();
-        updatePushNotificationBadge(refreshed);
+        await refreshPushNotificationState();
     }
+}
+
+async function openDeletionRequestModal() {
+    const old = document.getElementById('del_req_overlay');
+    if (old) old.remove();
+
+    // Fetch push records to cross-reference which characters were pushed
+    const pushRes = await fetch('/api/worldinfo/accepted-pushes', { method: 'POST', headers: getRequestHeaders() });
+    const pushData = pushRes.ok ? await pushRes.json() : { accepted: [] };
+    const pushByFile = new Map();
+    for (const item of pushData.accepted || []) {
+        for (const f of (item.character_files || [])) pushByFile.set(f, item);
+    }
+
+    const allChars = (characters || [])
+        .filter(c => c.avatar && c.name)
+        .map(c => ({ name: c.name, avatar: c.avatar, pushItem: pushByFile.get(c.avatar) || null }));
+
+    const selectedAvatars = new Set();
+    const requestedAvatars = new Set();
+
+    const thumbUrl = av => `/thumbnail?type=avatar&file=${encodeURIComponent(av)}`;
+
+    function updateFooterBtn() {
+        const btn = document.getElementById('del_req_submit');
+        if (!btn) return;
+        const pending = [...selectedAvatars].filter(av => !requestedAvatars.has(av));
+        btn.disabled = pending.length === 0;
+        btn.textContent = pending.length > 0
+            ? `Request Deletion (${pending.length})`
+            : 'Request Deletion';
+    }
+
+    function renderCards() {
+        const cardsEl = document.getElementById('del_req_cards');
+        const countEl = document.getElementById('del_req_count');
+        if (!cardsEl || !countEl) return;
+        const sel = [...selectedAvatars];
+        countEl.textContent = sel.length === 0
+            ? 'No characters selected'
+            : `${sel.length} character${sel.length !== 1 ? 's' : ''} selected`;
+        if (sel.length === 0) {
+            cardsEl.innerHTML = `<div style="width:100%; text-align:center; color:#5a5a7a; font-size:13px; padding-top:36px; font-style:italic;">Search and select characters above</div>`;
+        } else {
+            cardsEl.innerHTML = sel.map(av => {
+                const ch = allChars.find(c => c.avatar === av);
+                const name = ch ? ch.name : av.replace(/\.png$/i, '');
+                const done = requestedAvatars.has(av);
+                return `
+                <div class="del-req-card" data-avatar="${escapeHtml(av)}" style="
+                    flex-shrink:0; width:120px; display:flex; flex-direction:column; align-items:center;
+                    background:#1a1a2e; border:1px solid ${done ? '#2a4a2a' : '#2e2e4e'}; border-radius:10px;
+                    padding:10px 8px 8px; position:relative; opacity:${done ? '.55' : '1'};">
+                    ${!done ? `<button type="button" class="del-req-remove-btn" data-avatar="${escapeHtml(av)}" style="
+                        position:absolute; top:-8px; right:-8px; width:20px; height:20px; border-radius:50%;
+                        background:#3a3a5a; border:1px solid #5a5a7a; color:#c0c0e0; font-size:12px;
+                        cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0;">×</button>` : ''}
+                    <img src="${thumbUrl(av)}" alt="${escapeHtml(name)}"
+                         style="width:72px; height:72px; border-radius:8px; object-fit:cover; margin-bottom:6px; border:1px solid #2e2e4e;"
+                         onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+                    <div style="display:none; width:72px; height:72px; border-radius:8px; background:#2a2a4a; align-items:center; justify-content:center; margin-bottom:6px; font-size:24px; color:#5a5a8a;"><i class="fa-solid fa-user-astronaut"></i></div>
+                    <div style="font-size:15px; color:#c0c0e0; text-align:center; word-break:break-word; line-height:1.3;">${escapeHtml(name)}</div>
+                    ${done ? `<div style="font-size:14px; color:#4a9a4a; margin-top:4px;"><i class="fa-solid fa-check"></i> Requested</div>` : ''}
+                </div>`;
+            }).join('');
+        }
+        updateFooterBtn();
+    }
+
+    function renderDropdown(query) {
+        const ddEl = document.getElementById('del_req_dropdown');
+        if (!ddEl) return;
+        const q = query.toLowerCase().trim();
+        const filtered = allChars.filter(c =>
+            !selectedAvatars.has(c.avatar)
+            && (!q || c.name.toLowerCase().includes(q) || c.avatar.toLowerCase().includes(q))
+        );
+        if (!filtered.length) {
+            ddEl.innerHTML = `<div style="padding:10px 12px; color:#5a5a7a; font-size:13px; font-style:italic;">${q ? 'No matches found.' : 'All characters selected.'}</div>`;
+        } else {
+            ddEl.innerHTML = filtered.slice(0, 40).map(c => `
+                <div class="del-req-dd-item" data-avatar="${escapeHtml(c.avatar)}" style="
+                    display:flex; align-items:center; gap:10px; padding:7px 12px; cursor:pointer;
+                    font-size:13px; color:#c0c0e0; transition:background .12s;"
+                    onmouseover="this.style.background='rgba(104,104,170,.18)'"
+                    onmouseout="this.style.background=''">
+                    <img src="${thumbUrl(c.avatar)}" style="width:28px; height:28px; border-radius:4px; object-fit:cover; flex-shrink:0;" onerror="this.style.display='none';" />
+                    <span>${escapeHtml(c.name)}</span>
+                </div>`).join('');
+        }
+        ddEl.style.display = 'block';
+    }
+
+    $('body').append(`
+        <div id="del_req_overlay" class="push-inbox-overlay">
+            <div class="push-inbox-window" role="dialog" aria-modal="true" style="max-width:560px;">
+                <div class="push-inbox-window-header">
+                    <h3 style="font-size:16px;"><i class="fa-solid fa-box-archive" style="color:#a78bfa;"></i> Request Character Deletion</h3>
+                    <button type="button" id="del_req_close_x" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="push-inbox-window-body" style="display:flex; flex-direction:column; gap:10px; padding:16px; flex:1 1 auto; min-height:0;">
+                    <div style="font-size:16px; color:#8888aa; flex-shrink:0;">Select an imported character to request its removal from your account.</div>
+                    <div style="position:relative; flex-shrink:0;">
+                        <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:12px; top:50%; transform:translateY(-50%); color:#6868aa; font-size:16px; pointer-events:none; z-index:1;"></i>
+                        <input id="del_req_search" type="text" class="text_pole" autocomplete="off"
+                            placeholder="Search characters..."
+                            style="padding-left:36px !important; font-size:17px !important; width:100%; box-sizing:border-box; margin:0;" />
+                        <div id="del_req_dropdown" style="
+                            display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:200;
+                            background:#181828; border:1px solid #3a3a5a; border-radius:8px;
+                            max-height:200px; overflow-y:auto; box-shadow:0 6px 20px rgba(0,0,0,.5);"></div>
+                    </div>
+                    <div id="del_req_count" style="font-size:15px; color:#6060a0; padding:0 2px; flex-shrink:0;">No characters selected</div>
+                    <div id="del_req_cards" style="display:flex; flex-direction:row; flex-wrap:nowrap; overflow-x:auto; gap:10px; padding:4px 2px 10px; flex:1 1 auto; min-height:100px; align-items:flex-start;">
+                        <div style="width:100%; text-align:center; color:#5a5a7a; font-size:16px; padding-top:36px; font-style:italic;">Search and select characters above</div>
+                    </div>
+                </div>
+                <div class="push-inbox-window-footer" style="flex-shrink:0;">
+                    <button type="button" id="del_req_submit" class="menu_button push-aurora-btn push-aurora-btn-decline" disabled style="font-size:16px; padding:8px 16px;">Request Deletion</button>
+                    <button type="button" id="del_req_close" class="menu_button push-aurora-btn push-aurora-btn-ghost" style="font-size:16px; padding:8px 16px;">Close</button>
+                </div>
+            </div>
+        </div>
+    `);
+
+    function closeModal() {
+        $('#del_req_overlay').remove();
+        $(document).off('.delReq');
+    }
+
+    $(document).on('click.delReq', '#del_req_close, #del_req_close_x', closeModal);
+    $(document).on('click.delReq', '#del_req_overlay', function (e) {
+        if (e.target.id === 'del_req_overlay') closeModal();
+    });
+    $(document).on('input.delReq', '#del_req_search', function () { renderDropdown(this.value); });
+    $(document).on('focus.delReq', '#del_req_search', function () { renderDropdown(this.value); });
+    $(document).on('click.delReq', function (e) {
+        if (!$(e.target).closest('#del_req_search, #del_req_dropdown').length) {
+            const dd = document.getElementById('del_req_dropdown');
+            if (dd) dd.style.display = 'none';
+        }
+    });
+    $(document).on('click.delReq', '.del-req-dd-item', function () {
+        const av = $(this).data('avatar');
+        if (!av || selectedAvatars.has(av)) return;
+        selectedAvatars.add(av);
+        renderCards();
+        const dd = document.getElementById('del_req_dropdown');
+        if (dd) dd.style.display = 'none';
+        const inp = document.getElementById('del_req_search');
+        if (inp) inp.value = '';
+    });
+    $(document).on('click.delReq', '.del-req-remove-btn', function () {
+        const av = $(this).data('avatar');
+        if (!requestedAvatars.has(av)) {
+            selectedAvatars.delete(av);
+            renderCards();
+        }
+    });
+
+    // Shared helper: show a custom dialog above the overlay (avoids callPopup z-index conflict)
+    function showDelReqDialog(htmlContent) {
+        $('#del_req_dialog').remove();
+        $('body').append(`
+            <div id="del_req_dialog" style="
+                position:fixed; inset:0; z-index:100000;
+                background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center;">
+                <div style="background:#1a1a2e; border:1px solid #3a3a5a; border-radius:12px;
+                            padding:24px; min-width:300px; max-width:420px; width:90%;
+                            box-shadow:0 8px 32px rgba(0,0,0,.6);">
+                    ${htmlContent}
+                </div>
+            </div>
+        `);
+    }
+
+    function customConfirm(message) {
+        return new Promise(resolve => {
+            showDelReqDialog(`
+                <p style="margin:0 0 18px; font-size:14px; color:#c0c0e0; line-height:1.6;">${message}</p>
+                <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <button id="drq_no" class="menu_button push-aurora-btn push-aurora-btn-ghost" style="font-size:13px; padding:7px 16px;">Cancel</button>
+                    <button id="drq_yes" class="menu_button push-aurora-btn push-aurora-btn-decline" style="font-size:13px; padding:7px 16px;">Yes, Request</button>
+                </div>
+            `);
+            function cleanup() { $(document).off('.drqConfirm'); $('#del_req_dialog').remove(); }
+            $(document).on('click.drqConfirm', '#drq_yes', () => { cleanup(); resolve(true); });
+            $(document).on('click.drqConfirm', '#drq_no',  () => { cleanup(); resolve(false); });
+        });
+    }
+
+    function customInput(label) {
+        return new Promise(resolve => {
+            showDelReqDialog(`
+                <p style="margin:0 0 10px; font-size:14px; color:#c0c0e0;">${label}</p>
+                <input id="drq_reason_input" type="text" class="text_pole" autocomplete="off"
+                    placeholder="Optional…"
+                    style="width:100%; box-sizing:border-box; font-size:14px !important; margin-bottom:14px;" />
+                <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <button id="drq_input_skip" class="menu_button push-aurora-btn push-aurora-btn-ghost" style="font-size:13px; padding:7px 16px;">Skip</button>
+                    <button id="drq_input_ok" class="menu_button push-aurora-btn" style="font-size:13px; padding:7px 16px;">OK</button>
+                </div>
+            `);
+            function cleanup() { $(document).off('.drqInput'); $('#del_req_dialog').remove(); }
+            $(document).on('click.drqInput', '#drq_input_ok', () => {
+                const val = String($('#drq_reason_input').val() || '').trim();
+                cleanup(); resolve(val);
+            });
+            $(document).on('click.drqInput', '#drq_input_skip', () => { cleanup(); resolve(''); });
+            // Submit on Enter
+            $(document).on('keydown.drqInput', '#drq_reason_input', function (e) {
+                if (e.key === 'Enter') { $('#drq_input_ok').trigger('click'); }
+            });
+        });
+    }
+
+    // Footer "Request Deletion (N)" — batch all pending selected characters
+    $(document).on('click.delReq', '#del_req_submit', async function () {
+        const pending = [...selectedAvatars].filter(av => !requestedAvatars.has(av));
+        if (!pending.length) return;
+
+        const nameList = pending.map(av => {
+            const ch = allChars.find(c => c.avatar === av);
+            return `<strong>${escapeHtml(ch ? ch.name : av.replace(/\.png$/i, ''))}</strong>`;
+        }).join(', ');
+
+        const confirmed = await customConfirm(`Request admin to delete ${nameList} from your account?`);
+        if (!confirmed) return;
+
+        const reason = await customInput('Reason for deletion request (optional, applies to all):');
+
+        let successCount = 0;
+        const errors = [];
+        for (const av of pending) {
+            const ch = allChars.find(c => c.avatar === av);
+            const name = ch ? ch.name : av.replace(/\.png$/i, '');
+            const body = ch?.pushItem
+                ? { push_id: ch.pushItem.push_id, reason }
+                : { character_file: av, character_name: name, reason };
+            const r = await fetch('/api/worldinfo/user-deletion-request', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(body),
+            });
+            if (r.ok) {
+                requestedAvatars.add(av);
+                successCount++;
+            } else {
+                const txt = await r.text();
+                errors.push(`${name}: ${txt || 'failed'}`);
+            }
+        }
+
+        if (successCount > 0) {
+            toastr.success(
+                `Deletion request sent for ${successCount} character${successCount !== 1 ? 's' : ''}.`,
+                'Request Sent',
+            );
+        }
+        if (errors.length) {
+            toastr.warning(errors.join('\n'), 'Some Requests Failed');
+        }
+        if (successCount > 0) {
+            closeModal();
+            return;
+        }
+        renderCards();
+    });
 }
 
 function getSubmitRenameTargetName(boundLorebook, characterName) {
     const sourceName = String(boundLorebook || characterName || '').trim();
-    const currentHandle = String(getCurrentUserHandle() || '').trim();
+    const currentHandle = String(getCurrentUserHandle() || '').trim().toLowerCase();
+    const currentUserIsAdmin = Boolean(isAdmin());
 
     if (!sourceName) return '';
     if (sourceName.startsWith('dd-')) return sourceName;
+    if (isAdminPrefixedLorebookName(sourceName)) {
+        if (!currentUserIsAdmin) {
+            const baseName = stripAdminLorebookPrefix(sourceName);
+            return currentHandle ? `dd-${currentHandle}-${baseName}` : baseName;
+        }
+        return sourceName;
+    }
     if (!currentHandle) return sourceName;
-
-    const baseName = sourceName.startsWith('ADMIN-')
-        ? sourceName.substring('ADMIN-'.length).trim()
-        : sourceName;
-
-    return `dd-${currentHandle}-${baseName}`;
+    if (currentUserIsAdmin) {
+        return currentHandle === 'default-user'
+            ? `ADMIN-${sourceName}`
+            : `ADMIN${currentHandle}-${sourceName}`;
+    }
+    return `dd-${currentHandle}-${sourceName}`;
 }
 
 function renderPushBindingCard({
     characterName,
     boundLorebook,
+    avatarFile = '',
     renameValue = '',
     renameInputId = '',
     showRenameInput = false,
@@ -7704,6 +8973,16 @@ function renderPushBindingCard({
         ? `<div class="push-lb bound"><i class="fa-solid fa-book-atlas"></i> <span>Lorebook bound: <strong>${safeBoundLorebook}</strong> ${hiddenNote}</span></div>`
         : '<div class="push-lb unbound"><i class="fa-solid fa-book-skull"></i> <span>No lorebook bound to this character. Submission will use the character name.</span></div>';
 
+    const thumbHtml = `
+        <div class="push-binding-card-thumb-frame">
+            ${avatarFile
+                ? `<img class="push-binding-card-thumb" src="/thumbnail?type=avatar&file=${encodeURIComponent(avatarFile)}" alt="${safeCharacterName}" onerror="this.classList.add('push-binding-card-thumb-err'); this.nextElementSibling.classList.add('is-visible')" />`
+                : ''
+            }
+            <div class="push-binding-card-thumb-fallback${avatarFile ? '' : ' is-visible'}"><i class="fa-solid fa-user-astronaut"></i></div>
+        </div>
+    `;
+
     const renameHtml = showRenameInput
         ? `
             <div class="push-f push-rename-field">
@@ -7714,8 +8993,11 @@ function renderPushBindingCard({
         : '';
 
     return `
-        <div class="push-binding-card">
-            <div class="push-binding-card-name">${safeCharacterName}</div>
+        <div class="push-binding-card" data-char-name="${safeCharacterName}">
+            <div class="push-binding-card-header">
+                ${thumbHtml}
+                <div class="push-binding-card-name">${safeCharacterName}</div>
+            </div>
             ${bindingHtml}
             ${renameHtml}
         </div>
@@ -7727,6 +9009,7 @@ async function openSubmitToAdminModal() {
     const charList = (characters || []).map(c => ({
         name: c.name || c.avatar?.replace('.png', '') || 'Unknown',
         world: c?.data?.extensions?.world || '',
+        avatar: c.avatar || '',
     }));
     charList.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -7738,7 +9021,7 @@ async function openSubmitToAdminModal() {
         <div class="push-popup-layout">
             <h3 style="margin-top:0;">Submit to Admin</h3>
             <div class="push-f">
-                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card &amp; Lorebook <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
+                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
                 <select id="push_submit_name" class="text_pole" style="width:100%;" multiple="multiple">
                     ${charOptions}
                 </select>
@@ -7766,6 +9049,7 @@ async function openSubmitToAdminModal() {
         okButton: 'Submit',
         cancelButton: 'Cancel',
         wider: true,
+        allowVerticalScrolling: true,
         customButtons: [{ text: 'Inbox', result: RESULT_INBOX }],
     });
     decoratePushPopup(popup, 'submit');
@@ -7787,6 +9071,13 @@ async function openSubmitToAdminModal() {
     });
 
     const renameDrafts = new Map();
+    const primaryLorebookDrafts = new Map();
+    const secondaryLorebookDrafts = new Map();
+
+    // Build lorebook options from world_names
+    const lorebookOptions = (world_names || []).map(name =>
+        `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`,
+    ).join('');
 
     // Lorebook binding indicator — updates as selections change
     function refreshSubmitBindings() {
@@ -7802,25 +9093,120 @@ async function openSubmitToAdminModal() {
 
         const entries = selected.map((name, index) => {
             const c = charList.find(x => x.name === name);
-            const world = c?.world || '';
-            const renameValue = renameDrafts.get(name) || getSubmitRenameTargetName(world, name);
-            return renderPushBindingCard({
+            const avatarFile = c?.avatar || '';
+            const primaryLorebook = primaryLorebookDrafts.get(name) || c?.world || '';
+            const secondaryLorebook = secondaryLorebookDrafts.get(name) || '';
+            const renameValue = renameDrafts.get(name) || getSubmitRenameTargetName(primaryLorebook, name);
+
+            // Create lorebook selector HTML for this character
+            const primarySelectHtml = `
+                <div class="push-lorebook-selector" style="margin-top:8px;">
+                    <label style="font-size:0.9em; opacity:0.8; display:block; margin-bottom:4px;">
+                        <i class="fa-solid fa-book"></i> Primary Lorebook (required)
+                    </label>
+                    <select id="push_submit_primary_lb_${index}" class="text_pole push-submit-primary-lb" style="width:100%;" data-char-name="${escapeHtml(name)}">
+                        <option value="">— Select primary lorebook —</option>
+                        ${lorebookOptions}
+                    </select>
+                </div>
+            `;
+
+            const secondarySelectHtml = `
+                <div class="push-lorebook-selector" style="margin-top:6px;">
+                    <label style="font-size:0.9em; opacity:0.7; display:block; margin-bottom:4px;">
+                        <i class="fa-solid fa-book-open"></i> Secondary Lorebook (optional)
+                    </label>
+                    <select id="push_submit_secondary_lb_${index}" class="text_pole push-submit-secondary-lb" style="width:100%;" data-char-name="${escapeHtml(name)}">
+                        <option value="">— Select secondary lorebook (optional) —</option>
+                        ${lorebookOptions}
+                    </select>
+                </div>
+            `;
+
+            const cardHtml = renderPushBindingCard({
                 characterName: name,
-                boundLorebook: world,
+                boundLorebook: primaryLorebook,
+                avatarFile,
                 renameValue,
                 renameInputId: `push_submit_rename_${index}`,
                 showRenameInput: true,
             });
+            return `<div class="push-binding-group">${cardHtml}${primarySelectHtml}${secondarySelectHtml}</div>`;
         });
 
-        lbDiv.show().html(entries.join(''));
+        // Single card: plain vertical layout. Multiple: horizontal scroll rail.
+        if (entries.length === 1) {
+            lbDiv.show().html(entries[0]);
+        } else {
+            lbDiv.show().html(`
+                <div class="push-binding-rail push-rail-shell">
+                    <div class="push-rail-fade push-rail-fade-left"></div>
+                    <div class="push-binding-rail-track push-rail-track">
+                        ${entries.join('')}
+                    </div>
+                    <div class="push-rail-fade push-rail-fade-right"></div>
+                </div>
+            `);
+            // Reuse the existing drag+fade scroll initializer on the new rail
+            initPushTargetRail(lbDiv[0]);
+        }
+
+        // Initialize Select2 on newly created lorebook selectors
+        $(dlg).find('.push-submit-primary-lb').each(function () {
+            if (!$(this).data('select2')) {
+                const charName = $(this).data('char-name');
+                $(this).val(primaryLorebookDrafts.get(charName) || '').select2({
+                    width: '100%',
+                    placeholder: '— Select primary lorebook —',
+                    searchInputPlaceholder: 'Type to filter...',
+                    allowClear: true,
+                    closeOnSelect: true,
+                    dropdownParent: $(dlg),
+                });
+            }
+        });
+
+        $(dlg).find('.push-submit-secondary-lb').each(function () {
+            if (!$(this).data('select2')) {
+                const charName = $(this).data('char-name');
+                $(this).val(secondaryLorebookDrafts.get(charName) || '').select2({
+                    width: '100%',
+                    placeholder: '— Select secondary lorebook (optional) —',
+                    searchInputPlaceholder: 'Type to filter...',
+                    allowClear: true,
+                    closeOnSelect: true,
+                    dropdownParent: $(dlg),
+                });
+            }
+        });
     }
 
     $charSelect.on('change', refreshSubmitBindings);
+
+    // Track primary lorebook selection
+    $(dlg).on('change', '.push-submit-primary-lb', function () {
+        const charName = $(this).data('char-name');
+        const value = String($(this).val() || '').trim();
+        if (value) {
+            primaryLorebookDrafts.set(charName, value);
+        } else {
+            primaryLorebookDrafts.delete(charName);
+        }
+    });
+
+    // Track secondary lorebook selection
+    $(dlg).on('change', '.push-submit-secondary-lb', function () {
+        const charName = $(this).data('char-name');
+        const value = String($(this).val() || '').trim();
+        if (value) {
+            secondaryLorebookDrafts.set(charName, value);
+        } else {
+            secondaryLorebookDrafts.delete(charName);
+        }
+    });
+
     $(dlg).on('input', '.push-submit-rename', function () {
-        const selectedNames = $charSelect.val() || [];
-        const renameIndex = $(this).closest('.push-binding-card').index();
-        const characterName = selectedNames[renameIndex];
+        const characterName = $(this).closest('.push-binding-card').data('char-name');
         if (!characterName) return;
         renameDrafts.set(characterName, String($(this).val() || '').trim());
     });
@@ -7844,6 +9230,18 @@ async function openSubmitToAdminModal() {
         return;
     }
 
+    // Validate that all characters have at least a primary lorebook selected
+    let missingLorebooks = [];
+    for (const charName of selectedNames) {
+        if (!primaryLorebookDrafts.get(charName)) {
+            missingLorebooks.push(charName);
+        }
+    }
+    if (missingLorebooks.length > 0) {
+        toastr.warning(`Please select a primary lorebook for: ${missingLorebooks.join(', ')}`, 'Submit');
+        return;
+    }
+
     const priority = String($(dlg).find('#push_submit_priority').val() || 'normal');
     const notes = String($(dlg).find('#push_submit_notes').val() || '');
 
@@ -7853,14 +9251,36 @@ async function openSubmitToAdminModal() {
     let needsRefresh = false;
     for (const charName of selectedNames) {
         const charInfo = charList.find(c => c.name === charName);
-        const boundLorebook = charInfo?.world || '';
-        const submittedLorebookName = renameDrafts.get(charName) || getSubmitRenameTargetName(boundLorebook, charName);
+        const primaryLorebook = primaryLorebookDrafts.get(charName) || '';
+        const secondaryLorebook = secondaryLorebookDrafts.get(charName) || '';
+        const submittedLorebookName = renameDrafts.get(charName) || getSubmitRenameTargetName(primaryLorebook, charName);
+        const submittedLorebookNameError = getSubmissionLorebookNamingValidationError(submittedLorebookName);
+        if (submittedLorebookNameError) {
+            toastr.error(submittedLorebookNameError, 'Invalid Lorebook Name');
+            return;
+        }
+        const primaryLorebookNameError = getSubmissionLorebookNamingValidationError(primaryLorebook);
+        if (primaryLorebookNameError) {
+            toastr.error(primaryLorebookNameError, 'Invalid Lorebook Name');
+            return;
+        }
+        if (secondaryLorebook) {
+            const secondaryLorebookNameError = getSubmissionLorebookNamingValidationError(secondaryLorebook);
+            if (secondaryLorebookNameError) {
+                toastr.error(secondaryLorebookNameError, 'Invalid Lorebook Name');
+                return;
+            }
+        }
 
         const payload = {
             content_type: 'character_lorebook_bundle',
+            primary_lorebook_name: primaryLorebook,
+            secondary_lorebook_name: secondaryLorebook || undefined,
+            secondary_lorebooks: secondaryLorebook ? [secondaryLorebook] : [],
             content_name: submittedLorebookName,
-            source_lorebook_name: boundLorebook || charName,
+            source_lorebook_name: primaryLorebook,
             character_name: charName,
+            character_avatar: charInfo?.avatar || '',
             priority,
             notes,
         };
@@ -7897,8 +9317,7 @@ async function openSubmitToAdminModal() {
         toastr.error('All submissions failed.', 'Submit');
     }
 
-    const refreshed = await getPushNotificationState();
-    updatePushNotificationBadge(refreshed);
+    await refreshPushNotificationState();
 }
 
 async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
@@ -7919,34 +9338,100 @@ async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
     if (old) old.remove();
 
     const isAdminNote = item.inbox_item_type === 'admin_note';
+    const isDeletionRequest = item.inbox_item_type === 'deletion_request';
     const priorityLabel = { high: '\u{1F534} High \u2014 Bug fix', low: '\u{1F535} Low \u2014 Suggestion', normal: '\u{1F7E2} Normal' };
     const isChar = item.content_type === 'character_lorebook_bundle';
-    const charIcon = isAdminNote ? 'fa-note-sticky' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
-    const tagText = isAdminNote ? 'User Note' : (isChar ? 'Character' : 'Lorebook');
-    const tagClass = isAdminNote ? 'push-tag-note' : (isChar ? 'push-tag-char' : 'push-tag-lore');
+    const charIcon = isAdminNote ? 'fa-note-sticky' : isDeletionRequest ? 'fa-trash-can' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
+    const tagText = isAdminNote ? 'User Note' : isDeletionRequest ? 'Del Request' : (isChar ? 'Character' : 'Lorebook');
+    const tagClass = isAdminNote ? 'push-tag-note' : isDeletionRequest ? 'push-tag-rejected' : (isChar ? 'push-tag-char' : 'push-tag-lore');
     const cardName = isAdminNote ? `Note for ${item.target_admin || 'admin'}` : (item.content_name || 'Submission');
     const byLine = isAdminNote
         ? `Sent by: ${escapeHtml(item.from_name || item.from_handle || 'user')}`
         : `Submitted by: ${escapeHtml(item.submitter_name || item.submitter_handle || 'user')}`;
     const descText = isAdminNote
         ? 'A user note sent directly to an admin.'
-        : (item.character_description || 'User-submitted content for review.');
+        : isDeletionRequest
+            ? `User requests deletion of this pushed character from their account.`
+            : (item.character_description || 'User-submitted content for review.');
+
+    // Use stable avatar URLs so the detail modal can render immediately without
+    // waiting on a separate profile-avatar fetch.
+    const senderHandleForAvatar = isAdminNote ? (item.from_handle || '') : (item.submitter_handle || '');
+    const senderProfileAvatar = getUserAvatarImageUrl(senderHandleForAvatar);
     const notesTitle = isAdminNote ? 'Message' : 'User Notes';
     const notesBody = isAdminNote ? (item.message || 'No message provided.') : (item.notes || 'No notes provided.');
     const replyValue = isAdminNote ? (item.admin_reply || '') : (item.reply || '');
     const replyPlaceholder = isAdminNote ? 'Optional reply back to the user...' : 'Feedback for user...';
+    const submissionBundle = !isAdminNote && Array.isArray(item.lorebook_bundle)
+        ? item.lorebook_bundle.filter(entry => entry?.source_lorebook_name || entry?.pushed_lorebook_name)
+        : [];
+    const primarySubmissionLorebook = submissionBundle.find(entry => String(entry.role || '').toLowerCase() === 'primary')?.pushed_lorebook_name
+        || item.primary_lorebook_name
+        || item.source_lorebook_name
+        || '';
+    const secondarySubmissionLorebooks = submissionBundle
+        .filter(entry => String(entry.role || '').toLowerCase() === 'secondary')
+        .map(entry => String(entry.pushed_lorebook_name || entry.source_lorebook_name || '').trim())
+        .filter(Boolean);
+    const bundleInfoHtml = !isAdminNote && (primarySubmissionLorebook || secondarySubmissionLorebooks.length > 0)
+        ? `
+                    <div class="push-cl-box notes" style="margin-top:12px;">
+                        <div class="push-cl-title"><i class="fa-solid fa-scroll"></i> Bundle Lorebooks</div>
+                        ${primarySubmissionLorebook ? `<div class="push-cl-body"><strong>Primary:</strong> ${escapeHtml(primarySubmissionLorebook)}</div>` : ''}
+                        ${secondarySubmissionLorebooks.length > 0 ? `<div class="push-cl-ver">Secondary: ${escapeHtml(secondarySubmissionLorebooks.join(', '))}</div>` : ''}
+                    </div>
+                `
+        : '';
     const footerButtons = isAdminNote
         ? `
                     <button type="button" id="push_admin_submission_reply" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-reply"></i> Reply</button>
                     <button type="button" id="push_admin_submission_delete" class="menu_button push-aurora-btn push-aurora-btn-decline"><i class="fa-solid fa-trash"></i> Delete</button>
                     <button type="button" id="push_admin_submission_reviewed" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-eye"></i> Reviewed</button>
                 `
-        : `
+        : isDeletionRequest
+            ? `
+                    <button type="button" id="push_admin_del_for_user" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-user-minus"></i> Delete for User</button>
+                    <button type="button" id="push_admin_del_for_all" class="menu_button push-aurora-btn push-aurora-btn-decline"><i class="fa-solid fa-users-slash"></i> Delete for All Users</button>
+                    <button type="button" id="push_admin_submission_delete" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-xmark"></i> Dismiss</button>
+                `
+            : `
                     <button type="button" id="push_admin_submission_deny" class="menu_button push-aurora-btn push-aurora-btn-decline"><i class="fa-solid fa-xmark"></i> Reject</button>
                     <button type="button" id="push_admin_submission_reviewed" class="menu_button push-aurora-btn push-aurora-btn-reviewed"><i class="fa-solid fa-eye"></i> Reviewed</button>
                     <button type="button" id="push_admin_submission_approve" class="menu_button push-aurora-btn push-aurora-btn-approve"><i class="fa-solid fa-check"></i> Approve</button>
                     <button type="button" id="push_admin_submission_delete" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-trash"></i> Delete</button>
                 `;
+
+    // For admin_note: show the sender's profile avatar.
+    // For submissions: show the submitter's character PNG (more useful for content review).
+    const submitterHandle = isAdminNote ? null : (item.submitter_handle || null);
+    const submitterCharFile = !isAdminNote && (item.bound_characters?.[0] || item.character_files?.[0]) || null;
+    const charAvatarHtml = isAdminNote
+        // User note → profile avatar for identification
+        ? `<img class="push-cp-av-img"
+               src="${escapeHtml(senderProfileAvatar)}"
+               alt="${escapeHtml(item.from_name || item.from_handle || 'User')}"
+               onerror="this.src='/img/default-user.png';" />`
+        // Submission → character PNG with profile avatar fallback
+        : submitterHandle && submitterCharFile
+            ? `<img class="push-cp-av-img"
+                   src="/api/worldinfo/admin-char-thumb?handle=${encodeURIComponent(submitterHandle)}&file=${encodeURIComponent(submitterCharFile)}"
+                   alt="${escapeHtml(cardName)}"
+                   onerror="this.src='${escapeHtml(senderProfileAvatar)}';" />`
+            : `<i class="fa-solid ${charIcon}"></i>`;
+
+    // If multiple bound characters, show a mini horizontal scroll strip of thumbnails.
+    const allBoundFiles = !isAdminNote ? (item.bound_characters || item.character_files || []) : [];
+    const charThumbsHtml = submitterHandle && allBoundFiles.length > 1
+        ? `<div class="push-cp-thumbs">
+            ${allBoundFiles.map(f => `
+                <img class="push-cp-thumb-mini"
+                     src="/api/worldinfo/admin-char-thumb?handle=${encodeURIComponent(submitterHandle)}&file=${encodeURIComponent(f)}"
+                     alt="${escapeHtml(f.replace('.png', ''))}"
+                     title="${escapeHtml(f.replace('.png', ''))}"
+                     onerror="this.style.display='none';" />
+            `).join('')}
+           </div>`
+        : '';
 
     const html = `
         <div id="push_admin_submission_overlay" class="push-inbox-overlay">
@@ -7957,18 +9442,20 @@ async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
                 </div>
                 <div class="push-inbox-window-body">
                     <div class="push-cp">
-                        <div class="push-cp-av"><i class="fa-solid ${charIcon}"></i></div>
+                        <div class="push-cp-av">${charAvatarHtml}</div>
                         <div class="push-cp-info">
                             <div class="push-cp-name">${escapeHtml(cardName)} <span class="push-tag ${tagClass}">${tagText}</span></div>
                             <div class="push-cp-by">${byLine}</div>
                             <div class="push-cp-desc">${escapeHtml(descText)}</div>
                         </div>
                     </div>
+                    ${charThumbsHtml}
                     <div class="push-cl-box notes">
                         <div class="push-cl-title"><i class="fa-solid fa-comment-dots"></i> ${notesTitle}</div>
                         <div class="push-cl-body">${escapeHtml(notesBody)}</div>
                         <div class="push-cl-ver">Priority: ${priorityLabel[item.priority] || escapeHtml(item.priority || 'normal')}</div>
                     </div>
+                    ${bundleInfoHtml}
                     <div class="push-f" style="margin-top:14px;">
                         <div class="push-fl"><i class="fa-solid fa-reply"></i> Reply</div>
                         <textarea id="admin_submission_reply" class="text_pole" style="width:100%; min-height:90px;" placeholder="${replyPlaceholder}">${escapeHtml(replyValue)}</textarea>
@@ -7982,8 +9469,15 @@ async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
     `;
 
     $('body').append(html);
+    const detailOverlay = document.getElementById('push_admin_submission_overlay');
+    const detailWindow = detailOverlay?.querySelector('.push-inbox-window');
+    const detailBody = detailOverlay?.querySelector('.push-inbox-window-body');
+    if (detailOverlay) detailOverlay.scrollTop = 0;
+    if (detailWindow) detailWindow.scrollTop = 0;
+    if (detailBody) detailBody.scrollTop = 0;
 
     const closeOverlay = () => {
+        $(document).off('click.admInboxDel');
         $('#push_admin_submission_overlay').remove();
     };
 
@@ -8025,8 +9519,7 @@ async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
                 toastr.success(`Submission ${action}.`, 'Admin Inbox');
             }
             closeOverlay();
-            const refreshed = await getPushNotificationState();
-            updatePushNotificationBadge(refreshed);
+            await refreshPushNotificationState();
             return;
         }
 
@@ -8045,6 +9538,385 @@ async function openAdminInboxDetailModal(itemId, itemType = 'submission') {
     $('#push_admin_submission_reviewed').on('click', () => { submitAction('reviewed'); });
     $('#push_admin_submission_deny').on('click', () => { submitAction('reject'); });
     $('#push_admin_submission_delete').on('click', () => { submitAction('delete'); });
+
+    // Inline confirm helper — renders above push-inbox-overlay (z-index conflict with callPopup)
+    function inboxConfirm(message) {
+        return new Promise(resolve => {
+            $('#adm_inbox_inline_confirm').remove();
+
+            const footer = $('#push_admin_submission_overlay .push-inbox-window-footer');
+            const confirmHtml = `
+                <div id="adm_inbox_inline_confirm" class="push-cl-box notes" style="margin:0 14px 12px; border-color:rgba(251, 113, 133, 0.28);">
+                    <div class="push-cl-title"><i class="fa-solid fa-triangle-exclamation"></i> Confirm Action</div>
+                    <div class="push-cl-body">${message}</div>
+                    <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap; margin-top:12px;">
+                        <button id="aic_no" class="menu_button push-aurora-btn push-aurora-btn-ghost">Cancel</button>
+                        <button id="aic_yes" class="menu_button push-aurora-btn push-aurora-btn-decline">Confirm</button>
+                    </div>
+                </div>
+            `;
+
+            if (footer.length) {
+                footer.before(confirmHtml);
+            } else {
+                $('#push_admin_submission_overlay .push-inbox-window-body').append(confirmHtml);
+            }
+
+            const confirmBox = document.getElementById('adm_inbox_inline_confirm');
+            confirmBox?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+            function cleanup() {
+                $(document).off('.aicDlg');
+                $('#adm_inbox_inline_confirm').remove();
+            }
+
+            $(document).on('click.aicDlg', '#aic_yes', () => { cleanup(); resolve(true); });
+            $(document).on('click.aicDlg', '#aic_no', () => { cleanup(); resolve(false); });
+        });
+    }
+
+    // Deletion request actions (only rendered for deletion_request items)
+    $(document).on('click.admInboxDel', '#push_admin_del_for_user', async () => {
+        const confirmed = await inboxConfirm(
+            `Delete <strong>${escapeHtml(item.content_name || 'this character')}</strong> from <strong>${escapeHtml(item.submitter_handle || 'this user')}</strong>'s account only?`,
+        );
+        if (!confirmed) return;
+        const res = await fetch('/api/worldinfo/admin-delete-pushed-char', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ submission_id: itemId, scope: 'user' }),
+        });
+        if (res.ok) {
+            const data = await res.json();
+            toastr.error(`Deleted "${item.content_name || 'character'}" from ${data.deleted_handles?.[0] || item.submitter_handle}`, 'Character Deleted');
+            $(document).off('click.admInboxDel');
+            closeOverlay();
+            await refreshPushNotificationState();
+        } else {
+            toastr.error(await res.text() || 'Deletion failed', 'Error');
+        }
+    });
+
+    $(document).on('click.admInboxDel', '#push_admin_del_for_all', async () => {
+        const confirmed = await inboxConfirm(
+            `Delete <strong>${escapeHtml(item.content_name || 'this character')}</strong> from <em>all users</em> who received this push? This cannot be undone.`,
+        );
+        if (!confirmed) return;
+        const res = await fetch('/api/worldinfo/admin-delete-pushed-char', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ submission_id: itemId, scope: 'all' }),
+        });
+        if (res.ok) {
+            const data = await res.json();
+            toastr.error(`Deleted "${item.content_name || 'character'}" from ${data.deleted_count} user(s)`, 'Character Deleted');
+            $(document).off('click.admInboxDel');
+            closeOverlay();
+            await refreshPushNotificationState();
+        } else {
+            toastr.error(await res.text() || 'Deletion failed', 'Error');
+        }
+    });
+
+    $(document).on('click.admInboxDel', '#push_admin_submission_delete', () => {
+        $(document).off('click.admInboxDel');
+    });
+}
+
+async function openAdminPushDeletionModal() {
+    const old = document.getElementById('push_admin_del_mgr_overlay');
+    if (old) old.remove();
+
+    const loadingHtml = `
+        <div id="push_admin_del_mgr_overlay" class="push-inbox-overlay">
+            <div class="push-inbox-window" role="dialog" aria-modal="true" aria-label="Character Deletion Manager"
+                 style="max-width:min(95vw,1000px); width:min(95vw,1000px);">
+                <div class="push-inbox-window-header">
+                    <h3 style="font-size:16px;"><i class="fa-solid fa-trash-can" style="color:#fb7185;"></i> Character Deletion Manager</h3>
+                    <button type="button" id="push_admin_del_mgr_close" class="menu_button push-aurora-btn push-aurora-btn-ghost"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="push-inbox-window-body" style="display:flex; flex-direction:column; gap:12px; padding:16px; flex:1 1 auto; min-height:0;">
+                    <div id="push_admin_del_loading" style="padding:40px; text-align:center; color:#8888aa; font-size:14px;">
+                        <i class="fa-solid fa-spinner fa-spin" style="font-size:24px; margin-bottom:12px; display:block; color:#6868aa;"></i>
+                        Scanning character files across all users&hellip;
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    $('body').append(loadingHtml);
+
+    const closeOverlay = () => { $('#push_admin_del_mgr_overlay').remove(); };
+    $('#push_admin_del_mgr_overlay').on('click', function (evt) {
+        if (evt.target && evt.target.id === 'push_admin_del_mgr_overlay') closeOverlay();
+    });
+    $('#push_admin_del_mgr_close').on('click', closeOverlay);
+
+    let items = [];
+    try {
+        const res = await fetch('/api/worldinfo/admin-all-accepted-pushes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+        if (!res.ok) {
+            let errMsg = `HTTP ${res.status} ${res.statusText}`;
+            try {
+                const txt = await res.text();
+                const body = txt?.trim();
+                if (body && !body.startsWith('<')) errMsg = body;
+                else if (body) errMsg = `HTTP ${res.status} — ${body.slice(0, 120)}`;
+            } catch { /* ignore */ }
+            $('#push_admin_del_loading').html(`<i class="fa-solid fa-circle-exclamation" style="color:#fb7185; font-size:20px; margin-bottom:8px; display:block;"></i>${escapeHtml(errMsg)}`);
+            return;
+        }
+        const data = await res.json();
+        items = data.items || [];
+    } catch (err) {
+        $('#push_admin_del_loading').html(`<i class="fa-solid fa-circle-exclamation" style="color:#fb7185; font-size:20px; margin-bottom:8px; display:block;"></i>${escapeHtml(String(err?.message || err))}`);
+        return;
+    }
+
+    if (!document.getElementById('push_admin_del_mgr_overlay')) return;
+
+    const selectedKeys = new Set();
+    const itemKey = it => `${it.file}::${it.recipient_handle}`;
+
+    function updateSelectionUI() {
+        const count = selectedKeys.size;
+        $('#push_admin_del_sel_count').text(count ? `${count} selected` : '');
+        $('#push_admin_del_sel_actions').css('display', count > 0 ? 'flex' : 'none');
+        if (count > 0) {
+            $('#push_admin_del_sel_btn').html(`<i class="fa-solid fa-trash-can"></i> Delete ${count} Selected`);
+        }
+        $('.push-del-card').each(function () {
+            const key = `${$(this).data('file')}::${$(this).data('recipient')}`;
+            const sel = selectedKeys.has(key);
+            $(this).toggleClass('push-del-card-selected', sel);
+            const ind = $(this).find('.push-del-cb-indicator');
+            ind.css({ 'border-color': sel ? '#fb7185' : 'rgba(168,140,250,0.5)', 'background': sel ? '#fb7185' : 'rgba(20,16,34,0.7)' });
+            ind.html(sel ? '<i class="fa-solid fa-check" style="color:#fff; font-size:10px;"></i>' : '');
+        });
+    }
+
+    function buildCards(filter) {
+        const q = String(filter || '').toLowerCase().trim();
+        const filtered = q
+            ? items.filter(it =>
+                it.name.toLowerCase().includes(q)
+                || it.bound_lorebook.toLowerCase().includes(q)
+                || it.recipient_handle.toLowerCase().includes(q)
+                || it.creator_handle.toLowerCase().includes(q)
+                || (it.secondary_lorebooks || []).some(lb => lb.toLowerCase().includes(q))
+            )
+            : items;
+
+        if (!filtered.length) {
+            return `<div style="padding:20px; text-align:center; color:#8888aa; font-size:14px;">No characters match your search.</div>`;
+        }
+
+        const cards = filtered.map(it => {
+            const key = itemKey(it);
+            const sel = selectedKeys.has(key);
+            const thumbUrl = `/api/worldinfo/admin-char-thumb?handle=${encodeURIComponent(it.recipient_handle)}&file=${encodeURIComponent(it.file)}`;
+            const pushedBadge = it.is_pushed
+                ? `<span class="push-tag push-tag-char" style="font-size:10px; padding:1px 5px; align-self:flex-start; margin-bottom:2px;">Pushed</span>`
+                : '';
+            const lorebookLine = it.bound_lorebook
+                ? `<div><i class="fa-solid fa-book-atlas" style="opacity:.5; margin-right:3px;"></i>${escapeHtml(it.bound_lorebook)}</div>`
+                : `<div style="font-style:italic; color:#5a5a7a;">No lorebook</div>`;
+            const secondaryLine = (it.secondary_lorebooks || []).length > 0
+                ? `<div style="color:#6868aa; margin-top:2px;"><i class="fa-solid fa-layer-group" style="opacity:.45; margin-right:3px;"></i>${escapeHtml(it.secondary_lorebooks.join(', '))}</div>`
+                : '';
+            return `
+                <div class="push-binding-card push-del-card${sel ? ' push-del-card-selected' : ''}"
+                     data-file="${escapeHtml(it.file)}"
+                     data-recipient="${escapeHtml(it.recipient_handle)}"
+                     data-name="${escapeHtml(it.name)}"
+                     data-lorebook="${escapeHtml(it.bound_lorebook)}"
+                     style="cursor:pointer; position:relative; user-select:none; flex-shrink:0;">
+                    <div class="push-del-cb-indicator" style="position:absolute; top:6px; right:6px; z-index:2; width:18px; height:18px; border-radius:4px;
+                         border:2px solid ${sel ? '#fb7185' : 'rgba(168,140,250,0.5)'};
+                         background:${sel ? '#fb7185' : 'rgba(20,16,34,0.7)'};
+                         display:flex; align-items:center; justify-content:center; transition:all .15s; pointer-events:none;">
+                        ${sel ? '<i class="fa-solid fa-check" style="color:#fff; font-size:10px;"></i>' : ''}
+                    </div>
+                    <div class="push-binding-card-header">
+                        <div class="push-binding-card-thumb-frame">
+                            <img class="push-binding-card-thumb"
+                                 src="${thumbUrl}"
+                                 alt="${escapeHtml(it.name)}"
+                                 onerror="this.classList.add('push-binding-card-thumb-err'); this.nextElementSibling.classList.add('is-visible');" />
+                            <div class="push-binding-card-thumb-fallback"><i class="fa-solid fa-user-astronaut"></i></div>
+                        </div>
+                        <div class="push-binding-card-name">${escapeHtml(it.name)}</div>
+                    </div>
+                    <div style="font-size:11px; color:#8888aa; display:flex; flex-direction:column; gap:2px;">
+                        ${pushedBadge}
+                        <div style="color:#b0b0e0;"><i class="fa-solid fa-user" style="opacity:.5; margin-right:3px;"></i>${escapeHtml(it.recipient_handle)}</div>
+                        ${lorebookLine}
+                        ${secondaryLine}
+                    </div>
+                </div>`;
+        }).join('');
+
+        return `
+            <div class="push-binding-rail push-rail-shell" id="push_admin_del_rail">
+                <div class="push-rail-fade push-rail-fade-left"></div>
+                <div class="push-binding-rail-track push-rail-track" id="push_admin_del_card_track">
+                    ${cards}
+                </div>
+                <div class="push-rail-fade push-rail-fade-right"></div>
+            </div>`;
+    }
+
+    const emptyHtml = `<div style="padding:24px; text-align:center; color:#8888aa; font-size:14px; line-height:1.7;">No characters found across any user accounts.</div>`;
+
+    $('.push-inbox-window-body').html(`
+        <div style="position:relative; flex-shrink:0;">
+            <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:13px; top:50%; transform:translateY(-50%); color:#6868aa; font-size:14px; pointer-events:none; z-index:1;"></i>
+            <input id="push_admin_del_search" type="text" class="text_pole"
+                placeholder="Filter by character, lorebook, or user..."
+                style="padding-left:38px !important; padding-top:10px !important; padding-bottom:10px !important; font-size:14px !important; width:100%; box-sizing:border-box; margin:0;" autocomplete="off" />
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; flex-shrink:0; flex-wrap:wrap;">
+            <span id="push_admin_del_total" style="font-size:12px; color:#6060a0;">
+                ${items.length} character${items.length !== 1 ? 's' : ''} across all users
+            </span>
+            <span id="push_admin_del_sel_count" style="font-size:12px; color:#fb7185; font-weight:600;"></span>
+            <div id="push_admin_del_sel_actions" style="display:none; gap:8px; margin-left:auto; align-items:center;">
+                <button type="button" id="push_admin_del_deselect_btn" class="menu_button push-aurora-btn push-aurora-btn-ghost" style="font-size:12px; padding:5px 10px;">Deselect All</button>
+                <button type="button" id="push_admin_del_sel_btn" class="menu_button push-aurora-btn push-aurora-btn-decline" style="font-size:13px; padding:5px 14px;">
+                    <i class="fa-solid fa-trash-can"></i> Delete Selected
+                </button>
+            </div>
+        </div>
+        <div id="push_admin_del_cards_wrap" style="flex:1 1 auto; min-height:0; overflow:hidden;">
+            ${items.length ? buildCards('') : emptyHtml}
+        </div>
+    `);
+
+    if (items.length) {
+        initPushTargetRail(document.getElementById('push_admin_del_mgr_overlay'));
+    }
+
+    $('#push_admin_del_search').on('input', function () {
+        if (!items.length) return;
+        $('#push_admin_del_cards_wrap').html(buildCards($(this).val()));
+        initPushTargetRail(document.getElementById('push_admin_del_mgr_overlay'));
+    });
+
+    $('#push_admin_del_mgr_overlay').on('click', '.push-del-card', function () {
+        const key = `${$(this).data('file')}::${$(this).data('recipient')}`;
+        if (selectedKeys.has(key)) selectedKeys.delete(key);
+        else selectedKeys.add(key);
+        updateSelectionUI();
+    });
+
+    $('#push_admin_del_mgr_overlay').on('click', '#push_admin_del_deselect_btn', () => {
+        selectedKeys.clear();
+        updateSelectionUI();
+    });
+
+    $('#push_admin_del_mgr_overlay').on('click', '#push_admin_del_sel_btn', async function () {
+        const count = selectedKeys.size;
+        if (!count) return;
+
+        const selectedItems = items.filter(it => selectedKeys.has(itemKey(it)));
+        const byFile = new Map();
+        for (const it of selectedItems) {
+            if (!byFile.has(it.file)) byFile.set(it.file, { name: it.name, lorebook: it.bound_lorebook, handles: [] });
+            byFile.get(it.file).handles.push(it.recipient_handle);
+        }
+
+        const summaryRows = [...byFile.entries()].map(([, info]) => {
+            const handleList = info.handles.map(h => `<strong style="color:#e0e0ff;">${escapeHtml(h)}</strong>`).join(', ');
+            const lbPart = info.lorebook ? ` <span style="color:#9090b8; font-size:12px;">(+ lorebook <em>${escapeHtml(info.lorebook)}</em>)</span>` : '';
+            return `<div style="padding:5px 0; font-size:13px; border-bottom:1px solid rgba(104,104,170,.12);">
+                <strong style="color:#fb7185;">${escapeHtml(info.name)}</strong>${lbPart}
+                <div style="font-size:12px; color:#8888aa; margin-top:2px;"><i class="fa-solid fa-user" style="opacity:.5; margin-right:3px;"></i>${handleList}</div>
+            </div>`;
+        }).join('');
+
+        function showInlineDeletionPanel(contentHtml) {
+            $('#push_admin_del_inline_panel').remove();
+            const panelHtml = `<div id="push_admin_del_inline_panel" class="push-cl-box notes" style="margin:0 0 14px; border-color:rgba(251,113,133,0.28);">${contentHtml}</div>`;
+            const searchBlock = $('#push_admin_del_mgr_overlay #push_admin_del_search').closest('div');
+            if (searchBlock.length) searchBlock.before(panelHtml);
+            else $('#push_admin_del_mgr_overlay .push-inbox-window-body').prepend(panelHtml);
+            const bodyEl = document.querySelector('#push_admin_del_mgr_overlay .push-inbox-window-body');
+            if (bodyEl) bodyEl.scrollTop = 0;
+        }
+
+        function clearInlineDeletionPanel() { $('#push_admin_del_inline_panel').remove(); }
+
+        const confirmed = await new Promise((resolve) => {
+            showInlineDeletionPanel(`
+                <div class="push-cl-title"><i class="fa-solid fa-triangle-exclamation"></i> Confirm Deletion</div>
+                <div class="push-cl-body">
+                    <div style="max-height:200px; overflow-y:auto; margin-bottom:12px;">${summaryRows}</div>
+                    <div style="font-size:12px; color:#6a6a8a; line-height:1.5; margin-bottom:14px;">
+                        <i class="fa-solid fa-shield-halved" style="margin-right:4px; color:#6868aa;"></i>
+                        Chats and memory lorebooks will not be affected.
+                    </div>
+                    <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+                        <button type="button" id="adm_del_confirm_cancel" class="menu_button push-aurora-btn push-aurora-btn-ghost" style="font-size:13px; padding:8px 18px;">Cancel</button>
+                        <button type="button" id="adm_del_confirm_yes" class="menu_button push-aurora-btn push-aurora-btn-decline" style="font-size:13px; padding:8px 18px;">
+                            <i class="fa-solid fa-trash-can"></i> Yes, Delete ${count}
+                        </button>
+                    </div>
+                </div>
+            `);
+            function cleanup() { $(document).off('.admDelConfirm'); clearInlineDeletionPanel(); }
+            $(document).on('click.admDelConfirm', '#adm_del_confirm_cancel', () => { cleanup(); resolve(false); });
+            $(document).on('click.admDelConfirm', '#adm_del_confirm_yes', () => { cleanup(); resolve(true); });
+        });
+
+        if (!confirmed) return;
+
+        const adminHandle = getCurrentUserHandle();
+        const exemptHandles = new Set([adminHandle, 'default-user']);
+        let totalSuccess = 0;
+        let totalFail = 0;
+
+        for (const [file, info] of byFile.entries()) {
+            const validHandles = info.handles.filter(h => !exemptHandles.has(h));
+            if (!validHandles.length) continue;
+            try {
+                const delRes = await fetch('/api/worldinfo/admin-delete-chars-bulk', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ file, lorebook: info.lorebook || '', handles: validHandles }),
+                });
+                if (delRes.ok) {
+                    const result = await delRes.json();
+                    const succeeded = result.succeeded || [];
+                    totalSuccess += succeeded.length;
+                    totalFail += (result.failed || []).filter(r => r.error && r.error !== 'Character file not found').length;
+                    for (const h of succeeded) {
+                        selectedKeys.delete(`${file}::${h}`);
+                        items.splice(0, items.length, ...items.filter(it => !(it.file === file && it.recipient_handle === h)));
+                    }
+                } else {
+                    totalFail += validHandles.length;
+                }
+            } catch {
+                totalFail += validHandles.length;
+            }
+        }
+
+        if (totalSuccess > 0) {
+            toastr.error(`Deleted ${totalSuccess} character${totalSuccess !== 1 ? 's' : ''} successfully`, 'Characters Deleted');
+        }
+        if (totalFail > 0) {
+            toastr.warning(`${totalFail} deletion(s) failed`, 'Partial Success');
+        }
+
+        const searchVal = $('#push_admin_del_search').val() || '';
+        $('#push_admin_del_cards_wrap').html(items.length ? buildCards(searchVal) : emptyHtml);
+        if (items.length) initPushTargetRail(document.getElementById('push_admin_del_mgr_overlay'));
+        $('#push_admin_del_total').text(`${items.length} character${items.length !== 1 ? 's' : ''} across all users`);
+        updateSelectionUI();
+    });
 }
 
 async function openAdminInboxModal() {
@@ -8062,10 +9934,11 @@ async function openAdminInboxModal() {
     const priorityDot = { high: '\u{1F534}', low: '\u{1F535}', normal: '\u{1F7E2}' };
     const rows = (payload.items || []).map(item => {
         const isAdminNote = item.inbox_item_type === 'admin_note';
+        const isDeletionRequest = item.inbox_item_type === 'deletion_request';
         const isChar = item.content_type === 'character_lorebook_bundle';
-        const icon = isAdminNote ? 'fa-note-sticky' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
-        const tag = isAdminNote ? 'Note' : (isChar ? 'Char' : 'Lore');
-        const tagClass = isAdminNote ? 'push-tag-note' : (isChar ? 'push-tag-char' : 'push-tag-lore');
+        const icon = isAdminNote ? 'fa-note-sticky' : isDeletionRequest ? 'fa-trash-can' : (isChar ? 'fa-user-astronaut' : 'fa-book-atlas');
+        const tag = isAdminNote ? 'Note' : isDeletionRequest ? 'Del Request' : (isChar ? 'Char' : 'Lore');
+        const tagClass = isAdminNote ? 'push-tag-note' : isDeletionRequest ? 'push-tag-rejected' : (isChar ? 'push-tag-char' : 'push-tag-lore');
         const title = isAdminNote ? `Note from ${item.from_handle || 'user'}` : (item.content_name || 'Submission');
         const desc = isAdminNote ? (item.message || 'No message provided.') : (item.notes || 'No notes provided.');
         const fromHandle = isAdminNote ? (item.from_handle || 'unknown') : (item.submitter_handle || 'unknown');
@@ -8127,8 +10000,7 @@ async function openAdminInboxModal() {
         }
     }
 
-    const refreshed = await getPushNotificationState();
-    updatePushNotificationBadge(refreshed);
+    await refreshPushNotificationState();
 }
 
 async function openTopbarPushModal() {
@@ -8146,13 +10018,12 @@ async function openTopbarPushModal() {
         // no-op
     }
 
-    // Build character options — only those with a bound lorebook
-    const charList = (characters || [])
-        .filter(c => c?.data?.extensions?.world)
-        .map(c => ({
-            name: c.name || c.avatar?.replace('.png', '') || 'Unknown',
-            world: c.data.extensions.world,
-        }));
+    // Build character options — show all characters, sorted alphabetically
+    const charList = (characters || []).map(c => ({
+        name: c.name || c.avatar?.replace('.png', '') || 'Unknown',
+        world: c?.data?.extensions?.world || '',
+        avatar: c.avatar || '',
+    }));
     charList.sort((a, b) => a.name.localeCompare(b.name));
 
     const charOptions = charList.map(c =>
@@ -8161,10 +10032,15 @@ async function openTopbarPushModal() {
 
     const userRail = renderPushTargetRail(users);
 
+    // Build lorebook options from world_names
+    const lorebookOptions = (world_names || []).map(name =>
+        `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`,
+    ).join('');
+
     const html = `
         <div class="push-popup-layout">
             <div class="push-f">
-                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card &amp; Lorebook <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
+                <div class="push-fl"><i class="fa-solid fa-user-astronaut"></i> Character Card <span style="opacity:0.5; font-size:0.85em;">(select up to 10)</span></div>
                 <select id="topbar_push_book" class="text_pole" style="width:100%;" multiple="multiple">
                     ${charOptions}
                 </select>
@@ -8188,7 +10064,12 @@ async function openTopbarPushModal() {
         </div>
     `;
 
-    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', { okButton: 'Push Now', cancelButton: 'Cancel', wider: true });
+    const popup = new Popup(html, POPUP_TYPE.CONFIRM, '', {
+        okButton: 'Push Now',
+        cancelButton: 'Cancel',
+        wider: true,
+        allowVerticalScrolling: true,
+    });
     decoratePushPopup(popup, 'queue');
     const dlg = popup.dlg;
     const resultPromise = popup.show();
@@ -8209,6 +10090,9 @@ async function openTopbarPushModal() {
 
     initPushTargetRail(dlg);
 
+    const primaryLorebookDrafts = new Map();
+    const secondaryLorebookDrafts = new Map();
+
     // Lorebook binding indicator — updates as selections change
     function refreshPushBindings() {
         const lbDiv = $(dlg).find('#topbar_push_lb');
@@ -8221,20 +10105,114 @@ async function openTopbarPushModal() {
             return;
         }
 
-        const boundEntries = selected.map(name => {
+        const boundEntries = selected.map((name, index) => {
             const char = charList.find(c => c.name === name);
             if (!char) return null;
-            return renderPushBindingCard({
+            const primaryLorebook = primaryLorebookDrafts.get(name) || char.world || '';
+            const secondaryLorebook = secondaryLorebookDrafts.get(name) || '';
+
+            // Create lorebook selector HTML for this character
+            const primarySelectHtml = `
+                <div class="push-lorebook-selector" style="margin-top:8px;">
+                    <label style="font-size:0.9em; opacity:0.8; display:block; margin-bottom:4px;">
+                        <i class="fa-solid fa-book"></i> Primary Lorebook (required)
+                    </label>
+                    <select id="topbar_push_primary_lb_${index}" class="text_pole topbar-push-primary-lb" style="width:100%;" data-char-name="${escapeHtml(name)}">
+                        <option value="">— Select primary lorebook —</option>
+                        ${lorebookOptions}
+                    </select>
+                </div>
+            `;
+
+            const secondarySelectHtml = `
+                <div class="push-lorebook-selector" style="margin-top:6px;">
+                    <label style="font-size:0.9em; opacity:0.7; display:block; margin-bottom:4px;">
+                        <i class="fa-solid fa-book-open"></i> Secondary Lorebook (optional)
+                    </label>
+                    <select id="topbar_push_secondary_lb_${index}" class="text_pole topbar-push-secondary-lb" style="width:100%;" data-char-name="${escapeHtml(name)}">
+                        <option value="">— Select secondary lorebook (optional) —</option>
+                        ${lorebookOptions}
+                    </select>
+                </div>
+            `;
+
+            const cardHtml = renderPushBindingCard({
                 characterName: char.name,
-                boundLorebook: char.world,
+                boundLorebook: primaryLorebook,
+                avatarFile: char.avatar || '',
                 showRenameInput: false,
             });
+            return `<div class="push-binding-group">${cardHtml}${primarySelectHtml}${secondarySelectHtml}</div>`;
         }).filter(Boolean);
 
-        lbDiv.show().html(boundEntries.join(''));
+        if (boundEntries.length === 1) {
+            lbDiv.show().html(boundEntries[0]);
+        } else {
+            lbDiv.show().html(`
+                <div class="push-binding-rail push-rail-shell">
+                    <div class="push-rail-fade push-rail-fade-left"></div>
+                    <div class="push-binding-rail-track push-rail-track">
+                        ${boundEntries.join('')}
+                    </div>
+                    <div class="push-rail-fade push-rail-fade-right"></div>
+                </div>
+            `);
+            initPushTargetRail(lbDiv[0]);
+        }
+
+        // Initialize Select2 on newly created lorebook selectors
+        $(dlg).find('.topbar-push-primary-lb').each(function () {
+            if (!$(this).data('select2')) {
+                const charName = $(this).data('char-name');
+                $(this).val(primaryLorebookDrafts.get(charName) || '').select2({
+                    width: '100%',
+                    placeholder: '— Select primary lorebook —',
+                    searchInputPlaceholder: 'Type to filter...',
+                    allowClear: true,
+                    closeOnSelect: true,
+                    dropdownParent: $(dlg),
+                });
+            }
+        });
+
+        $(dlg).find('.topbar-push-secondary-lb').each(function () {
+            if (!$(this).data('select2')) {
+                const charName = $(this).data('char-name');
+                $(this).val(secondaryLorebookDrafts.get(charName) || '').select2({
+                    width: '100%',
+                    placeholder: '— Select secondary lorebook (optional) —',
+                    searchInputPlaceholder: 'Type to filter...',
+                    allowClear: true,
+                    closeOnSelect: true,
+                    dropdownParent: $(dlg),
+                });
+            }
+        });
     }
 
     $charSelect.on('change', refreshPushBindings);
+
+    // Track primary lorebook selection
+    $(dlg).on('change', '.topbar-push-primary-lb', function () {
+        const charName = $(this).data('char-name');
+        const value = String($(this).val() || '').trim();
+        if (value) {
+            primaryLorebookDrafts.set(charName, value);
+        } else {
+            primaryLorebookDrafts.delete(charName);
+        }
+    });
+
+    // Track secondary lorebook selection
+    $(dlg).on('change', '.topbar-push-secondary-lb', function () {
+        const charName = $(this).data('char-name');
+        const value = String($(this).val() || '').trim();
+        if (value) {
+            secondaryLorebookDrafts.set(charName, value);
+        } else {
+            secondaryLorebookDrafts.delete(charName);
+        }
+    });
 
     $(popup.dlg).on('click', '.push-rail-card-all', function () {
         $(popup.dlg).find('.push-rail-card').removeClass('on');
@@ -8270,16 +10248,36 @@ async function openTopbarPushModal() {
         return;
     }
 
-    // Collect unique lorebook names from selected characters
-    const selectedWorlds = [...new Set(
-        selectedNames.map(name => {
-            const c = charList.find(x => x.name === name);
-            return c?.world || '';
-        }).filter(Boolean),
-    )];
+    // Validate that all characters have at least a primary lorebook selected
+    let missingLorebooks = [];
+    for (const charName of selectedNames) {
+        if (!primaryLorebookDrafts.get(charName)) {
+            missingLorebooks.push(charName);
+        }
+    }
+    if (missingLorebooks.length > 0) {
+        toastr.warning(`Please select a primary lorebook for: ${missingLorebooks.join(', ')}`, 'Push');
+        return;
+    }
 
-    if (selectedWorlds.length === 0) {
-        toastr.warning('Selected characters have no bound lorebooks.', 'Push');
+    // Build one bundle per selected character.
+    const lorebookEntries = selectedNames.reduce((acc, name) => {
+        const c = charList.find(x => x.name === name);
+        const primaryLorebook = primaryLorebookDrafts.get(name) || '';
+        const secondaryLorebook = secondaryLorebookDrafts.get(name) || '';
+        if (!primaryLorebook) return acc;
+
+        acc.push({
+            primary_lorebook: primaryLorebook,
+            secondary_lorebook: secondaryLorebook || undefined,
+            character_name: name,
+            avatarFile: c?.avatar || '',
+        });
+        return acc;
+    }, []);
+
+    if (lorebookEntries.length === 0) {
+        toastr.warning('Selected characters have no lorebook selections.', 'Push');
         return;
     }
 
@@ -8287,21 +10285,30 @@ async function openTopbarPushModal() {
     const version = String($(dlg).find('#topbar_push_version').val() || '').trim();
 
     // Use bulk-push endpoint for multi-character support
-    toastr.info(`Pushing ${selectedWorlds.length} lorebook(s) + characters to ${targets.length} user(s)\u2026`, 'Push');
+    toastr.info(`Pushing ${lorebookEntries.length} character bundle(s) to ${targets.length} user(s)\u2026`, 'Push');
     try {
         const pushRes = await fetch('/api/worldinfo/bulk-push', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ lorebooks: selectedWorlds, targets, notes, version }),
+            body: JSON.stringify({ lorebooks: lorebookEntries, targets, notes, version }),
         });
         if (pushRes.ok) {
             const { results: bulkResults } = await pushRes.json();
             const msgs = [];
             for (const r of bulkResults) {
                 const parts = [];
-                if (r.queued?.length) parts.push(`${r.queued.length} queued`);
+                if (r.queued?.length) {
+                    const queuedHandles = r.queued
+                        .map(item => String(item?.handle || '').trim())
+                        .filter(Boolean);
+                    const queuedLabel = queuedHandles.length
+                        ? `to ${queuedHandles.map(handle => escapeHtml(handle)).join(', ')}`
+                        : `${r.queued.length} queued`;
+                    parts.push(`queued ${queuedLabel}`);
+                }
                 if (r.failed?.length) parts.push(`${r.failed.length} failed`);
-                msgs.push(`<b>${escapeHtml(r.lorebook)}</b>: ${parts.join(', ') || 'done'}`);
+                const label = r.character_name || r.primary_lorebook || r.lorebook || 'Bundle';
+                msgs.push(`<b>${escapeHtml(label)}</b>: ${parts.join(', ') || 'done'}`);
             }
             const detailedFailures = formatDetailedPushFailures(bulkResults);
             if (msgs.length > 0) {
@@ -8319,158 +10326,248 @@ async function openTopbarPushModal() {
 }
 
 
-async function runPushWorkflowDiagnostics() {
-    const checks = [];
+async function collectPushWorkflowDiagnostics() {
+    const perfStart = performance.now();
+    let payload = { checks: [], run: {} };
+    const admin = isAdmin();
 
-    async function probe(name, routePath, expectedStatus = 200, body = {}) {
-        try {
-            const res = await fetch(routePath, {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: JSON.stringify(body),
-            });
-            const ok = res.status === expectedStatus;
-            checks.push({ name, ok, detail: `status ${res.status} (expected ${expectedStatus})` });
-        } catch (err) {
-            checks.push({ name, ok: false, detail: String(err?.message || err) });
+    if (admin) {
+        const response = await fetch('/api/worldinfo/admin-push-diagnostics', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ initiated_at: Date.now() }),
+        });
+
+        if (!response.ok) {
+            throw new Error(await response.text() || `Diagnostics request failed with status ${response.status}`);
         }
-    }
 
-    await probe('Push Notifications API', '/api/worldinfo/push-notifications', 200);
-    await probe('User Inbox API', '/api/worldinfo/user-inbox', 200);
-    await probe('Admin Handles API', '/api/worldinfo/admin-handles', 200);
-
-    if (isAdmin()) {
-        await probe('Admin Inbox API', '/api/worldinfo/admin-inbox', 200);
+        payload = await response.json();
     } else {
-        await probe('Admin Inbox Access Control', '/api/worldinfo/admin-inbox', 403);
+        const endpointChecks = [];
+        const endpointProbes = [
+            { name: 'Push Notifications API', url: '/api/worldinfo/push-notifications', detail: 'Loads the shared notification state used by regular users' },
+            { name: 'User Inbox API', url: '/api/worldinfo/user-inbox', detail: 'Loads the regular-user inbox list' },
+            { name: 'Accepted Pushes API', url: '/api/worldinfo/accepted-pushes', detail: 'Loads accepted push records used by deletion requests' },
+            { name: 'Admin Handles API', url: '/api/worldinfo/admin-handles', detail: 'Loads admin recipients for user-to-admin notes' },
+        ];
+
+        for (const probe of endpointProbes) {
+            try {
+                const response = await fetch(probe.url, {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ include_avatars: false }),
+                });
+                endpointChecks.push({
+                    name: probe.name,
+                    ok: response.ok,
+                    detail: response.ok
+                        ? probe.detail
+                        : `${probe.detail} (failed with ${response.status} ${response.statusText})`,
+                });
+            } catch (err) {
+                endpointChecks.push({
+                    name: probe.name,
+                    ok: false,
+                    detail: `${probe.detail} (${String(err?.message || err)})`,
+                });
+            }
+        }
+
+        payload = {
+            run: {
+                started_at: Date.now(),
+                finished_at: Date.now(),
+                duration_ms: 0,
+                mode: 'user',
+            },
+            checks: endpointChecks,
+        };
     }
 
-    checks.push({ name: 'Topbar Push Button', ok: $('#topbar_push').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar Inbox Button', ok: $('#topbar_push_inbox').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar Admin Note Button', ok: $('#topbar_admin_note').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar Submit Button', ok: $('#topbar_submit').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar User Admin Note Button', ok: $('#topbar_user_admin_note').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar Notifications Button', ok: $('#topbar_push_notifs').length === 1, detail: 'DOM present' });
-    checks.push({ name: 'Topbar Diagnostics Button', ok: $('#topbar_push_diag').length === 1, detail: 'DOM present' });
+    const frontendChecks = admin
+        ? [
+            { name: 'Topbar Push Button', ok: $('#option_push_queue').length === 1, detail: 'Admin push control is mounted in the DOM' },
+            { name: 'Topbar Inbox Button', ok: $('#option_push_inbox').length === 1, detail: 'Admin inbox control is mounted in the DOM' },
+            { name: 'Topbar Admin Note Button', ok: $('#option_admin_note').length === 1, detail: 'Admin note control is mounted in the DOM' },
+            { name: 'Topbar Notifications Button', ok: $('#option_push_notifs').length === 1, detail: 'Notifications control is mounted in the DOM' },
+            { name: 'Topbar Diagnostics Button', ok: $('#option_push_diag').length === 1, detail: 'Diagnostics control is mounted in the DOM' },
+        ]
+        : [
+            { name: 'Topbar Submit Button', ok: $('#option_submit_to_admin').length === 1, detail: 'Regular-user submit control is mounted in the DOM' },
+            { name: 'Topbar User Note Button', ok: $('#option_user_admin_note').length === 1, detail: 'Regular-user note-to-admin control is mounted in the DOM' },
+            { name: 'Topbar Deletion Request Button', ok: $('#option_del_request').length === 1, detail: 'Regular-user deletion request control is mounted in the DOM' },
+            { name: 'Topbar Notifications Button', ok: $('#option_push_notifs').length === 1, detail: 'Notifications control is mounted in the DOM' },
+            { name: 'Topbar Diagnostics Button', ok: $('#option_push_diag').length === 1, detail: 'Diagnostics control is mounted in the DOM' },
+        ];
 
-    const passCount = checks.filter(x => x.ok).length;
-    const failCount = checks.length - passCount;
+    const checks = [...(Array.isArray(payload.checks) ? payload.checks : []), ...frontendChecks];
+    const passed = checks.filter(check => check.ok).length;
+    const failed = checks.length - passed;
 
-    const rows = checks.map(c => `
-        <div class="push-flow-row" style="cursor:default;">
-            <div><b>${c.ok ? 'PASS' : 'FAIL'}</b> - ${c.name}</div>
-            <div class="push-flow-meta">${c.detail}</div>
-        </div>
-    `).join('');
+    return {
+        run: {
+            ...(payload.run && typeof payload.run === 'object' ? payload.run : {}),
+            frontend_duration_ms: Math.max(0, Math.round(performance.now() - perfStart)),
+        },
+        summary: {
+            total: checks.length,
+            passed,
+            failed,
+        },
+        checks,
+    };
+}
+
+async function runPushWorkflowDiagnostics() {
+    const admin = isAdmin();
 
     const html = `
-        <div style="min-width:520px;">
+        <div class="push-popup-layout">
             <h3 style="margin-top:0;">Push Workflow Diagnostics</h3>
-            <div class="push-flow-meta" style="margin-bottom:8px;">Passed: ${passCount} | Failed: ${failCount}</div>
-            <div class="push-flow-list">${rows}</div>
+            <div id="push_diag_status" class="push-flow-meta" style="margin-bottom:12px;">
+                Press <b>Run Diagnostics</b> to probe the push workflow and inspect the results.
+            </div>
+            <div class="btn-row" style="justify-content:flex-start; margin-bottom:12px;">
+                <button id="push_diag_run" type="button" class="menu_button push-aurora-btn push-aurora-btn-primary">Run Diagnostics</button>
+            </div>
+            <div id="push_diag_results" class="push-flow-list">
+                <div class="push-flow-row" style="cursor:default;">
+                    <div>No diagnostics have been run yet.</div>
+                    <div class="push-flow-meta">Click the button above to start.</div>
+                </div>
+            </div>
         </div>
     `;
 
     const popup = new Popup(html, POPUP_TYPE.TEXT, '', { okButton: 'Close', rows: 1, wider: true });
     decoratePushPopup(popup, 'diagnostics');
-    await popup.show();
+    const resultPromise = popup.show();
+    const dlg = popup.dlg;
+
+    let isRunning = false;
+    $(dlg).on('click', '#push_diag_run', async function () {
+        if (isRunning) return;
+        isRunning = true;
+
+        const runButton = $(this);
+        const statusEl = $(dlg).find('#push_diag_status');
+        const resultsEl = $(dlg).find('#push_diag_results');
+
+        runButton.prop('disabled', true).text('Running...');
+        statusEl.text('Running push diagnostics...');
+        resultsEl.html(`
+            <div class="push-flow-row" style="cursor:default;">
+                <div>Diagnostics in progress...</div>
+                <div class="push-flow-meta">Checking APIs, access control, and ${admin ? 'admin' : 'regular-user'} push controls.</div>
+            </div>
+        `);
+
+        try {
+            const diagnostics = await collectPushWorkflowDiagnostics();
+            const checks = Array.isArray(diagnostics.checks) ? diagnostics.checks : [];
+            const passCount = diagnostics.summary?.passed ?? checks.filter(x => x.ok).length;
+            const failCount = diagnostics.summary?.failed ?? (checks.length - passCount);
+            const startedAt = diagnostics.run?.started_at ? new Date(diagnostics.run.started_at) : null;
+            const finishedAt = diagnostics.run?.finished_at ? new Date(diagnostics.run.finished_at) : null;
+            const durationMs = Number(diagnostics.run?.duration_ms || 0);
+            const frontendDurationMs = Number(diagnostics.run?.frontend_duration_ms || 0);
+
+            const rows = checks.map(c => `
+                <div class="push-flow-row" style="cursor:default;">
+                    <div><b>${c.ok ? 'PASS' : 'FAIL'}</b> - ${c.name}</div>
+                    <div class="push-flow-meta">${c.detail}</div>
+                </div>
+            `).join('');
+
+            statusEl.html(`
+                Ran live diagnostics at <b>${startedAt ? escapeHtml(startedAt.toLocaleString()) : 'just now'}</b>
+                ${finishedAt ? `| Finished <b>${escapeHtml(finishedAt.toLocaleTimeString())}</b>` : ''}
+                | Server <b>${escapeHtml(String(durationMs))} ms</b>
+                | UI <b>${escapeHtml(String(frontendDurationMs))} ms</b>
+                | Passed: <b>${passCount}</b>
+                | Failed: <b>${failCount}</b>
+            `);
+            resultsEl.html(rows || `
+                <div class="push-flow-row" style="cursor:default;">
+                    <div>No diagnostics returned.</div>
+                    <div class="push-flow-meta">No checks were recorded.</div>
+                </div>
+            `);
+        } catch (err) {
+            statusEl.text('Diagnostics failed to complete.');
+            resultsEl.html(`
+                <div class="push-flow-row" style="cursor:default;">
+                    <div><b>FAIL</b> - Diagnostics Runner</div>
+                    <div class="push-flow-meta">${escapeHtml(String(err?.message || err))}</div>
+                </div>
+            `);
+        } finally {
+            isRunning = false;
+            runButton.prop('disabled', false).text('Run Diagnostics');
+        }
+    });
+
+    await resultPromise;
+    $(dlg).off('click', '#push_diag_run');
 }
 async function setupPushWorkflowControls() {
     const admin = isAdmin();
-    const pref = getPushUiPref();
+    // Push workflow now lives exclusively in the Options menu.
 
-    if (!accountStorage.getItem(PUSH_UI_PREF_MIGRATION_KEY)) {
-        pref.collapsed = false;
-        pref.left = getDefaultPushUiLeft();
-        pref.top = getDefaultPushUiTop();
-        setPushUiPref(pref);
-        accountStorage.setItem(PUSH_UI_PREF_MIGRATION_KEY, '1');
-    }
-
-    // Always keep controls floating and below the topbar area.
-    pref.floating = true;
-    pref.top = Math.max(PUSH_UI_MIN_TOP, pref.top);
-
-    $('#topbar_push').toggle(admin).off('click').on('click', async () => {
-        await openTopbarPushModal();
-    });
-    $('#topbar_push_inbox').toggle(admin).off('click').on('click', async () => {
-        await openAdminInboxModal();
-    });
-    $('#topbar_admin_note').toggle(admin).off('click').on('click', async () => {
-        console.log('[AdminNote] Button clicked');
-        try {
+    const drawerActions = [
+        ['#option_push_queue', admin, async () => {
+            await openTopbarPushModal();
+        }],
+        ['#option_push_inbox', admin, async () => {
+            await openAdminInboxModal();
+        }],
+        ['#option_admin_del_mgr', admin, async () => {
+            await openAdminPushDeletionModal();
+        }],
+        ['#option_admin_note', admin, async () => {
             await openAdminNoteModal();
-        } catch (err) {
-            console.error('[AdminNote] Error in modal:', err);
-            toastr.error(`Error: ${err.message}`, 'Admin Note');
-        }
-    });
-    $('#topbar_submit').toggle(!admin).off('click').on('click', async () => {
-        await openSubmitToAdminModal();
-    });
-
-    // Bind badge click handler once during initialization (not on every poll update)
-    const submitBadge = document.getElementById('topbar_submit_badge');
-    if (submitBadge) {
-        $(submitBadge).off('click').on('click', async (e) => {
-            e.stopPropagation();
+        }],
+        ['#option_submit_to_admin', !admin, async () => {
+            await openSubmitToAdminModal();
+        }],
+        ['#option_user_inbox', !admin, async () => {
             await openUserInboxModal();
+        }],
+        ['#option_user_admin_note', !admin, async () => {
+            await openUserSendAdminNoteModal();
+        }],
+        ['#option_del_request', !admin, async () => {
+            await openDeletionRequestModal();
+        }],
+        ['#option_coauthor', true, async () => {
+            const dest = admin ? '/coauthor-admin.html' : '/coauthor.html';
+            window.open(dest, '_blank', 'noopener,noreferrer');
+        }],
+        ['#option_push_notifs', true, async () => {
+            await openPushNotificationsModal();
+        }],
+        ['#option_push_diag', true, async () => {
+            await runPushWorkflowDiagnostics();
+        }],
+    ];
+
+    for (const [selector, showState, handler] of drawerActions) {
+        bindPushControlAction(selector, showState, async () => {
+            try {
+                closeOptionsDrawer();
+                await handler();
+            } catch (err) {
+                console.error(`[PushDrawer] Failed action for ${selector}:`, err);
+                toastr.error(String(err?.message || err), 'Push Workflow');
+            }
         });
     }
 
-    $('#topbar_user_admin_note').toggle(!admin).off('click').on('click', async () => {
-        try {
-            await openUserSendAdminNoteModal();
-        } catch (err) {
-            console.error('[UserAdminNote] Failed to open modal:', err);
-            toastr.error(String(err?.message || err), 'Send Note');
-        }
-    });
-
-    $('#topbar_push_notifs').show().off('click').on('click', async () => {
-        try {
-            await openPushNotificationsModal();
-        } catch (err) {
-            console.error('[PushWorkflow] Failed to open notifications modal:', err);
-            toastr.error(String(err?.message || err), 'Push Notifications');
-        }
-    });
-
-    $('#topbar_push_diag').show().off('click').on('click', async () => {
-        await runPushWorkflowDiagnostics();
-    });
-
-    $('#topbar_push_toggle').show().off('click').on('click', () => {
-        pref.collapsed = !pref.collapsed;
-        applyPushUiPref(pref);
-        setPushUiPref(pref);
-    });
-
-    $('#push_workflow_controls').off('dblclick').on('dblclick', () => {
-        const nextPref = setPushWorkflowControlsHidden(true);
-        pref.hidden = nextPref.hidden;
-        pref.left = nextPref.left;
-        pref.top = nextPref.top;
-        pref.collapsed = nextPref.collapsed;
-    });
-
-    $('#topbar_push_drag').show().off('click');
-
-    $('#topbar_push_reset').show().off('click').on('click', () => {
-        // Reset dock to default right-side position if it gets stuck.
-        pref.left = getDefaultPushUiLeft();
-        pref.top = getDefaultPushUiTop();
-        pref.floating = true;
-        applyPushUiPref(pref);
-        bindPushUiDrag(pref);
-        setPushUiPref(pref);
-        toastr.info('Push controls reset to default position', 'Push Controls', { timeOut: 2000 });
-    });
-
-    applyPushUiPref(pref);
-    bindPushUiDrag(pref);
+    $('#option_push_separator, #option_push_heading')
+        .show()
+        .removeClass('displayNone');
 
     const state = await getPushNotificationState();
     updatePushNotificationBadge(state);
@@ -8479,7 +10576,796 @@ async function setupPushWorkflowControls() {
         clearInterval(pushNotificationPollTimer);
     }
     pushNotificationPollTimer = setInterval(async () => {
-        const polledState = await getPushNotificationState();
-        updatePushNotificationBadge(polledState);
+        await refreshPushNotificationState();
     }, 30000);
+}
+
+// ============================================================================
+// LORE TREASURY — Bulk WI Entry Mover
+// ============================================================================
+// Modal UI to copy, transfer, or delete multiple WI entries between lorebooks.
+// ============================================================================
+function initLoreTreasuryInline() {
+    if (document.getElementById('lt_overlay')) {
+        return;
+    }
+
+    let allowedLorebookNames = null;
+    let hiddenLorebookNames = new Set();
+    let staleLorebookNames = new Set();
+
+    function isPrefixedHiddenLorebook(name) {
+        return String(name || '').trim().startsWith('9z');
+    }
+
+    function isCurrentUserOwnerOfScopedLorebook(name) {
+        const worldName = String(name || '').trim().toLowerCase();
+        const currentHandle = normalizeHandleForPushLock(getCurrentUserHandle());
+        if (!currentHandle) {
+            return false;
+        }
+
+        return worldName.startsWith(`bb-${currentHandle}-`) || worldName.startsWith(`dd-${currentHandle}-`);
+    }
+
+    function isOwnerScopedLorebookName(name) {
+        const worldName = String(name || '').trim().toLowerCase();
+        return worldName.startsWith('bb-') || worldName.startsWith('dd-');
+    }
+
+    function canAccessLorebook(name) {
+        const worldName = String(name || '').trim();
+        if (!worldName) {
+            return false;
+        }
+
+        if (isPrefixedHiddenLorebook(worldName) || staleLorebookNames.has(worldName)) {
+            return false;
+        }
+
+        if (allowedLorebookNames) {
+            return allowedLorebookNames.has(worldName);
+        }
+
+        if (isOwnerScopedLorebookName(worldName)) {
+            return !isAdmin() && isCurrentUserOwnerOfScopedLorebook(worldName);
+        }
+
+        if (isAdmin()) {
+            return true;
+        }
+
+        return !hiddenLorebookNames.has(worldName) && !isHiddenPushedLorebookForDropdown(worldName);
+    }
+
+    function visibleLorebooks() {
+        return (world_names || []).filter(canAccessLorebook);
+    }
+
+    async function refreshLoreTreasuryAccessMap() {
+        const response = await fetch('/api/plugins/lore-treasury/access', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Lore Treasury access scan failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        allowedLorebookNames = new Set(
+            Array.isArray(data?.allowed_world_names)
+                ? data.allowed_world_names.map(name => String(name || '').trim()).filter(Boolean)
+                : [],
+        );
+        hiddenLorebookNames = new Set(
+            Array.isArray(data?.hidden_world_names)
+                ? data.hidden_world_names.map(name => String(name || '').trim()).filter(Boolean)
+                : [],
+        );
+        staleLorebookNames = new Set(
+            Array.isArray(data?.stale_world_names)
+                ? data.stale_world_names.map(name => String(name || '').trim()).filter(Boolean)
+                : [],
+        );
+
+        const leakedNames = (world_names || []).filter(name => !canAccessLorebook(name));
+        if (leakedNames.length) {
+            console.info('[Lore Treasury] Filtered hidden/stale lorebooks from selector:', leakedNames);
+        }
+    }
+
+    if (!document.getElementById('lore_treasury_button')) {
+        const button = document.createElement('div');
+        button.id = 'lore_treasury_button';
+        button.className = 'menu_button';
+        button.title = 'Lore Treasury - Bulk copy, transfer, or delete WI entries between lorebooks';
+        button.dataset.i18n = '[title]Lore Treasury';
+        button.innerHTML = `
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/>
+                <circle cx="17" cy="6" r="1.5" stroke="none" fill="currentColor"/>
+                <circle cx="20" cy="10" r="1" stroke="none" fill="currentColor"/>
+                <polyline points="14,17 17,20 14,23"/>
+                <line x1="10" y1="20" x2="17" y2="20"/>
+            </svg>
+        `;
+
+        const anchor = document.getElementById('world_bulk_push')
+            || document.getElementById('world_popup_delete')
+            || document.getElementById('world_duplicate');
+
+        if (anchor?.parentElement) {
+            anchor.insertAdjacentElement('afterend', button);
+        }
+    }
+
+    // ── Inject scrollbar polish ───────────────────────────────────────────────
+    const ltStyle = document.createElement('style');
+    ltStyle.textContent = `
+        #lt_overlay[open] {
+            position: fixed;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: auto;
+            padding: 20px 16px;
+            box-sizing: border-box;
+            margin: 0;
+            inset: 0;
+        }
+        #lt_overlay::backdrop {
+            background: rgba(0,0,0,0.62);
+            -webkit-backdrop-filter: blur(8px);
+            backdrop-filter: blur(8px);
+        }
+        #lt_entries::-webkit-scrollbar,
+        .lt-combo-list::-webkit-scrollbar { width: 5px; }
+        #lt_entries::-webkit-scrollbar-track,
+        .lt-combo-list::-webkit-scrollbar-track { background: transparent; }
+        #lt_entries::-webkit-scrollbar-thumb,
+        .lt-combo-list::-webkit-scrollbar-thumb { background: #3a3a5c; border-radius: 3px; }
+        #lt_entries::-webkit-scrollbar-thumb:hover,
+        .lt-combo-list::-webkit-scrollbar-thumb:hover { background: #5a5a8c; }
+        #lore_treasury_button:hover svg { stroke: var(--SmartThemeBodyColor, #c8d0f0); }
+        @media (max-width: 700px) {
+            #lt_overlay[open] {
+                align-items: center !important;
+                justify-content: center !important;
+                overflow-y: auto !important;
+                overscroll-behavior: contain;
+                -webkit-overflow-scrolling: touch;
+                padding: 12px !important;
+            }
+            #lt_panel {
+                width: calc(100vw - 24px) !important;
+                max-width: calc(100vw - 24px) !important;
+                max-height: calc(100dvh - 24px) !important;
+                margin: 0 auto !important;
+                overflow-y: auto !important;
+                overscroll-behavior: contain;
+                -webkit-overflow-scrolling: touch;
+            }
+            #lt_pickers_row {
+                grid-template-columns: 1fr !important;
+            }
+            #lt_step2 {
+                display: flex !important;
+                flex-direction: column !important;
+                flex: 1 1 auto !important;
+                min-height: 0 !important;
+                overflow-y: auto !important;
+            }
+            #lt_entries {
+                flex: 1 1 auto !important;
+                min-height: 160px !important;
+                max-height: none !important;
+                overflow-y: auto !important;
+                -webkit-overflow-scrolling: touch;
+            }
+            #lt_actions {
+                display: flex !important;
+                flex-direction: column !important;
+                flex-shrink: 0 !important;
+            }
+        }
+    `;
+    document.head.appendChild(ltStyle);
+
+    // ── Shared style fragments ────────────────────────────────────────────────
+    const S_INPUT = 'width:100%;background:#0a0a1a;border:1px solid #3a3a5c;border-radius:6px;color:#c8d0f0;padding:10px 13px;font-size:17px;outline:none;box-sizing:border-box;font-family:inherit;';
+    const S_LIST  = 'display:none;position:absolute;left:0;right:0;top:100%;margin-top:3px;z-index:200;background:#111122;border:1px solid #4a4a7c;border-radius:6px;max-height:220px;overflow-y:auto;box-shadow:0 8px 28px rgba(0,0,0,0.65);';
+    const S_LABEL = 'font-size:13px;color:#666688;display:block;margin-bottom:7px;text-transform:uppercase;letter-spacing:0.07em;';
+    const S_BTN   = 'background:none;border:1px solid #3a3a5c;border-radius:6px;color:#c0c8e8;cursor:pointer;padding:11px 16px;font-size:16px;display:flex;align-items:center;justify-content:center;gap:6px;font-family:inherit;transition:background 0.15s,border-color 0.15s;';
+
+    // ── Inject modal HTML ─────────────────────────────────────────────────────
+    $('body').append(`
+<dialog id="lt_overlay" style="padding:0;border:none;background:transparent;max-width:none;max-height:none;width:100vw;height:100dvh;overflow:visible;">
+
+  <!-- Main panel -->
+  <div id="lt_panel" style="background:#13132a;border:1px solid #3a3a5c;border-radius:12px;width:min(600px,93vw);max-height:calc(100vh - 40px);display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,0.75);margin:auto;flex-shrink:0;">
+
+    <!-- Header -->
+    <div id="lt_header_bar" style="padding:15px 20px 14px;border-bottom:1px solid #252542;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;gap:12px;">
+      <div id="lt_header_hit" style="display:flex;align-items:center;gap:10px;min-width:0;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8aabee" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z" fill="rgba(122,154,238,0.08)"/>
+          <circle cx="17" cy="6" r="1.5" fill="rgba(122,154,238,0.5)" stroke="none"/>
+          <circle cx="20" cy="10" r="1" fill="rgba(122,154,238,0.35)" stroke="none"/>
+          <polyline points="14,17 17,20 14,23"/>
+          <line x1="10" y1="20" x2="17" y2="20"/>
+        </svg>
+        <span style="font-size:22px;font-weight:600;color:#c8d0f0;letter-spacing:0.01em;min-width:0;">Lore Treasury</span>
+      </div>
+      <button id="lt_close" style="background:none;border:none;color:#444466;cursor:pointer;font-size:20px;line-height:1;padding:4px 8px;border-radius:4px;" title="Close">✕</button>
+    </div>
+
+    <!-- ── Step 1: Source / Destination / Load ── -->
+    <div id="lt_step1" style="padding:20px;display:flex;flex-direction:column;gap:18px;flex-shrink:0;">
+      <div id="lt_pickers_row" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+
+        <div>
+          <label style="${S_LABEL}">Source Lorebook</label>
+          <div class="lt-combo" id="lt_src_combo" data-value="" style="position:relative;">
+            <input class="lt-combo-input" id="lt_src_input" type="text" placeholder="Type to search…" autocomplete="off" spellcheck="false" style="${S_INPUT}">
+            <div class="lt-combo-list" id="lt_src_list" style="${S_LIST}"></div>
+          </div>
+        </div>
+
+        <div>
+          <label style="${S_LABEL}">Destination Lorebook</label>
+          <div class="lt-combo" id="lt_dst_combo" data-value="" style="position:relative;">
+            <input class="lt-combo-input" id="lt_dst_input" type="text" placeholder="Type to search…" autocomplete="off" spellcheck="false" style="${S_INPUT}">
+            <div class="lt-combo-list" id="lt_dst_list" style="${S_LIST}"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="display:flex;align-items:center;gap:12px;">
+        <button id="lt_load_btn" style="${S_BTN}flex:1;border-color:#4a6aaa;color:#9ab2e8;font-weight:500;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          Load Entries
+        </button>
+        <span id="lt_load_status" style="font-size:13px;color:#555577;"></span>
+      </div>
+
+      <p style="font-size:15px;color:#a0a0c0;margin:0;text-align:center;">
+        Select a source (required) and destination (for Copy / Transfer), then load.
+      </p>
+    </div>
+
+    <!-- ── Step 2: Entry list ── (hidden until load) -->
+    <div id="lt_step2" style="display:none;flex-direction:column;flex:1;min-height:0;">
+
+      <!-- Breadcrumb -->
+      <div id="lt_breadcrumb" style="padding:8px 20px;border-bottom:1px solid #252542;font-size:15px;color:#8888aa;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#0e0e20;"></div>
+
+      <!-- Select-all bar -->
+      <div style="padding:8px 20px;border-bottom:1px solid #252542;display:flex;align-items:center;gap:10px;flex-shrink:0;background:#0e0e20;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;margin:0;">
+          <input type="checkbox" id="lt_select_all" style="width:15px;height:15px;accent-color:#7a9aee;cursor:pointer;flex-shrink:0;">
+          <span id="lt_select_label" style="font-size:16px;color:#9ba0c0;user-select:none;">Select All</span>
+        </label>
+        <span id="lt_entry_count" style="font-size:15px;color:#555577;flex-shrink:0;"></span>
+      </div>
+
+      <!-- Entry rows (scrollable) -->
+      <div id="lt_entries" style="overflow-y:auto;flex:1;"></div>
+
+      <!-- Action buttons -->
+      <div id="lt_actions" style="padding:11px 16px;border-top:1px solid #252542;display:flex;gap:8px;flex-shrink:0;background:#0e0e20;">
+        <button id="lt_copy_btn" style="${S_BTN}flex:1;" title="Copy selected entries into destination lorebook (source untouched)">
+          📋 Copy
+        </button>
+        <button id="lt_transfer_btn" style="${S_BTN}flex:1;" title="Move selected entries to destination and remove them from source">
+          🔀 Transfer
+        </button>
+        <button id="lt_delete_btn" style="${S_BTN}flex:1;border-color:#6a2a2a;color:#e87a7a;" title="Permanently delete selected entries from source lorebook">
+          🗑 Delete
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /#lt_panel -->
+
+  <!-- ── Delete confirmation overlay (full-screen, above panel) ── -->
+  <div id="lt_delete_confirm" style="display:none;position:fixed;inset:0;z-index:10001;background:rgba(6,3,12,0.95);flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:32px;text-align:center;">
+    <div style="font-size:44px;line-height:1;">⚠️</div>
+    <div style="max-width:420px;">
+      <div style="font-size:21px;font-weight:600;color:#ff7070;margin-bottom:10px;">Confirm Deletion</div>
+      <div id="lt_delete_msg" style="font-size:16px;color:#9ba0c0;line-height:1.65;"></div>
+    </div>
+    <div style="display:flex;gap:12px;width:100%;max-width:340px;">
+      <button id="lt_delete_cancel" style="${S_BTN}flex:1;">Cancel</button>
+      <button id="lt_delete_confirm_btn" style="${S_BTN}flex:1;border-color:#7a3a3a;background:rgba(122,58,58,0.18);color:#ff7070;font-weight:500;"></button>
+    </div>
+  </div>
+
+</dialog><!-- /#lt_overlay -->
+`);
+
+    // ── HTML escaping / highlight helper ─────────────────────────────────────
+    function escHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function hlMatch(text, query) {
+        if (!query) return escHtml(text);
+        const idx = text.toLowerCase().indexOf(query.toLowerCase());
+        if (idx === -1) return escHtml(text);
+        return escHtml(text.slice(0, idx))
+            + `<span style="color:#7a9aee;font-weight:600;">${escHtml(text.slice(idx, idx + query.length))}</span>`
+            + escHtml(text.slice(idx + query.length));
+    }
+
+    // ── Searchable combo factory ──────────────────────────────────────────────
+    // Returns { getValue(), reset() }.
+    // Uses mousedown+preventDefault on list items so the input never blurs
+    // before the selection is committed.
+    function makeCombo(wrapperId, inputId, listId) {
+        const wrapper = document.getElementById(wrapperId);
+        const input   = document.getElementById(inputId);
+        const listEl  = document.getElementById(listId);
+        let lastValid = '';
+        let hiIdx     = -1;
+
+        function setHi(idx) {
+            const opts = listEl.querySelectorAll('.lt-opt');
+            opts.forEach(o => o.style.background = '');
+            hiIdx = idx;
+            if (hiIdx >= 0 && opts[hiIdx]) {
+                opts[hiIdx].style.background = '#22224a';
+                opts[hiIdx].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
+        function renderList(q) {
+            const names    = visibleLorebooks();
+            const filtered = q ? names.filter(n => n.toLowerCase().includes(q.toLowerCase())) : names;
+            if (!filtered.length) {
+                listEl.innerHTML = '<div style="padding:10px 12px;color:#444466;font-size:12px;">No lorebooks found</div>';
+            } else {
+                listEl.innerHTML = filtered.map((n, i) =>
+                    `<div class="lt-opt" data-name="${escHtml(n)}" data-i="${i}" ` +
+                    `style="padding:7px 12px;cursor:pointer;font-size:13px;color:#c8d0f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">`
+                    + hlMatch(n, q) + '</div>'
+                ).join('');
+                listEl.querySelectorAll('.lt-opt').forEach((opt, i) => {
+                    // mousedown+preventDefault keeps focus on the input
+                    opt.addEventListener('mousedown', e => { e.preventDefault(); choose(opt.dataset.name); });
+                    opt.addEventListener('mouseenter', () => setHi(i));
+                });
+            }
+            listEl.style.display = 'block';
+            hiIdx = -1;
+        }
+
+        function closeList() {
+            listEl.style.display = 'none';
+            hiIdx = -1;
+        }
+
+        function choose(name) {
+            lastValid           = name;
+            wrapper.dataset.value = name;
+            input.value         = name;
+            closeList();
+        }
+
+        input.addEventListener('focus', () => renderList(input.value));
+
+        input.addEventListener('input', () => {
+            wrapper.dataset.value = '';
+            renderList(input.value);
+        });
+
+        input.addEventListener('keydown', e => {
+            const opts = listEl.querySelectorAll('.lt-opt');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setHi(Math.min(hiIdx + 1, opts.length - 1));
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHi(Math.max(hiIdx - 1, -1));
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                if (hiIdx >= 0 && opts[hiIdx]) choose(opts[hiIdx].dataset.name);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                input.value           = lastValid;
+                wrapper.dataset.value = lastValid;
+                closeList();
+            }
+        });
+
+        input.addEventListener('blur', () => {
+            // Small delay so mousedown on a list item fires first
+            setTimeout(() => {
+                closeList();
+                const typed = input.value;
+                const names = visibleLorebooks();
+                if (typed && !names.includes(typed)) {
+                    // Typed value doesn't match any lorebook — snap back
+                    input.value           = lastValid;
+                    wrapper.dataset.value = lastValid;
+                } else if (!typed) {
+                    wrapper.dataset.value = '';
+                }
+            }, 180);
+        });
+
+        return {
+            getValue: () => wrapper.dataset.value || '',
+            reset: () => {
+                lastValid = '';
+                wrapper.dataset.value = '';
+                input.value = '';
+                listEl.style.display = 'none';
+                hiIdx = -1;
+            },
+        };
+    }
+
+    const srcCombo = makeCombo('lt_src_combo', 'lt_src_input', 'lt_src_list');
+    const dstCombo = makeCombo('lt_dst_combo', 'lt_dst_input', 'lt_dst_list');
+
+    // ── Module-level state ────────────────────────────────────────────────────
+    let loadedSource = '';
+    let loadedData   = null;
+
+    // ── Open / close / reset ──────────────────────────────────────────────────
+    function resetModal() {
+        srcCombo.reset();
+        dstCombo.reset();
+        document.getElementById('lt_step1').style.display = 'flex';
+        document.getElementById('lt_step2').style.display = 'none';
+        document.getElementById('lt_delete_confirm').style.display = 'none';
+        document.getElementById('lt_entries').innerHTML = '';
+        document.getElementById('lt_load_status').textContent = '';
+        document.getElementById('lt_breadcrumb').textContent = '';
+        document.getElementById('lt_header_bar').style.cursor = '';
+        document.getElementById('lt_header_bar').title = '';
+        document.getElementById('lt_header_hit').style.cursor = '';
+        document.getElementById('lt_header_hit').title = '';
+        document.getElementById('lt_breadcrumb').style.cursor = '';
+        document.getElementById('lt_breadcrumb').title = '';
+        loadedSource = '';
+        loadedData   = null;
+    }
+
+    const ltOverlay = /** @type {HTMLDialogElement|null} */ (document.getElementById('lt_overlay'));
+    if (ltOverlay) {
+        ltOverlay.style.margin = '0';
+        ltOverlay.style.inset = '0';
+        ltOverlay.style.position = 'fixed';
+        ltOverlay.style.boxSizing = 'border-box';
+    }
+
+    function showModalNow() {
+        if (ltOverlay?.showModal) {
+            if (!ltOverlay.open) ltOverlay.showModal();
+        } else {
+            $('#lt_overlay').css('display', 'flex');
+        }
+    }
+
+    async function openModal() {
+        resetModal();
+        document.getElementById('lt_load_status').textContent = 'Loading lorebooks...';
+        showModalNow();
+
+        try {
+            await refreshLoreTreasuryAccessMap();
+        } catch (error) {
+            console.warn('[Lore Treasury] Could not refresh access map; using local hidden-lore filters.', error);
+            toastr.warning('Server ownership scan is unavailable. Hidden lore protection is using local filters.', 'Lore Treasury');
+            allowedLorebookNames = null;
+        }
+
+        if (ltOverlay?.open || document.getElementById('lt_overlay').style.display === 'flex') {
+            document.getElementById('lt_load_status').textContent = '';
+        }
+    }
+
+    $('#lore_treasury_button').off('click.loreTreasury').on('click.loreTreasury', () => {
+        void openModal();
+    });
+
+    $('#lt_close').off('click.loreTreasury').on('click.loreTreasury', (e) => {
+        e.stopPropagation();
+        if (ltOverlay?.close) {
+            ltOverlay.close();
+        } else {
+            $('#lt_overlay').css('display', 'none');
+        }
+        resetModal();
+    });
+
+    $('#lt_breadcrumb, #lt_header_hit, #lt_header_bar').off('click.loreTreasury').on('click.loreTreasury', (e) => {
+        if ($(e.target).closest('#lt_close').length) return;
+        if (document.getElementById('lt_step2').style.display !== 'none') {
+            resetModal();
+        }
+    });
+
+    // Click on backdrop dismisses
+    $('#lt_overlay').off('click.loreTreasury').on('click.loreTreasury', function (e) {
+        if (e.target === this) {
+            if (ltOverlay?.close) {
+                ltOverlay.close();
+            } else {
+                $(this).css('display', 'none');
+            }
+            resetModal();
+        }
+    });
+
+    // ── Load entries ──────────────────────────────────────────────────────────
+    $('#lt_load_btn').off('click.loreTreasury').on('click.loreTreasury', async () => {
+        const src = srcCombo.getValue();
+        if (!src) {
+            toastr.warning('Please select a Source lorebook.', 'Lore Treasury');
+            return;
+        }
+        if (!canAccessLorebook(src)) {
+            toastr.error('This lorebook is not available in Lore Treasury.', 'Lore Treasury');
+            return;
+        }
+
+        const dst = dstCombo.getValue();
+        if (dst && !canAccessLorebook(dst)) {
+            toastr.error('This destination lorebook is not available in Lore Treasury.', 'Lore Treasury');
+            return;
+        }
+
+        $('#lt_load_status').text('Loading…');
+        $('#lt_load_btn').prop('disabled', true);
+        let data;
+        try {
+            data = await loadWorldInfo(src);
+        } finally {
+            $('#lt_load_status').text('');
+            $('#lt_load_btn').prop('disabled', false);
+        }
+
+        if (!data || typeof data.entries !== 'object') {
+            toastr.error(`Could not load lorebook: "${src}"`, 'Lore Treasury');
+            return;
+        }
+
+        loadedSource = src;
+        loadedData   = data;
+
+        $('#lt_breadcrumb').text(dst
+            ? `${src}  →  ${dst}`
+            : `Source: ${src}   (no destination — Copy/Transfer will require one)`
+        );
+        document.getElementById('lt_header_bar').style.cursor = 'pointer';
+        document.getElementById('lt_header_bar').title = 'Tap to choose different lorebooks';
+        document.getElementById('lt_header_hit').style.cursor = 'pointer';
+        document.getElementById('lt_header_hit').title = 'Tap to choose different lorebooks';
+        document.getElementById('lt_breadcrumb').style.cursor = 'pointer';
+        document.getElementById('lt_breadcrumb').title = 'Tap to choose different lorebooks';
+
+        renderEntries(data);
+        $('#lt_step1').css('display', 'none');
+        $('#lt_step2').css('display', 'flex');
+    });
+
+    // ── Entry list ────────────────────────────────────────────────────────────
+    function renderEntries(data) {
+        const list    = document.getElementById('lt_entries');
+        list.innerHTML = '';
+        const entries = Object.values(data.entries || {});
+
+        if (!entries.length) {
+            list.innerHTML = '<div style="padding:28px;text-align:center;color:#333355;font-size:13px;">This lorebook has no entries.</div>';
+            document.getElementById('lt_entry_count').textContent = '0 entries';
+            updateSelectAll();
+            return;
+        }
+
+        const fragment = document.createDocumentFragment();
+        entries.forEach(entry => {
+            const uid   = entry.uid;
+            const title = entry.comment || '(untitled)';
+            const keys  = Array.isArray(entry.key) ? entry.key.join(', ') : '';
+
+            const row = document.createElement('div');
+            row.className    = 'lt-entry-row';
+            row.dataset.uid  = uid;
+            row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:7px 18px;cursor:pointer;border-bottom:1px solid #191930;'
+                + (entry.disable ? 'opacity:0.45;' : '');
+            row.innerHTML =
+                `<input type="checkbox" class="lt-entry-check" data-uid="${uid}" ` +
+                `style="width:14px;height:14px;flex-shrink:0;accent-color:#7a9aee;cursor:pointer;">` +
+                `<div style="flex:1;min-width:0;">` +
+                  `<div style="font-size:16px;color:#c8d0f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(title)}</div>` +
+                  (keys ? `<div style="font-size:14px;color:#444466;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px;">${escHtml(keys)}</div>` : '') +
+                `</div>` +
+                (entry.constant
+                    ? '<span style="font-size:10px;color:#7ae8d8;border:1px solid rgba(122,232,216,0.35);border-radius:3px;padding:1px 5px;flex-shrink:0;">const</span>'
+                    : '');
+
+            // Click anywhere on the row toggles the checkbox
+            row.addEventListener('click', e => {
+                if (e.target.type === 'checkbox') return;
+                const cb = row.querySelector('.lt-entry-check');
+                cb.checked = !cb.checked;
+                updateSelectAll();
+            });
+            row.querySelector('.lt-entry-check').addEventListener('change', updateSelectAll);
+            row.addEventListener('mouseenter', () => { row.style.background = '#1c1c3a'; });
+            row.addEventListener('mouseleave', () => { row.style.background = ''; });
+
+            fragment.appendChild(row);
+        });
+        list.appendChild(fragment);
+
+        document.getElementById('lt_entry_count').textContent =
+            `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`;
+        updateSelectAll();
+    }
+
+    function updateSelectAll() {
+        const all     = document.querySelectorAll('#lt_entries .lt-entry-check');
+        const checked = document.querySelectorAll('#lt_entries .lt-entry-check:checked');
+        const cb      = document.getElementById('lt_select_all');
+        const lbl     = document.getElementById('lt_select_label');
+
+        if (checked.length === 0) {
+            cb.checked = false; cb.indeterminate = false;
+        } else if (checked.length === all.length) {
+            cb.checked = true;  cb.indeterminate = false;
+        } else {
+            cb.checked = false; cb.indeterminate = true;
+        }
+        lbl.textContent = checked.length > 0 ? `Selected (${checked.length})` : 'Select All';
+    }
+
+    document.getElementById('lt_select_all').addEventListener('change', function () {
+        document.querySelectorAll('#lt_entries .lt-entry-check')
+            .forEach(cb => { cb.checked = this.checked; });
+        updateSelectAll();
+    });
+
+    function getSelectedUIDs() {
+        return Array.from(document.querySelectorAll('#lt_entries .lt-entry-check:checked'))
+            .map(cb => parseInt(cb.dataset.uid));
+    }
+
+    // Validates selection and optionally checks destination.
+    // Returns uid array or null on failure.
+    function validateSelection(needDest) {
+        const uids = getSelectedUIDs();
+        if (!uids.length) {
+            toastr.warning('Select at least one entry first.', 'Lore Treasury');
+            return null;
+        }
+        if (!canAccessLorebook(loadedSource)) {
+            toastr.error('This lorebook is not available in Lore Treasury.', 'Lore Treasury');
+            return null;
+        }
+        if (needDest) {
+            const dst = dstCombo.getValue();
+            if (!dst) {
+                toastr.warning('Please select a Destination lorebook.', 'Lore Treasury');
+                return null;
+            }
+            if (!canAccessLorebook(dst)) {
+                toastr.error('This destination lorebook is not available in Lore Treasury.', 'Lore Treasury');
+                return null;
+            }
+            if (dst === loadedSource) {
+                toastr.warning('Source and Destination must be different lorebooks.', 'Lore Treasury');
+                return null;
+            }
+        }
+        return uids;
+    }
+
+    // ── Copy ──────────────────────────────────────────────────────────────────
+    $('#lt_copy_btn').on('click', async () => {
+        const uids = validateSelection(true);
+        if (!uids) return;
+
+        const dst     = dstCombo.getValue();
+        const dstData = await loadWorldInfo(dst);
+        if (!dstData || typeof dstData.entries !== 'object') {
+            toastr.error(`Could not load destination lorebook: "${dst}"`, 'Lore Treasury');
+            return;
+        }
+        dstData.entries = dstData.entries || {};
+
+        let maxUid = Object.keys(dstData.entries).reduce((m, k) => Math.max(m, parseInt(k)), -1);
+        for (const uid of uids) {
+            const entry = loadedData.entries[uid];
+            if (!entry) continue;
+            maxUid++;
+            dstData.entries[maxUid] = Object.assign({}, entry, { uid: maxUid });
+        }
+
+        await saveWorldInfo(dst, dstData, true);
+        toastr.success(
+            `Copied ${uids.length} entr${uids.length === 1 ? 'y' : 'ies'} into "${dst}"`,
+            'Lore Treasury'
+        );
+        setTimeout(resetModal, 400);
+    });
+
+    // ── Transfer ──────────────────────────────────────────────────────────────
+    $('#lt_transfer_btn').on('click', async () => {
+        const uids = validateSelection(true);
+        if (!uids) return;
+
+        const dst     = dstCombo.getValue();
+        const dstData = await loadWorldInfo(dst);
+        if (!dstData || typeof dstData.entries !== 'object') {
+            toastr.error(`Could not load destination lorebook: "${dst}"`, 'Lore Treasury');
+            return;
+        }
+        dstData.entries = dstData.entries || {};
+
+        // Add to destination
+        let maxUid = Object.keys(dstData.entries).reduce((m, k) => Math.max(m, parseInt(k)), -1);
+        for (const uid of uids) {
+            const entry = loadedData.entries[uid];
+            if (!entry) continue;
+            maxUid++;
+            dstData.entries[maxUid] = Object.assign({}, entry, { uid: maxUid });
+        }
+        await saveWorldInfo(dst, dstData, true);
+
+        // Remove from source
+        for (const uid of uids) delete loadedData.entries[uid];
+        await saveWorldInfo(loadedSource, loadedData, true);
+
+        toastr.success(
+            `Transferred ${uids.length} entr${uids.length === 1 ? 'y' : 'ies'} → "${dst}"`,
+            'Lore Treasury'
+        );
+        setTimeout(resetModal, 400);
+    });
+
+    // ── Delete (with confirmation screen) ────────────────────────────────────
+    $('#lt_delete_btn').on('click', () => {
+        const uids = validateSelection(false);
+        if (!uids) return;
+        const n = uids.length;
+        document.getElementById('lt_delete_msg').textContent =
+            `You are about to permanently delete ${n} entr${n === 1 ? 'y' : 'ies'} ` +
+            `from "${loadedSource}". This cannot be undone.`;
+        document.getElementById('lt_delete_confirm_btn').textContent =
+            `Delete ${n} Entr${n === 1 ? 'y' : 'ies'}`;
+        $('#lt_delete_confirm').css('display', 'flex');
+    });
+
+    $('#lt_delete_cancel').on('click', () => {
+        $('#lt_delete_confirm').css('display', 'none');
+    });
+
+    $('#lt_delete_confirm_btn').on('click', async () => {
+        $('#lt_delete_confirm').css('display', 'none');
+        const uids = getSelectedUIDs();
+        if (!uids.length) return;
+
+        for (const uid of uids) delete loadedData.entries[uid];
+        await saveWorldInfo(loadedSource, loadedData, true);
+
+        uids.forEach(uid => {
+            document.querySelector(`#lt_entries .lt-entry-row[data-uid="${uid}"]`)?.remove();
+        });
+
+        const rem = Object.keys(loadedData.entries).length;
+        document.getElementById('lt_entry_count').textContent =
+            `${rem} entr${rem === 1 ? 'y' : 'ies'}`;
+        updateSelectAll();
+
+        toastr.success(
+            `Deleted ${uids.length} entr${uids.length === 1 ? 'y' : 'ies'} from "${loadedSource}"`,
+            'Lore Treasury'
+        );
+        setTimeout(resetModal, 400);
+    });
 }

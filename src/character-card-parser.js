@@ -6,6 +6,50 @@ import extract from 'png-chunks-extract';
 import PNGtext from 'png-chunk-text';
 
 /**
+ * @param {string} keyword
+ * @returns {boolean}
+ */
+function isCharacterCardKeyword(keyword) {
+    const normalized = String(keyword || '').toLowerCase();
+    return normalized === 'chara' || normalized === 'ccv3';
+}
+
+/**
+ * Removes SillyTavern character-card metadata chunks from a PNG buffer.
+ * @param {Buffer} image PNG image buffer
+ * @returns {Buffer} PNG image buffer without character metadata
+ */
+export const strip = (image) => {
+    try {
+        const chunks = extract(new Uint8Array(image));
+        let removed = false;
+
+        for (const chunk of [...chunks]) {
+            if (chunk.name !== 'tEXt') {
+                continue;
+            }
+
+            try {
+                const data = PNGtext.decode(chunk.data);
+                if (!isCharacterCardKeyword(data.keyword)) {
+                    continue;
+                }
+
+                chunks.splice(chunks.indexOf(chunk), 1);
+                removed = true;
+            } catch {
+                // Ignore malformed text chunks and preserve the original PNG data.
+            }
+        }
+
+        return removed ? Buffer.from(encode(chunks)) : Buffer.from(image);
+    } catch {
+        // Not a PNG (or not a readable PNG chunk layout); leave the image untouched.
+        return Buffer.from(image);
+    }
+};
+
+/**
  * Writes Character metadata to a PNG image buffer.
  * Writes only 'chara', 'ccv3' is not supported and removed not to create a mismatch.
  * @param {Buffer} image PNG image buffer
@@ -19,7 +63,7 @@ export const write = (image, data) => {
     // Remove existing tEXt chunks
     for (const tEXtChunk of tEXtChunks) {
         const data = PNGtext.decode(tEXtChunk.data);
-        if (data.keyword.toLowerCase() === 'chara' || data.keyword.toLowerCase() === 'ccv3') {
+        if (isCharacterCardKeyword(data.keyword)) {
             chunks.splice(chunks.indexOf(tEXtChunk), 1);
         }
     }
@@ -95,4 +139,3 @@ export const parse = async (cardUrl, format) => {
 
     throw new Error('Unsupported format');
 };
-

@@ -18,6 +18,7 @@ import {
     reloadCurrentChat,
     saveChatConditional,
     saveMetadata,
+    saveSettings,
     saveSettingsDebounced,
     setUserName,
     this_chid,
@@ -76,6 +77,10 @@ let personaLastLoadedChatId = null;
 
 /** @type {function(string): void} */
 let navigateToAvatar = () => { };
+
+async function savePersonaSettingsNow() {
+    await saveSettings();
+}
 
 /**
  * Checks if the Persona Management panel is currently open
@@ -396,7 +401,7 @@ async function changeUserAvatar(e) {
         // If the user uploaded a new avatar, we want to make sure it's not cached
         if (overwriteName && dataPath) {
             await fetch(getUserAvatar(String(dataPath)), { cache: 'reload' });
-            await fetch(getThumbnailUrl('persona', String(dataPath)), { cache: 'reload' });
+            await fetch(getThumbnailUrl('persona', String(dataPath), true), { cache: 'reload' });
             reloadUserAvatar(true);
         }
 
@@ -407,6 +412,10 @@ async function changeUserAvatar(e) {
         }
 
         await getUserAvatars(true, dataPath || overwriteName);
+
+        if (overwriteName || dataPath) {
+            await savePersonaSettingsNow();
+        }
     }
 
     // Will allow to select the same file twice in a row
@@ -429,6 +438,7 @@ export async function createPersona(avatarId) {
     const personaDescription = await Popup.show.input(t`Enter a description for this persona:`, t`You can always add or change it later.`, '', { rows: 4 });
 
     initPersona(avatarId, personaName, personaDescription, '');
+    await savePersonaSettingsNow();
     if (power_user.persona_show_notifications) {
         toastr.success(t`You can now pick ${personaName} as a persona in the Persona Management menu.`, t`Persona Created`);
     }
@@ -455,6 +465,7 @@ async function createDummyPersona() {
     const avatarId = `${Date.now()}-${personaName.replace(/[^a-zA-Z0-9]/g, '')}.png`;
     initPersona(avatarId, personaName, '', personaTitle);
     await uploadUserAvatar(default_user_avatar, avatarId);
+    await savePersonaSettingsNow();
 }
 
 /**
@@ -1797,7 +1808,7 @@ async function duplicatePersona(avatarId) {
 
     await uploadUserAvatar(getUserAvatar(avatarId), newAvatarId);
     await getUserAvatars(true, newAvatarId);
-    saveSettingsDebounced();
+    await savePersonaSettingsNow();
 }
 
 /**

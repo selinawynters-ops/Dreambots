@@ -23,6 +23,7 @@ export async function setUserControls(isEnabled) {
     if (!isEnabled) {
         $('#logout_button').hide();
         $('#admin_button').hide();
+        $('#sync_manager_button').hide();
         return;
     }
 
@@ -70,6 +71,7 @@ async function getCurrentUser() {
 
         currentUser = await response.json();
         $('#admin_button').toggle(accountsEnabled && isAdmin());
+        $('#sync_manager_button').toggle(accountsEnabled && isAdmin());
     } catch (error) {
         console.error('Error getting current user:', error);
     }
@@ -330,6 +332,115 @@ async function changePassword(handle, callback) {
     }
     catch (error) {
         console.error('Error changing password:', error);
+    }
+}
+
+async function setupTwoFactor(handle, callback) {
+    try {
+        let password = '';
+        let code = '';
+
+        const passwordTemplate = $('<form action="javascript:void(0);" class="flex-container flexFlowColumn flexGap10"></form>');
+        passwordTemplate.append('<div>Enter your current password to set up two-factor authentication.</div>');
+        passwordTemplate.append('<input name="password" class="text_pole" type="password" placeholder="Current password" autocomplete="current-password">');
+        passwordTemplate.find('input[name="password"]').on('input', function () {
+            password = String($(this).val());
+        });
+
+        const passwordResult = await callGenericPopup(passwordTemplate, POPUP_TYPE.CONFIRM, '', { okButton: 'Continue', cancelButton: 'Cancel', wide: false, large: false });
+
+        if (passwordResult !== POPUP_RESULT.AFFIRMATIVE) {
+            throw new Error('2FA setup cancelled');
+        }
+
+        const setupResponse = await fetch('/api/users/2fa/setup', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ handle, password }),
+        });
+
+        if (!setupResponse.ok) {
+            const data = await setupResponse.json();
+            toastr.error(data.error || 'Unknown error', 'Failed to set up 2FA');
+            throw new Error('Failed to set up 2FA');
+        }
+
+        const setup = await setupResponse.json();
+        const setupTemplate = $('<form action="javascript:void(0);" class="flex-container flexFlowColumn flexGap10"></form>');
+        setupTemplate.append('<div>Scan this QR code with your authenticator app, or enter the setup key manually. Then enter the 6-digit code.</div>');
+        setupTemplate.append($('<img style="display:block;margin:0 auto;width:200px;height:200px;">').attr('src', setup.qrCodeDataUrl));
+        setupTemplate.append($('<input class="text_pole" type="text" readonly>').val(setup.secret));
+        setupTemplate.append('<input name="code" class="text_pole" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456">');
+        setupTemplate.find('input[name="code"]').on('input', function () {
+            code = String($(this).val());
+        });
+
+        const setupResult = await callGenericPopup(setupTemplate, POPUP_TYPE.CONFIRM, '', { okButton: 'Enable 2FA', cancelButton: 'Cancel', wide: false, large: false });
+
+        if (setupResult !== POPUP_RESULT.AFFIRMATIVE) {
+            throw new Error('2FA setup cancelled');
+        }
+
+        const enableResponse = await fetch('/api/users/2fa/enable', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ handle, password, secret: setup.secret, code }),
+        });
+
+        if (!enableResponse.ok) {
+            const data = await enableResponse.json();
+            toastr.error(data.error || 'Unknown error', 'Failed to enable 2FA');
+            throw new Error('Failed to enable 2FA');
+        }
+
+        const enableData = await enableResponse.json();
+        const backupTemplate = $('<div class="flex-container flexFlowColumn flexGap10"></div>');
+        backupTemplate.append('<div>Save these backup codes now. Each code can be used once if your authenticator is unavailable.</div>');
+        backupTemplate.append($('<textarea class="text_pole" readonly rows="10"></textarea>').val(enableData.backupCodes.join('\n')));
+        await callGenericPopup(backupTemplate, POPUP_TYPE.TEXT, '', { okButton: 'Done', wide: false, large: false });
+        toastr.success('Two-factor authentication enabled', '2FA Enabled');
+        callback();
+    } catch (error) {
+        console.error('Error setting up 2FA:', error);
+    }
+}
+
+async function disableTwoFactor(handle, callback) {
+    try {
+        let password = '';
+        const isSelf = currentUser?.handle === handle;
+        const template = $('<form action="javascript:void(0);" class="flex-container flexFlowColumn flexGap10"></form>');
+        template.append('<div>Disable two-factor authentication for this account?</div>');
+
+        if (isSelf) {
+            template.append('<input name="password" class="text_pole" type="password" placeholder="Current password" autocomplete="current-password">');
+            template.find('input[name="password"]').on('input', function () {
+                password = String($(this).val());
+            });
+        }
+
+        const result = await callGenericPopup(template, POPUP_TYPE.CONFIRM, '', { okButton: 'Disable 2FA', cancelButton: 'Cancel', wide: false, large: false });
+
+        if (result !== POPUP_RESULT.AFFIRMATIVE) {
+            throw new Error('2FA disable cancelled');
+        }
+
+        const response = await fetch('/api/users/2fa/disable', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ handle, password }),
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            toastr.error(data.error || 'Unknown error', 'Failed to disable 2FA');
+            throw new Error('Failed to disable 2FA');
+        }
+
+        toastr.success('Two-factor authentication disabled', '2FA Disabled');
+        callback();
+    } catch (error) {
+        console.error('Error disabling 2FA:', error);
     }
 }
 
@@ -680,6 +791,8 @@ async function openUserProfile() {
     template.find('.userCreated').text(new Date(currentUser.created).toLocaleString());
     template.find('.hasPassword').toggle(currentUser.password);
     template.find('.noPassword').toggle(!currentUser.password);
+    template.find('.twoFactorStatus').text(currentUser.twoFactorEnabled ? 'Enabled' : 'Disabled');
+    template.find('.userTwoFactorButtonText').text(currentUser.twoFactorEnabled ? 'Disable 2FA' : 'Set Up 2FA');
     template.find('.userSettingsSnapshotsButton').on('click', () => viewSettingsSnapshots());
     template.find('.userChangeNameButton').on('click', async () => changeName(currentUser.handle, currentUser.name, async () => {
         await getCurrentUser();
@@ -690,6 +803,21 @@ async function openUserProfile() {
         template.find('.hasPassword').toggle(currentUser.password);
         template.find('.noPassword').toggle(!currentUser.password);
     }));
+    template.find('.userTwoFactorButton').on('click', () => {
+        if (currentUser.twoFactorEnabled) {
+            disableTwoFactor(currentUser.handle, async () => {
+                await getCurrentUser();
+                template.find('.twoFactorStatus').text(currentUser.twoFactorEnabled ? 'Enabled' : 'Disabled');
+                template.find('.userTwoFactorButtonText').text(currentUser.twoFactorEnabled ? 'Disable 2FA' : 'Set Up 2FA');
+            });
+        } else {
+            setupTwoFactor(currentUser.handle, async () => {
+                await getCurrentUser();
+                template.find('.twoFactorStatus').text(currentUser.twoFactorEnabled ? 'Enabled' : 'Disabled');
+                template.find('.userTwoFactorButtonText').text(currentUser.twoFactorEnabled ? 'Disable 2FA' : 'Set Up 2FA');
+            });
+        }
+    });
     template.find('.userBackupButton').on('click', function () {
         $(this).addClass('disabled');
         backupUserData(currentUser.handle, () => {
@@ -789,12 +917,15 @@ async function openAdminPanel() {
             userBlock.find('.avatar img').attr('src', user.avatar);
             userBlock.find('.hasPassword').toggle(user.password);
             userBlock.find('.noPassword').toggle(!user.password);
+            userBlock.find('.hasTwoFactor').toggle(user.twoFactorEnabled);
+            userBlock.find('.noTwoFactor').toggle(!user.twoFactorEnabled);
             userBlock.find('.userCreated').text(new Date(user.created).toLocaleString());
             userBlock.find('.userEnableButton').toggle(!user.enabled).on('click', () => enableUser(user.handle, renderUsers));
             userBlock.find('.userDisableButton').toggle(user.enabled).on('click', () => disableUser(user.handle, renderUsers));
             userBlock.find('.userPromoteButton').toggle(!user.admin).on('click', () => promoteUser(user.handle, renderUsers));
             userBlock.find('.userDemoteButton').toggle(user.admin).on('click', () => demoteUser(user.handle, renderUsers));
             userBlock.find('.userChangePasswordButton').on('click', () => changePassword(user.handle, renderUsers));
+            userBlock.find('.userDisableTwoFactorButton').toggle(user.twoFactorEnabled).on('click', () => disableTwoFactor(user.handle, renderUsers));
             userBlock.find('.userDelete').on('click', () => deleteUser(user.handle, renderUsers));
             userBlock.find('.userChangeNameButton').on('click', async () => changeName(user.handle, user.name, renderUsers));
             userBlock.find('.userBackupButton').on('click', function () {
@@ -921,6 +1052,9 @@ jQuery(() => {
     });
     $('#admin_button').on('click', () => {
         openAdminPanel();
+    });
+    $('#sync_manager_button').on('click', () => {
+        window.open('/admin-sync.html', '_blank');
     });
     $('#account_button').on('click', () => {
         openUserProfile();

@@ -2726,6 +2726,37 @@ export function textValueMatcher(params, data) {
 }
 
 /**
+ * Provides a matcher function for select2 that matches options whose text or value STARTS WITH the search term.
+ * Children groups are recursively filtered; a group is included if any child matches.
+ * @param {import('select2').SearchOptions} params
+ * @param {import('select2').OptGroupData|import('select2').OptionData} data
+ * @return {import('select2').OptGroupData|import('select2').OptionData|null}
+ */
+export function startsWithMatcher(params, data) {
+    if (params.term == null || params.term.trim() === '') {
+        return data;
+    }
+
+    if (data.children && data.children.length > 0) {
+        const match = $.extend(true, {}, data);
+        for (let c = data.children.length - 1; c >= 0; c--) {
+            if (startsWithMatcher(params, data.children[c]) == null) {
+                match.children.splice(c, 1);
+            }
+        }
+        if (match.children.length > 0) {
+            return match;
+        }
+        return startsWithMatcher(params, match);
+    }
+
+    const textMatch = compareIgnoreCaseAndAccents(data.text, params.term, (a, b) => a.startsWith(b));
+    const valueMatch = data.element instanceof HTMLOptionElement && compareIgnoreCaseAndAccents(data.element.value, params.term, (a, b) => a.startsWith(b));
+
+    return (textMatch || valueMatch) ? data : null;
+}
+
+/**
  * Compares two version numbers, returning true if srcVersion >= minVersion
  * @param {string} srcVersion The current version.
  * @param {string} minVersion The target version number to test against

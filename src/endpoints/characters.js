@@ -46,11 +46,11 @@ import mime from 'mime-types';
 import { Jimp, JimpMime } from '../jimp.js';
 import storage from 'node-persist';
 
-import { AVATAR_WIDTH, AVATAR_HEIGHT, DEFAULT_AVATAR_PATH } from '../constants.js';
+import { AVATAR_WIDTH, AVATAR_HEIGHT, DEFAULT_AVATAR_PATH, DEFAULT_USER } from '../constants.js';
 import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { deepMerge, humanizedDateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements } from '../util.js';
 import { TavernCardValidator } from '../validator/TavernCardValidator.js';
-import { parse, read, write } from '../character-card-parser.js';
+import { parse, read, strip as stripCharacterMetadata, write } from '../character-card-parser.js';
 import { readWorldInfoFile, readPushManifest } from './worldinfo.js';
 import { invalidateThumbnail } from './thumbnails.js';
 import { importRisuSprites } from './sprites.js';
@@ -100,12 +100,82 @@ function getPushNamespace() {
 const PUSH_NS = getPushNamespace();
 const NS = suffix => `${PUSH_NS}_${suffix}`;
 
+// Track import warnings per request
+const importWarnings = new Map();
+
 function normalizeHandle(value) {
     return String(value || '').trim().toLowerCase();
 }
 
+function getImportWarnings(requestId) {
+    return importWarnings.get(requestId) || [];
+}
+
+function addImportWarning(requestId, warning) {
+    if (!importWarnings.has(requestId)) {
+        importWarnings.set(requestId, []);
+    }
+    importWarnings.get(requestId).push(warning);
+}
+
+function clearImportWarnings(requestId) {
+    importWarnings.delete(requestId);
+}
+
 function isPushedFlag(value) {
     return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+/**
+ * Creates a snapshot backup of a character before operations.
+ * Stores in data/[user]/character-backups/ with timestamp.
+ * @param {string} characterPath Full path to character PNG
+ * @param {string} characterName Name of character
+ */
+async function createCharacterBackup(characterPath, characterName) {
+    try {
+        if (!fs.existsSync(characterPath)) return;
+
+        const userDir = path.dirname(path.dirname(characterPath));
+        const backupDir = path.join(userDir, '.character-backups');
+
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
+        const backupPath = path.join(backupDir, `${characterName}_${timestamp}.png`);
+
+        fs.copyFileSync(characterPath, backupPath);
+        console.info(`[CHARACTER BACKUP] Created backup: ${backupPath}`);
+    } catch (e) {
+        console.warn(`[CHARACTER BACKUP] Failed to backup ${characterName}: ${e.message}`);
+    }
+}
+
+/**
+ * Validates that critical character fields are preserved during import/conversion.
+ * Returns warning if alternate_greetings are being lost.
+ * @param {object} sourceData Original character data from import
+ * @param {object} targetData Character data after conversion
+ * @param {string} characterName Name of the character being imported
+ * @returns {object|null} Warning object with message and severity, or null if no issues
+ */
+function validateCharacterDataIntegrity(sourceData, targetData, characterName) {
+    const sourceIntros = sourceData.alternate_greetings || [];
+    const targetIntros = targetData.alternate_greetings || [];
+
+    if (sourceIntros.length > 0 && targetIntros.length === 0) {
+        const msg = `[CHARACTER INTEGRITY WARNING] ${characterName}: Lost ${sourceIntros.length} alternate intros during import`;
+        console.warn(msg);
+        return { message: msg, severity: 'error', introsLost: sourceIntros.length };
+    } else if (sourceIntros.length > targetIntros.length) {
+        const msg = `[CHARACTER INTEGRITY WARNING] ${characterName}: Reduced intros from ${sourceIntros.length} to ${targetIntros.length}`;
+        console.warn(msg);
+        return { message: msg, severity: 'warning', introsLost: sourceIntros.length - targetIntros.length };
+    }
+
+    return null;
 }
 
 function isExplicitBooleanTrue(value) {
@@ -160,6 +230,43 @@ function shouldPreservePushExtensionKey(key) {
 
     const preservedSuffixes = ['pushed', 'creator', 'original_creator', 'symlink_mode', 'symlink_to', 'symlink_avatar', 'symlink_linked_at', 'master_id', 'source_lorebook', 'source_handle', 'pushed_lorebook_name'];
     return preservedSuffixes.some(suffix => key === suffix || key.endsWith(`_${suffix}`));
+}
+
+function getLinkedLorebooksForCharacter(character) {
+    const ext = character?.data?.extensions || {};
+    const world = String(ext.world || '').trim();
+    const bundleLorebooks = getPushExtensionBySuffix(ext, 'bundle_lorebooks');
+    const auxLorebooks = getPushExtensionBySuffix(ext, 'aux_lorebooks');
+    const normalizeList = (value) => {
+        if (Array.isArray(value)) {
+            return value.map(item => String(item || '').trim()).filter(Boolean);
+        }
+        if (typeof value === 'string') {
+            return value.split(',').map(item => item.trim()).filter(Boolean);
+        }
+        return [];
+    };
+
+    return [...new Set([
+        world,
+        ...normalizeList(bundleLorebooks),
+        ...normalizeList(auxLorebooks),
+    ].filter(Boolean))];
+}
+
+function stripEmbeddedLorebookFromPushedCharacter(character) {
+    if (!character?.data?.character_book) return false;
+
+    const ext = character?.data?.extensions || {};
+    const isPushedCharacter = isPushedFlag(getPushExtensionBySuffix(ext, 'pushed'))
+        || isPushedFlag(getPushExtensionBySuffix(ext, 'symlink_mode'));
+    if (!isPushedCharacter) return false;
+
+    const linkedLorebooks = getLinkedLorebooksForCharacter(character);
+    if (linkedLorebooks.length === 0) return false;
+
+    _.unset(character, 'data.character_book');
+    return true;
 }
 
 /**
@@ -577,6 +684,10 @@ const toShallow = (character) => {
         shallow: true,
         name: character.name,
         avatar: character.avatar,
+        _is_symlink: !!character._is_symlink,
+        _symlink_broken: !!character._symlink_broken,
+        _symlink_to: character._symlink_to || '',
+        _master_version: character._master_version ?? null,
         chat: character.chat,
         fav: character.fav,
         date_added: character.date_added,
@@ -697,6 +808,8 @@ const processCharacter = async (item, directories, { shallow }) => {
             }
         }
 
+        stripEmbeddedLorebookFromPushedCharacter(jsonObject);
+
         jsonObject.avatar = item;
         const character = jsonObject;
         character['json_data'] = imgData;
@@ -774,7 +887,7 @@ function convertToV2(char, directories) {
         depth_prompt_role: char.depth_prompt_role,
     }, directories);
 
-    result.chat = char.chat ?? `${char.name} - ${humanizedDateTime()}`;
+    result.chat = char.chat;  // Don't auto-generate chat names on load - prevents creating new chats on restart
     result.create_date = char.create_date;
 
     return result;
@@ -787,6 +900,76 @@ function unsetPrivateFields(char) {
     _.set(char, 'fav', false);
     _.set(char, 'data.extensions.fav', false);
     _.unset(char, 'chat');
+}
+
+/**
+ * Removes lorebook and push/symlink fields from exported cards so image downloads
+ * cannot expose linked lorebooks or the original share wiring.
+ * @param {any} char
+ */
+function unsetExportFields(char) {
+    unsetPrivateFields(char);
+    _.unset(char, 'data.character_book');
+    _.unset(char, 'data.extensions.world');
+
+    const extensions = _.get(char, 'data.extensions');
+    if (!extensions || typeof extensions !== 'object') {
+        return;
+    }
+
+    for (const key of Object.keys(extensions)) {
+        if (
+            key.startsWith('dreamtavern_')
+            || key.startsWith('sillytavern_')
+        ) {
+            delete extensions[key];
+        }
+    }
+}
+
+/**
+ * Removes private/push metadata while preserving (or embedding) lorebook content.
+ * @param {any} char
+ * @param {import('../users.js').UserDirectoryList} directories
+ */
+function unsetExportFieldsKeepLorebook(char, directories) {
+    unsetPrivateFields(char);
+
+    const worldName = String(_.get(char, 'data.extensions.world') || '').trim();
+    const hasCharacterBook = !!_.get(char, 'data.character_book');
+
+    if (!hasCharacterBook && worldName) {
+        try {
+            const worldData = readWorldInfoFile(directories, worldName, true);
+            if (worldData?.entries && typeof worldData.entries === 'object') {
+                _.set(char, 'data.character_book', convertWorldInfoToCharacterBook(worldName, worldData.entries));
+            }
+        } catch (error) {
+            console.warn(`[Export] Failed to embed lorebook "${worldName}":`, error?.message || error);
+        }
+    }
+
+    const extensions = _.get(char, 'data.extensions');
+    if (!extensions || typeof extensions !== 'object') {
+        return;
+    }
+
+    for (const key of Object.keys(extensions)) {
+        if (
+            key.startsWith('dreamtavern_')
+            || key.startsWith('sillytavern_')
+        ) {
+            delete extensions[key];
+        }
+    }
+}
+
+/**
+ * @param {import('express').Request} request
+ * @returns {boolean}
+ */
+function shouldBypassExportSanitization(request) {
+    return request?.user?.profile?.handle === DEFAULT_USER.handle;
 }
 
 function readFromV2(char) {
@@ -839,7 +1022,8 @@ function readFromV2(char) {
         char[charField] = v2Value;
     });
 
-    char['chat'] = char['chat'] ?? `${char.name} - ${humanizedDateTime()}`;
+    // Don't auto-generate chat names - only use existing ones
+    // char['chat'] = char['chat'] ?? `${char.name} - ${humanizedDateTime()}`;
 
     return char;
 }
@@ -875,7 +1059,8 @@ function charaFormatData(data, directories) {
     // Old ST extension fields (for backward compatibility, will be deprecated)
     _.set(char, 'creatorcomment', data.creator_notes || '');
     _.set(char, 'avatar', 'none');
-    _.set(char, 'chat', data.ch_name + ' - ' + humanizedDateTime());
+    // Don't auto-generate chat names - use empty string to preserve existing behavior without creating new chats
+    _.set(char, 'chat', '');
     _.set(char, 'talkativeness', data.talkativeness || 0.5);
     _.set(char, 'fav', data.fav == 'true');
     _.set(char, 'tags', typeof data.tags == 'string' ? (data.tags.split(',').map(x => x.trim()).filter(x => x)) : data.tags || []);
@@ -1176,11 +1361,12 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
  * @param {string} uploadPath Path to the uploaded file
  * @param {{ request: import('express').Request, response: import('express').Response }} context Express request and response objects
  * @param {string|undefined} preservedFileName Preserved file name
- * @returns {Promise<string>} Internal name of the character
+ * @returns {Promise<{fileName: string, warnings: Array}>} Result with filename and any warnings
  */
 async function importFromJson(uploadPath, { request }, preservedFileName) {
     const data = fs.readFileSync(uploadPath, 'utf8');
     fs.unlinkSync(uploadPath);
+    const warnings = [];
 
     let jsonData = JSON.parse(data);
 
@@ -1208,18 +1394,21 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
             'personality': jsonData.personality ?? '',
             'first_mes': jsonData.first_mes ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedDateTime(),
+            'chat': '',  // Don't auto-generate chat names on import
             'mes_example': jsonData.mes_example ?? '',
             'scenario': jsonData.scenario ?? '',
             'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
+            'alternate_greetings': jsonData.alternate_greetings ?? [],
         };
+        const warning = validateCharacterDataIntegrity(jsonData, char, jsonData.name);
+        if (warning) warnings.push(warning);
         char = convertToV2(char, request.user.directories);
         let charJSON = JSON.stringify(char);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        return result ? pngName : '';
+        return { fileName: result ? pngName : '', warnings };
     } else if (jsonData.char_name !== undefined) {//json Pygmalion notepad
         console.info('Importing from gradio json');
         jsonData.char_name = sanitize(jsonData.char_name);
@@ -1234,21 +1423,24 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
             'personality': '',
             'first_mes': jsonData.char_greeting ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedDateTime(),
+            'chat': '',  // Don't auto-generate chat names on import
             'mes_example': jsonData.example_dialogue ?? '',
             'scenario': jsonData.world_scenario ?? '',
             'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
+            'alternate_greetings': jsonData.alternate_greetings ?? [],
         };
+        const warning = validateCharacterDataIntegrity(jsonData, char, jsonData.char_name);
+        if (warning) warnings.push(warning);
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        return result ? pngName : '';
+        return { fileName: result ? pngName : '', warnings };
     }
 
-    return '';
+    return { fileName: '', warnings };
 }
 
 /**
@@ -1256,11 +1448,12 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
  * @param {string} uploadPath Path to the uploaded file
  * @param {{ request: import('express').Request, response: import('express').Response }} context Express request and response objects
  * @param {string|undefined} preservedFileName Preserved file name
- * @returns {Promise<string>} Internal name of the character
+ * @returns {Promise<{fileName: string, warnings: Array}>} Result with filename and any warnings
  */
 async function importFromPng(uploadPath, { request }, preservedFileName) {
     const imgData = await readCharacterData(uploadPath);
     if (imgData === undefined) throw new Error('Failed to read character data');
+    const warnings = [];
 
     let jsonData = JSON.parse(imgData);
 
@@ -1276,7 +1469,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(uploadPath, char, pngName, request);
         fs.unlinkSync(uploadPath);
-        return result ? pngName : '';
+        return { fileName: result ? pngName : '', warnings };
     } else if (jsonData.name !== undefined) {
         console.info('Found a v1 character file.');
 
@@ -1291,22 +1484,25 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
             'personality': jsonData.personality ?? '',
             'first_mes': jsonData.first_mes ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedDateTime(),
+            'chat': '',  // Don't auto-generate chat names on import
             'mes_example': jsonData.mes_example ?? '',
             'scenario': jsonData.scenario ?? '',
             'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
+            'alternate_greetings': jsonData.alternate_greetings ?? [],
         };
+        const warning = validateCharacterDataIntegrity(jsonData, char, jsonData.name);
+        if (warning) warnings.push(warning);
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
         const result = await writeCharacterData(uploadPath, charJSON, pngName, request);
         fs.unlinkSync(uploadPath);
-        return result ? pngName : '';
+        return { fileName: result ? pngName : '', warnings };
     }
 
-    return '';
+    return { fileName: '', warnings };
 }
 
 /**
@@ -1510,12 +1706,17 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
             const shouldPreserveExistingWorld = existingWorld
                 && ((!newWorld && !explicitUnlinkRequested) || (explicitUnlinkRequested && !canEditAdvanced));
 
+            console.log(`[World Guard] ${request.body.avatar_url}: existingWorld=${existingWorld}, newWorld=${newWorld}, explicitUnlink=${explicitUnlinkRequested}, canEditAdvanced=${canEditAdvanced}, isPushed=${isPushed}, preserve=${shouldPreserveExistingWorld}`);
+
             if (shouldPreserveExistingWorld) {
+                console.log(`[World Guard] Preserving existing world: ${existingWorld}`);
                 _.set(charObj, 'data.extensions.world', existingWorld);
             }
 
             if (isPushed) {
-                if (!newWorld && existingWorld) {
+                // For pushed characters, only preserve the world if unlink was NOT explicitly requested
+                if (!newWorld && existingWorld && !explicitUnlinkRequested) {
+                    console.log(`[World Guard] Pushed character: preserving existing world: ${existingWorld}`);
                     _.set(charObj, 'data.extensions.world', existingWorld);
                 }
                 // Also preserve push/symlink metadata that the client may omit on save.
@@ -1535,18 +1736,23 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
     }
 
     try {
+        let writeSuccess = false;
         if (!request.file) {
             const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
-            await writeCharacterData(avatarPath, char, targetFile, request);
+            writeSuccess = await writeCharacterData(avatarPath, char, targetFile, request);
         } else {
             const crop = tryParse(request.query.crop);
             const newAvatarPath = path.join(request.file.destination, request.file.filename);
             invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
-            await writeCharacterData(newAvatarPath, char, targetFile, request, crop);
-            fs.unlinkSync(newAvatarPath);
+            writeSuccess = await writeCharacterData(newAvatarPath, char, targetFile, request, crop);
+            try { fs.unlinkSync(newAvatarPath); } catch { /* already cleaned */ }
 
             // Bust cache to reload the new avatar
             cacheBuster.bust(request, response);
+        }
+
+        if (!writeSuccess) {
+            return response.status(500).json({ error: 'Failed to write character data to disk. Please try again.' });
         }
 
         // ── One-way character sync (fire-and-forget) ──
@@ -1554,7 +1760,7 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
         // the edit to every recipient who still has the file.
         const avatarFilename = request.body.avatar_url;
         const syncCreatorHandle = request.user.profile.handle;
-        setImmediate(() => {
+        setImmediate(async () => {
             try {
                 const manifest = readPushManifest(syncCreatorHandle);
                 const records = manifest.filter(r =>
@@ -1635,14 +1841,29 @@ router.post('/edit', validateAvatarUrlMiddleware, async function (request, respo
                         if (pushedLorebookName !== undefined) {
                             synced.data.extensions[NS('pushed_lorebook_name')] = pushedLorebookName;
                         }
+                        const bundleLorebooks = getPushExtensionBySuffix(recipExt, 'bundle_lorebooks');
+                        if (bundleLorebooks !== undefined) {
+                            synced.data.extensions[NS('bundle_lorebooks')] = bundleLorebooks;
+                        }
+                        const auxLorebooks = getPushExtensionBySuffix(recipExt, 'aux_lorebooks');
+                        if (auxLorebooks !== undefined) {
+                            synced.data.extensions[NS('aux_lorebooks')] = auxLorebooks;
+                        }
                         const sourceHandle = getPushExtensionBySuffix(recipExt, 'source_handle');
                         if (sourceHandle !== undefined) {
                             synced.data.extensions[NS('source_handle')] = sourceHandle;
                         }
 
-                        // Write updated PNG
+                        stripEmbeddedLorebookFromPushedCharacter(synced);
+
+                        // Write updated PNG (atomically to prevent corruption)
                         const updatedPng = write(recipBuf, JSON.stringify(synced));
-                        fs.writeFileSync(destPath, updatedPng);
+                        try {
+                            await writeFileAtomic(destPath, updatedPng);
+                        } catch (writeErr) {
+                            console.error(`[Sync] Failed to write character to ${recipient}:`, writeErr.message);
+                            throw writeErr;
+                        }
 
                         // Invalidate caches for this recipient
                         for (const key of memoryCache.keys()) {
@@ -2000,7 +2221,9 @@ router.post('/import', async function (request, response) {
             throw new Error(`Unsupported format: ${format}`);
         }
 
-        const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
+        const importResult = await importFunction(uploadPath, { request, response }, preservedFileName);
+        const fileName = typeof importResult === 'string' ? importResult : importResult?.fileName;
+        const warnings = typeof importResult === 'object' ? importResult?.warnings : [];
 
         if (!fileName) {
             console.warn('Failed to import character');
@@ -2011,7 +2234,7 @@ router.post('/import', async function (request, response) {
             invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
         }
 
-        response.send({ file_name: fileName });
+        response.send({ file_name: fileName, warnings: warnings || [] });
     } catch (err) {
         console.error(err);
         response.send({ error: true });
@@ -2081,12 +2304,26 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
             return response.sendStatus(404);
         }
 
+        const includeLorebook = isExplicitBooleanTrue(request.body.include_lorebook);
+
         switch (request.body.format) {
             case 'png': {
                 const rawBuffer = await fsPromises.readFile(filename);
+                if (shouldBypassExportSanitization(request)) {
+                    const contentType = mime.lookup(filename) || 'image/png';
+                    response.setHeader('Content-Type', contentType);
+                    response.setHeader('Content-Disposition', `attachment; filename="${encodeURI(path.basename(filename))}"`);
+                    return response.send(rawBuffer);
+                }
+
                 const rawData = read(rawBuffer);
-                const mutatedData = mutateJsonString(rawData, unsetPrivateFields);
-                const mutatedBuffer = write(rawBuffer, mutatedData);
+                const mutatedData = mutateJsonString(
+                    rawData,
+                    includeLorebook
+                        ? char => unsetExportFieldsKeepLorebook(char, request.user.directories)
+                        : unsetExportFields,
+                );
+                const mutatedBuffer = write(stripCharacterMetadata(rawBuffer), mutatedData);
                 const contentType = mime.lookup(filename) || 'image/png';
                 response.setHeader('Content-Type', contentType);
                 response.setHeader('Content-Disposition', `attachment; filename="${encodeURI(path.basename(filename))}"`);
@@ -2097,7 +2334,15 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
                     const json = await readCharacterData(filename);
                     if (json === undefined) return response.sendStatus(400);
                     const jsonObject = getCharaCardV2(JSON.parse(json), request.user.directories);
-                    unsetPrivateFields(jsonObject);
+                    if (shouldBypassExportSanitization(request)) {
+                        return response.type('json').send(JSON.stringify(jsonObject, null, 4));
+                    }
+
+                    if (includeLorebook) {
+                        unsetExportFieldsKeepLorebook(jsonObject, request.user.directories);
+                    } else {
+                        unsetExportFields(jsonObject);
+                    }
                     return response.type('json').send(JSON.stringify(jsonObject, null, 4));
                 }
                 catch {

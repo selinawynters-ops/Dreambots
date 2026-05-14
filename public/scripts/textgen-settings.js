@@ -16,6 +16,7 @@ import {
 } from '../script.js';
 import { deriveTemplatesFromChatTemplate } from './chat-templates.js';
 import { t } from './i18n.js';
+import { clearServerHiddenLoreActivations, emitServerHiddenLoreActivations, getServerHiddenLoreActivationsFromResponse } from './world-info.js';
 import { autoSelectInstructPreset, selectContextPreset, selectInstructPreset } from './instruct-mode.js';
 import { BIAS_CACHE, createNewLogitBiasEntry, displayLogitBias, getLogitBiasListResult } from './logit-bias.js';
 
@@ -1270,6 +1271,13 @@ export async function generateTextGenWithStreaming(generate_data, signal) {
     if (!response.ok) {
         tryParseStreamingError(response, await response.text());
         throw new Error(`Got response status ${response.status}`);
+    }
+
+    const hiddenLoreActivations = getServerHiddenLoreActivationsFromResponse(response);
+    if (hiddenLoreActivations.length) {
+        await emitServerHiddenLoreActivations(hiddenLoreActivations);
+    } else {
+        clearServerHiddenLoreActivations();
     }
 
     const eventStream = getEventSourceStream();

@@ -2,37 +2,509 @@
  * ============================================================================
  * DREAMTAVERN CUSTOMIZATION - Custom Fonts
  * ============================================================================
- * 
- * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
- * 
- * 1. CUSTOM WEB FONTS:
- *    - "Beau Rivage" - Elegant script font (Beau-Rivage-regular.woff)
- *    - "Bilbo Swash" - Decorative swash caps (Bilbo-Swash-Caps-regular.woff)
- *    - "Island Moments" - Stylized display font (Island-Moments-regular.woff)
- * 
- * 2. FONT USAGE:
- *    - Used for branding, headings, and thematic UI elements
- *    - Enhances fantasy/dream aesthetic of DreamTavern
- *    - Fonts stored in public/fonts/ directory
- * 
- * 3. INTEGRATION:
- *    - Loaded via @font-face declarations
- *    - Available throughout application via CSS
- * 
+ *
+ * All 71 fonts from public/fonts/ directory available for user selection
+ * Font-family names use the "value" field from API (with hyphens/underscores)
+ * Generated: 2026-04-06
+ *
  * ============================================================================
  */
+
+/* Generated @font-face declarations from API - names must match font.value */
+
 @font-face {
-      font-family: "Beau Rivage";
-        src: url('/fonts/Beau-Rivage-regular.woff') format('woff');
-        }
+  font-family: "AlexandriaFLF-Bold";
+  src: url("/fonts/AlexandriaFLF-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
 
-        @font-face {
-          font-family: "Bilbo Swash";
-            src: url('/fonts/Bilbo-Swash-Caps-regular.woff') format('woff');
-            }
+@font-face {
+  font-family: "AlexandriaFLF-BoldItalic";
+  src: url("/fonts/AlexandriaFLF-BoldItalic.woff") format("woff");
+  font-weight: 700;
+  font-style: italic;
+}
 
-            @font-face {
-              font-family: "Island Moments";
-                src: url('/fonts/Island-Moments-regular.woff') format('woff');
-                }
+@font-face {
+  font-family: "AlexandriaFLF-Italic";
+  src: url("/fonts/AlexandriaFLF-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "AlexandriaFLF";
+  src: url("/fonts/AlexandriaFLF.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Allura-Regular";
+  src: url("/fonts/Allura-Regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Beau-Rivage-regular";
+  src: url("/fonts/Beau-Rivage-regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "BeautifulCreatures";
+  src: url("/fonts/BeautifulCreatures.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Bilbo-Swash-Caps-regular";
+  src: url("/fonts/Bilbo-Swash-Caps-regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "BillionStarsPersonalUse";
+  src: url("/fonts/BillionStarsPersonalUse.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Bridgnorth_Blocked";
+  src: url("/fonts/Bridgnorth_Blocked.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Bridgnorth-Bold";
+  src: url("/fonts/Bridgnorth-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Bridgnorth-Shadow";
+  src: url("/fonts/Bridgnorth-Shadow.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Bridgnorth";
+  src: url("/fonts/Bridgnorth.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "CalligraphyFLF";
+  src: url("/fonts/CalligraphyFLF.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "ChampagneLimousines-Bold";
+  src: url("/fonts/ChampagneLimousines-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "ChampagneLimousines-BoldItalic";
+  src: url("/fonts/ChampagneLimousines-BoldItalic.woff") format("woff");
+  font-weight: 700;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "ChampagneLimousines-Italic";
+  src: url("/fonts/ChampagneLimousines-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "ChampagneLimousines";
+  src: url("/fonts/ChampagneLimousines.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "ChapazaItalic-Italic";
+  src: url("/fonts/ChapazaItalic-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "CyberCaligraphic";
+  src: url("/fonts/CyberCaligraphic.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "DaisukyFancy";
+  src: url("/fonts/DaisukyFancy.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "DragonisComing";
+  src: url("/fonts/DragonisComing.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "DreamOrphans-Bold";
+  src: url("/fonts/DreamOrphans-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "DreamOrphans-BoldItalic";
+  src: url("/fonts/DreamOrphans-BoldItalic.woff") format("woff");
+  font-weight: 700;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "DreamOrphans-Italic";
+  src: url("/fonts/DreamOrphans-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "DreamOrphans";
+  src: url("/fonts/DreamOrphans.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Dukeplus";
+  src: url("/fonts/Dukeplus.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Endor";
+  src: url("/fonts/Endor.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "EndorAlt";
+  src: url("/fonts/EndorAlt.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "EuropeanTypewriter";
+  src: url("/fonts/EuropeanTypewriter.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "GreatVibes-Regular";
+  src: url("/fonts/GreatVibes-Regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Island-Moments-regular";
+  src: url("/fonts/Island-Moments-regular.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JandaSnickerdoodleSerif-Bold";
+  src: url("/fonts/JandaSnickerdoodleSerif-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JandaSnickerdoodleSerif-Italic";
+  src: url("/fonts/JandaSnickerdoodleSerif-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JandaSnickerdoodleSerif";
+  src: url("/fonts/JandaSnickerdoodleSerif.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JosefinSans-Bold";
+  src: url("/fonts/JosefinSans-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JosefinSans-BoldItalic";
+  src: url("/fonts/JosefinSans-BoldItalic.woff") format("woff");
+  font-weight: 700;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JosefinSans-Italic";
+  src: url("/fonts/JosefinSans-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JosefinSans-Light";
+  src: url("/fonts/JosefinSans-Light.woff") format("woff");
+  font-weight: 300;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JosefinSans-LightItalic";
+  src: url("/fonts/JosefinSans-LightItalic.woff") format("woff");
+  font-weight: 300;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JosefinSans-SemiBold";
+  src: url("/fonts/JosefinSans-SemiBold.woff") format("woff");
+  font-weight: 600;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JosefinSans-SemiBoldItalic";
+  src: url("/fonts/JosefinSans-SemiBoldItalic.woff") format("woff");
+  font-weight: 600;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JosefinSans-Thin";
+  src: url("/fonts/JosefinSans-Thin.woff") format("woff");
+  font-weight: 100;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "JosefinSans-ThinItalic";
+  src: url("/fonts/JosefinSans-ThinItalic.woff") format("woff");
+  font-weight: 100;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "JosefinSans";
+  src: url("/fonts/JosefinSans.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Madina";
+  src: url("/fonts/Madina.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Michaelmas";
+  src: url("/fonts/Michaelmas.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "MiltonOne";
+  src: url("/fonts/MiltonOne.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "MiltonOneBold";
+  src: url("/fonts/MiltonOneBold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrinceValiant";
+  src: url("/fonts/PrinceValiant.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintBold";
+  src: url("/fonts/PrintBold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintBoldOT";
+  src: url("/fonts/PrintBoldOT.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintClearly";
+  src: url("/fonts/PrintClearly.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintClearlyOT";
+  src: url("/fonts/PrintClearlyOT.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintDashed";
+  src: url("/fonts/PrintDashed.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PrintDashedOT";
+  src: url("/fonts/PrintDashedOT.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-Bold";
+  src: url("/fonts/Raleway-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-ExtraBold";
+  src: url("/fonts/Raleway-ExtraBold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-ExtraLight";
+  src: url("/fonts/Raleway-ExtraLight.woff") format("woff");
+  font-weight: 300;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-Heavy";
+  src: url("/fonts/Raleway-Heavy.woff") format("woff");
+  font-weight: 900;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-Light";
+  src: url("/fonts/Raleway-Light.woff") format("woff");
+  font-weight: 300;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-Medium";
+  src: url("/fonts/Raleway-Medium.woff") format("woff");
+  font-weight: 500;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-SemiBold";
+  src: url("/fonts/Raleway-SemiBold.woff") format("woff");
+  font-weight: 600;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway-Thin";
+  src: url("/fonts/Raleway-Thin.woff") format("woff");
+  font-weight: 100;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Raleway";
+  src: url("/fonts/Raleway.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Scriptina-Alternates";
+  src: url("/fonts/Scriptina-Alternates.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Scriptina";
+  src: url("/fonts/Scriptina.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "UptownElegance-Bold";
+  src: url("/fonts/UptownElegance-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "UptownElegance-BoldItalic";
+  src: url("/fonts/UptownElegance-BoldItalic.woff") format("woff");
+  font-weight: 700;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "UptownElegance-Italic";
+  src: url("/fonts/UptownElegance-Italic.woff") format("woff");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "UptownElegance";
+  src: url("/fonts/UptownElegance.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
 }

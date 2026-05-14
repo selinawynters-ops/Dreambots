@@ -48,6 +48,12 @@ import {
     initWorldInfo,
     charUpdatePrimaryWorld,
     charSetAuxWorlds,
+    getLorebookDropdownDisplayName,
+    isHiddenPushedLorebookForDropdown,
+    ensurePushedLoreBookLinked,
+    emitServerHiddenLoreActivations,
+    getServerHiddenLoreActivationsFromResponse,
+    clearServerHiddenLoreActivations,
 } from './scripts/world-info.js';
 
 import {
@@ -323,6 +329,8 @@ export {
     setCharacterSettingsOverrides as setScenarioOverride,
     /** @deprecated Use appendMediaToMessage instead. */
     appendMediaToMessage as appendImageToMessage,
+    isCharacterDefinitionLocked,
+    applyCharacterDefinitionLockState,
 };
 
 /**
@@ -605,6 +613,91 @@ var css_send_form_display = $('<div id=send_form></div>').css('display');
 var kobold_horde_model = '';
 
 export let token;
+let csrfRefreshPromise = null;
+
+async function refreshCsrfToken() {
+    if (!csrfRefreshPromise) {
+        csrfRefreshPromise = window.fetch('/csrf-token', { cache: 'no-cache' })
+            .then(async response => {
+                if (!response.ok) {
+                    throw new Error('Failed to refresh CSRF token');
+                }
+
+                const data = await response.json();
+                token = data.token;
+                return token;
+            })
+            .finally(() => {
+                csrfRefreshPromise = null;
+            });
+    }
+
+    return csrfRefreshPromise;
+}
+
+function isSameOriginUrl(input) {
+    try {
+        const url = input instanceof Request ? input.url : String(input);
+        return new URL(url, window.location.href).origin === window.location.origin;
+    } catch {
+        return false;
+    }
+}
+
+function getFetchMethod(input, init) {
+    return String(init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+}
+
+function shouldRetryWithFreshCsrf(input, init, response) {
+    const method = getFetchMethod(input, init);
+    return response.status === 403
+        && isSameOriginUrl(input)
+        && !String(input instanceof Request ? input.url : input).includes('/csrf-token')
+        && !['GET', 'HEAD', 'OPTIONS'].includes(method);
+}
+
+async function responseLooksLikeCsrfFailure(response) {
+    try {
+        const text = await response.clone().text();
+        return text.includes('Invalid CSRF token');
+    } catch {
+        return false;
+    }
+}
+
+function withFreshCsrfHeader(input, init) {
+    const nextInit = { ...(init || {}) };
+    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+    headers.set('X-CSRF-Token', token);
+    nextInit.headers = headers;
+
+    if (input instanceof Request) {
+        return [new Request(input, nextInit), undefined];
+    }
+
+    return [input, nextInit];
+}
+
+const nativeFetch = window.fetch.bind(window);
+
+window.fetch = async function fetchWithCsrfRefresh(input, init) {
+    const retryInput = input instanceof Request ? input.clone() : input;
+    const retryInit = init ? { ...init } : init;
+    const response = await nativeFetch(input, init);
+
+    if (!shouldRetryWithFreshCsrf(input, init, response) || !(await responseLooksLikeCsrfFailure(response))) {
+        return response;
+    }
+
+    try {
+        await refreshCsrfToken();
+        const [freshInput, freshInit] = withFreshCsrfHeader(retryInput, retryInit);
+        return await nativeFetch(freshInput, freshInit);
+    } catch (error) {
+        console.warn('Failed to refresh CSRF token after request was rejected', error);
+        return response;
+    }
+};
 
 
 /** The tag of the active character. (NOT the id) */
@@ -759,8 +852,10 @@ export function displayOnlineStatus() {
         $('.online_status_indicator').removeClass('success');
         $('.online_status_text').text($('#API-status-top').attr('no_connection_text'));
     } else {
+        const selectedModel = getGeneratingModel();
+        const statusText = selectedModel || online_status;
         $('.online_status_indicator').addClass('success');
-        $('.online_status_text').text(online_status);
+        $('.online_status_text').text(statusText).attr('title', online_status);
     }
 }
 
@@ -831,6 +926,10 @@ export async function selectCharacterById(id, { switchMenu = true } = {}) {
         return;
     }
 
+    // Reset lorebook fields immediately to prevent stale unlink state from persisting
+    $('#character_world').val('');
+    $('#character_world_unlink').val('');
+
     if (selected_group || String(this_chid) !== String(id)) {
         //if clicked on a different character from what was currently selected
         if (!is_send_press) {
@@ -842,7 +941,25 @@ export async function selectCharacterById(id, { switchMenu = true } = {}) {
             setCharacterId(id);
             chat.length = 0;
             chat_metadata = {};
-            await getChat();
+
+            // Load the full character before deciding which chat to open so the
+            // editor and chat loader use the same source of truth.
+            await unshallowCharacter(id);
+
+            // Verify the character's stored chat still exists; fall back to most-recent if it was deleted
+            const existingChats = await getPastCharacterChats(id);
+            const storedChat = characters[id].chat;
+            const storedChatExists = storedChat && existingChats.some(c => c.file_name.replace('.jsonl', '') === storedChat);
+
+            if (!storedChatExists && existingChats.length > 0) {
+                // Stored chat is missing — fall back to the most recently used by timestamp
+                const sorted = [...existingChats].sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
+                characters[id].chat = sorted[0].file_name.replace('.jsonl', '');
+            }
+
+            // Populate the character form only after the final chat target has been resolved.
+            select_selected_character(id, { switchMenu });
+            await getChat({ fileName: characters[id].chat });
         }
     } else {
         //if clicked on character that was already selected
@@ -923,6 +1040,16 @@ function getCharacterBlock(item, id) {
     // Display inline tags
     const tagsElement = template.find('.tags');
     printTagList(tagsElement, { forEntityOrKey: id, tagOptions: { isCharacterList: true } });
+
+    // ── True-Symlink badge ──
+    if (item._is_symlink) {
+        const badgeClass = item._symlink_broken ? 'symlink-badge symlink-broken' : 'symlink-badge';
+        const badgeTitle = item._symlink_broken ? 'Broken link — using cached copy' : 'Auto-synced from creator';
+        const badgeIcon = item._symlink_broken ? 'fa-link-slash' : 'fa-link';
+        template.find('.avatar').append(
+            `<div class="${badgeClass}" title="${badgeTitle}"><i class="fa-solid ${badgeIcon}"></i></div>`,
+        );
+    }
 
     // Add to the list
     return template;
@@ -1179,6 +1306,15 @@ export async function getOneCharacter(avatarUrl) {
         getData['name'] = DOMPurify.sanitize(getData['name']);
         getData['chat'] = String(getData['chat']);
 
+        // True-Symlink: warn if the master copy was deleted
+        if (getData['_symlink_broken']) {
+            toastr.warning(
+                'The original character may have been moved or deleted by its creator. Using cached copy.',
+                'Broken Link',
+                { timeOut: 8000, preventDuplicates: true },
+            );
+        }
+
         const indexOf = characters.findIndex(x => x.avatar === avatarUrl);
 
         if (indexOf !== -1) {
@@ -1423,13 +1559,21 @@ export async function printMessages() {
         chatElement.append('<div id="show_more_messages">Show more messages</div>');
     }
 
+    // Disable class updates in individual addOneMessage calls for performance
+    window._skipMessageClassUpdate = true;
     for (let i = startIndex; i < chat.length; i++) {
         const item = chat[i];
         addOneMessage(item, { scroll: false, forceId: i, showSwipes: false });
     }
+    window._skipMessageClassUpdate = false;
 
-    chatElement.find('.mes').removeClass('last_mes');
-    chatElement.find('.mes').last().addClass('last_mes');
+    // Update last_mes class only once after all messages are added (much faster on mobile)
+    const mesElements = document.querySelectorAll('.mes');
+    mesElements.forEach(el => el.classList.remove('last_mes'));
+    if (mesElements.length > 0) {
+        mesElements[mesElements.length - 1].classList.add('last_mes');
+    }
+
     refreshSwipeButtons(false, false);
     applyStylePins();
     scrollChatToBottom({ waitForFrame: true });
@@ -1885,7 +2029,7 @@ function getMessageFromTemplate({
         'mesid': mesId,
         'swipeid': swipeId,
         'ch_name': characterName,
-        'is_user': isUser,
+        'is_user': !!isUser,
         'is_system': !!isSystem,
         'bookmark_link': bookmarkLink,
         'force_avatar': !!forceAvatar,
@@ -2489,6 +2633,7 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
     // Callers push the new message to chat before calling addOneMessage
     const newMessageId = typeof forceId == 'number' ? forceId : chat.length - 1;
 
+    // Use jQuery for compatibility with other functions
     const newMessage = chatElement.find(`[mesid="${newMessageId}"]`);
     const isSmallSys = mes?.extra?.isSmallSys;
 
@@ -2546,9 +2691,14 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
         updateSwipeCounter(newMessageId);
     }
 
-    //last_mes should always be updated.
-    chatElement.find('.mes').removeClass('last_mes');
-    chatElement.find('.mes').last().addClass('last_mes');
+    // Skip class updates during batch operations (printMessages) for performance on mobile
+    if (!window._skipMessageClassUpdate) {
+        const mesElements = document.querySelectorAll('.mes');
+        mesElements.forEach(el => el.classList.remove('last_mes'));
+        if (mesElements.length > 0) {
+            mesElements[mesElements.length - 1].classList.add('last_mes');
+        }
+    }
     if (showSwipes) {
         refreshSwipeButtons();
     }
@@ -4403,7 +4553,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         creatorNotes: creatorNotes,
         trigger: GENERATION_TYPE_TRIGGERS.includes(type) ? type : 'normal',
     };
-    const { worldInfoString, worldInfoBefore, worldInfoAfter, worldInfoExamples, worldInfoDepth, outletEntries } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
+    const { worldInfoString, worldInfoBefore, worldInfoAfter, hasRestrictedHiddenLore, hiddenLoreContext, worldInfoExamples, worldInfoDepth, outletEntries, loreExclusionInfo } = await getWorldInfoPrompt(chatForWI, this_max_context, dryRun, globalScanData);
     setExtensionPrompt(inject_ids.QUIET_PROMPT, '', extension_prompt_types.IN_PROMPT, 0, true);
 
     // Add message example WI
@@ -5062,6 +5212,8 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 scenario: scenario,
                 worldInfoBefore: worldInfoBefore,
                 worldInfoAfter: worldInfoAfter,
+                hasRestrictedHiddenLore: hasRestrictedHiddenLore,
+                loreExclusionInfo: loreExclusionInfo,
                 extensionPrompts: extension_prompts,
                 bias: promptBias,
                 type: type,
@@ -5101,7 +5253,11 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
      */
     async function finishGenerating() {
         if (power_user.console_log_prompts) {
-            console.log(generate_data.prompt);
+            if (hasRestrictedHiddenLore) {
+                console.warn('[Prompt] Final prompt logging is redacted because restricted hidden lorebook content is active.');
+            } else {
+                console.log(generate_data.prompt);
+            }
         }
 
         console.debug('rungenerate calling API');
@@ -5110,31 +5266,34 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         //set array object for prompt token itemization of this message
         let currentArrayEntry = Number(thisPromptBits.length - 1);
+        const promptRedactionMessage = '[Redacted: contains restricted hidden lorebook content]';
+        const redactPromptField = (value) => hasRestrictedHiddenLore ? promptRedactionMessage : value;
         let additionalPromptStuff = {
             ...thisPromptBits[currentArrayEntry],
-            rawPrompt: generate_data.prompt || generate_data.input,
+            rawPrompt: redactPromptField(generate_data.prompt || generate_data.input),
             mesId: getNextMessageId(type),
-            allAnchors: await getAllExtensionPrompts(),
-            chatInjects: injectedIndices?.map(index => arrMes[arrMes.length - index - 1])?.join('') || '',
+            allAnchors: hasRestrictedHiddenLore ? null : await getAllExtensionPrompts(),
+            chatInjects: redactPromptField(injectedIndices?.map(index => arrMes[arrMes.length - index - 1])?.join('') || ''),
             summarizeString: (extension_prompts['1_memory']?.value || ''),
-            authorsNoteString: (extension_prompts['2_floating_prompt']?.value || ''),
+            authorsNoteString: redactPromptField(extension_prompts['2_floating_prompt']?.value || ''),
             smartContextString: (extension_prompts['chromadb']?.value || ''),
             chatVectorsString: (extension_prompts['3_vectors']?.value || ''),
             dataBankVectorsString: (extension_prompts['4_vectors_data_bank']?.value || ''),
-            worldInfoString: worldInfoString,
-            storyString: storyString,
-            beforeScenarioAnchor: beforeScenarioAnchor,
-            afterScenarioAnchor: afterScenarioAnchor,
-            examplesString: examplesString,
+            worldInfoString: redactPromptField(worldInfoString),
+            storyString: redactPromptField(storyString),
+            beforeScenarioAnchor: redactPromptField(beforeScenarioAnchor),
+            afterScenarioAnchor: redactPromptField(afterScenarioAnchor),
+            examplesString: redactPromptField(examplesString),
             mesSendString: mesSendString,
-            generatedPromptCache: generatedPromptCache,
+            generatedPromptCache: redactPromptField(generatedPromptCache),
             promptBias: promptBias,
-            finalPrompt: finalPrompt,
+            finalPrompt: redactPromptField(finalPrompt),
             charDescription: description,
             charPersonality: personality,
             scenarioText: scenario,
             this_max_context: this_max_context,
             padding: power_user.token_padding,
+            containsRestrictedHiddenLore: hasRestrictedHiddenLore,
             main_api: main_api,
             instruction: main_api !== 'openai' && power_user.sysprompt.enabled ? substituteParams(power_user.prefer_character_prompt && system ? system : power_user.sysprompt.content) : '',
             userPersona: (power_user.persona_description_position == persona_description_positions.IN_PROMPT ? (persona || '') : ''),
@@ -5164,7 +5323,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 streamingProcessor.firstMessageText = '';
             }
 
-            streamingProcessor.generator = await sendStreamingRequest(type, generate_data);
+            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { hiddenLoreContext });
 
             hideSwipeButtons();
             let getMessage = await streamingProcessor.generate();
@@ -5215,7 +5374,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 });
             }
         } else {
-            return await sendGenerationRequest(type, generate_data, { jsonSchema });
+            return await sendGenerationRequest(type, generate_data, { jsonSchema, hiddenLoreContext });
         }
     }
 
@@ -5851,16 +6010,27 @@ export async function sendGenerationRequest(type, data, options = {}) {
         return await generateHorde(data.prompt, data, abortController.signal, true);
     }
 
+    const requestData = options.hiddenLoreContext
+        ? { ...data, dreamtavern_hidden_lore_context: options.hiddenLoreContext }
+        : data;
+
     const response = await fetch(getGenerateUrl(main_api), {
         method: 'POST',
         headers: getRequestHeaders(),
         cache: 'no-cache',
-        body: JSON.stringify(data),
+        body: JSON.stringify(requestData),
         signal: abortController.signal,
     });
 
     if (!response.ok) {
         throw await response.json();
+    }
+
+    const hiddenLoreActivations = getServerHiddenLoreActivationsFromResponse(response);
+    if (hiddenLoreActivations.length) {
+        await emitServerHiddenLoreActivations(hiddenLoreActivations);
+    } else {
+        clearServerHiddenLoreActivations();
     }
 
     return await response.json();
@@ -5878,15 +6048,19 @@ export async function sendStreamingRequest(type, data, options = {}) {
         throw new Error('Generation was aborted.');
     }
 
+    const requestData = options.hiddenLoreContext
+        ? { ...data, dreamtavern_hidden_lore_context: options.hiddenLoreContext }
+        : data;
+
     switch (main_api) {
         case 'openai':
             return await sendOpenAIRequest(type, data.prompt, streamingProcessor.abortController.signal, options);
         case 'textgenerationwebui':
-            return await generateTextGenWithStreaming(data, streamingProcessor.abortController.signal);
+            return await generateTextGenWithStreaming(requestData, streamingProcessor.abortController.signal);
         case 'novel':
-            return await generateNovelWithStreaming(data, streamingProcessor.abortController.signal);
+            return await generateNovelWithStreaming(requestData, streamingProcessor.abortController.signal);
         case 'kobold':
-            return await generateKoboldWithStreaming(data, streamingProcessor.abortController.signal);
+            return await generateKoboldWithStreaming(requestData, streamingProcessor.abortController.signal);
         default:
             throw new Error('Streaming is enabled, but the current API does not support streaming.');
     }
@@ -6848,6 +7022,22 @@ export function setCharacterId(value) {
             console.error('Invalid character ID type:', value);
             break;
     }
+
+    // Update world icon state and apply lock state when character changes
+    if (this_chid !== undefined && !isNaN(this_chid)) {
+        const chid = Number(this_chid);
+        if (characters[chid]) {
+            const character = characters[chid];
+            const hasWorld = !!character.data?.extensions?.world;
+
+            // Light up world icon if character has a world set
+            $('#set_character_world, #world_button').toggleClass('world_set', hasWorld);
+
+            // Apply lock state for pushed characters
+            const locked = isCharacterDefinitionLocked(character);
+            applyCharacterDefinitionLockState(locked);
+        }
+    }
 }
 
 export function setCharacterName(value) {
@@ -7140,15 +7330,33 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         character_name: 'unused',
     };
 
+    const chatPayload = [chatHeader, ...trimmedChat];
+
     try {
+        const chunkingApi = window.chatChunking;
+        const useChunkedSave = !!chunkingApi?.shouldUseChunkedChatSave && chunkingApi.shouldUseChunkedChatSave(trimmedChat.length);
+        const requestHeaders = getRequestHeaders();
+
+        if (useChunkedSave) {
+            await chunkingApi.saveChatInChunks({
+                chatData: chatPayload,
+                avatarUrl: characters[this_chid].avatar,
+                fileName,
+                cardName: characters[this_chid].name,
+                force,
+                headers: requestHeaders,
+            });
+            return;
+        }
+
         const result = await fetch('/api/chats/save', {
             method: 'POST',
             cache: 'no-cache',
-            headers: getRequestHeaders(),
+            headers: requestHeaders,
             body: JSON.stringify({
                 ch_name: characters[this_chid].name,
                 file_name: fileName,
-                chat: [chatHeader, ...trimmedChat],
+                chat: chatPayload,
                 avatar_url: characters[this_chid].avatar,
                 force: force,
             }),
@@ -7159,8 +7367,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         }
 
         const errorData = await result.json();
-        const isIntegrityError = errorData?.error === 'integrity' && !force;
-        if (!isIntegrityError) {
+        if (errorData?.error !== 'integrity' || force) {
             throw new Error(result.statusText);
         }
 
@@ -7173,7 +7380,6 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         );
 
         const forceSaveConfirmed = popupResult === 'OVERWRITE';
-
         if (!forceSaveConfirmed) {
             console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
             window.location.reload();
@@ -7182,6 +7388,25 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
 
         await saveChat({ chatName, withMetadata, mesId, force: true });
     } catch (error) {
+        if (error?.code === 'integrity' && !force) {
+            const popupResult = await Popup.show.input(
+                t`ERROR: Chat integrity check failed while saving the file.`,
+                t`<p>After you click OK, the page will be reloaded to prevent data corruption.</p>
+                  <p>To confirm an overwrite (and potentially <b>LOSE YOUR DATA</b>), enter <code>OVERWRITE</code> (in all caps) in the box below before clicking OK.</p>`,
+                '',
+                { okButton: 'OK', cancelButton: false },
+            );
+
+            const forceSaveConfirmed = popupResult === 'OVERWRITE';
+            if (!forceSaveConfirmed) {
+                console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
+                window.location.reload();
+                return;
+            }
+
+            await saveChat({ chatName, withMetadata, mesId, force: true });
+            return;
+        }
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
     }
@@ -7220,8 +7445,27 @@ async function read_avatar_load(input) {
             return;
         }
 
-        await createOrEditCharacter();
-        await delay(DEFAULT_SAVE_EDIT_TIMEOUT);
+        try {
+            const chid = Number(this_chid);
+            const character = characters[chid];
+
+            if (isCharacterDefinitionLocked(character)) {
+                await saveLockedCharacterAvatar(chid, file, crop_data);
+            } else {
+                // Save avatar immediately without debounce delay
+                await createOrEditCharacter();
+            }
+
+            // Avatar save now completes instantly - directly awaits save instead of using debounced save
+        } catch (error) {
+            console.error('Failed to save character avatar', error);
+            toastr.error(error?.message || 'Failed to save character image.');
+
+            if (this_chid !== undefined && characters[this_chid]?.avatar) {
+                $('#avatar_load_preview').attr('src', getThumbnailUrl('avatar', characters[this_chid].avatar, true));
+            }
+            return;
+        }
 
         const formData = new FormData(/** @type {HTMLFormElement} */($('#form_create').get(0)));
         await fetch(getThumbnailUrl('avatar', formData.get('avatar_url').toString()), {
@@ -7343,17 +7587,27 @@ export async function unshallowCharacter(characterId) {
     await getOneCharacter(avatar);
 }
 
-export async function getChat() {
+export async function getChat({ fileName = null } = {}) {
     //console.log('/api/chats/get -- entered for -- ' + characters[this_chid].name);
     try {
+        if (fileName) {
+            characters[this_chid].chat = fileName;
+        }
+
         await unshallowCharacter(this_chid);
+
+        // If a specific chat was requested by the caller, keep it authoritative
+        // even if unshallowing refreshes the character object from disk.
+        if (fileName) {
+            characters[this_chid].chat = fileName;
+        }
 
         const response = await $.ajax({
             type: 'POST',
             url: '/api/chats/get',
             data: JSON.stringify({
                 ch_name: characters[this_chid].name,
-                file_name: characters[this_chid].chat,
+                file_name: fileName ?? characters[this_chid].chat,
                 avatar_url: characters[this_chid].avatar,
             }),
             dataType: 'json',
@@ -7451,7 +7705,7 @@ export async function openCharacterChat(file_name) {
     characters[this_chid]['chat'] = file_name;
     chat.length = 0;
     chat_metadata = {};
-    await getChat();
+    await getChat({ fileName: file_name });
     $('#selected_chat_pole').val(file_name);
     await createOrEditCharacter(new CustomEvent('newChat'));
 }
@@ -7616,6 +7870,7 @@ function reloadLoop() {
 //MARK: getSettings()
 ///////////////////////////////////////////
 export async function getSettings() {
+    try {
     const response = await fetch('/api/settings/get', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -7736,6 +7991,11 @@ export async function getSettings() {
     await validateDisabledSamplers();
     settingsReady = true;
     await eventSource.emit(event_types.SETTINGS_LOADED);
+    } catch (err) {
+        console.error('[getSettings] init error caught defensively:', err);
+    } finally {
+        settingsReady = true;
+    }
 }
 
 //MARK: saveSettings()
@@ -7793,14 +8053,19 @@ export async function saveSettings(loopCounter = 0) {
         });
 
         if (!result.ok) {
-            throw new Error(`Failed to save settings: ${result.statusText}`);
+            let serverMsg = result.statusText;
+            try {
+                const body = await result.json();
+                if (body && body.error) serverMsg = body.error;
+            } catch { /* response wasn't JSON */ }
+            throw new Error(`Failed to save settings (HTTP ${result.status}): ${serverMsg}`);
         }
 
         settings = payload;
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {
         console.error('Error saving settings:', error);
-        toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Settings could not be saved`);
+        toastr.error(error.message || t`Check the server connection and reload the page to prevent data loss.`, t`Settings could not be saved`);
     }
 }
 
@@ -8449,17 +8714,243 @@ export function select_rm_info(type, charId, previousCharId = null) {
 }
 
 /**
+ * Selectors for form inputs that must be disabled for pushed characters.
+ */
+const LOCKED_CHARACTER_DEFINITION_SELECTORS = [
+    '#character_name_pole',
+    '#creator_textarea',
+    '#creator_notes_textarea',
+    '#description_textarea',
+    '#character_version_textarea',
+    '#personality_textarea',
+    '#mes_example_textarea',
+    '#scenario_pole',
+    '#system_prompt_textarea',
+    '#post_history_instructions_textarea',
+    '#firstmessage_textarea',
+    '#depth_prompt_prompt',
+    '#depth_prompt_depth',
+    '#depth_prompt_role',
+    '#tags_textarea',
+    '#talkativeness_slider',
+    '#character_world',
+    '#world_button',
+];
+
+/**
+ * Selectors for elements that must be hidden for pushed characters.
+ */
+const LOCKED_CHARACTER_DEFINITION_HIDE_SELECTORS = [
+    '#character_popup',
+    '#advanced_div',
+    '#character_open_advanced',
+    '#character_open_media_overrides',
+    '#export_button',
+    '#set_chat_character_settings',
+    '#set_character_world',
+    '#world_button',
+    '[data-target="#character_popup"]',
+    '[data-target="character_popup"]',
+    '[for="advanced_div"]',
+    '.open_character_popup',
+    '.character_open_advanced',
+    '.character_popup_button',
+];
+
+const LOCKED_CHARACTER_DEFINITION_TRIGGER_SELECTOR = '[data-target="#character_popup"], [data-target="character_popup"], #character_open_advanced, .character_open_advanced, .open_character_popup';
+
+function isPushedFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function normalizeHandleForLock(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function getPushExtensionBySuffix(character, suffix) {
+    const ext = character?.data?.extensions || {};
+    const exactKeys = [suffix, `dreamtavern_${suffix}`];
+
+    for (const key of exactKeys) {
+        if (Object.prototype.hasOwnProperty.call(ext, key)) {
+            return ext[key];
+        }
+    }
+
+    for (const [key, value] of Object.entries(ext)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+
+    return undefined;
+}
+
+/**
+ * Toggles the push-hidden CSS class on an element.
+ * @param {string} selector - jQuery selector
+ * @param {boolean} hidden - Whether to hide
+ */
+function togglePushHidden(selector, hidden) {
+    const elements = $(selector);
+    if (!elements.length) return;
+
+    elements.each(function () {
+        const element = $(this);
+        if (element.data('pushOriginalDisplay') === undefined) {
+            element.data('pushOriginalDisplay', element[0]?.style?.display ?? '');
+            element.data('pushOriginalVisibility', element[0]?.style?.visibility ?? '');
+            element.data('pushOriginalPointerEvents', element[0]?.style?.pointerEvents ?? '');
+            element.data('pushOriginalHidden', element.prop('hidden'));
+            element.data('pushOriginalAriaHidden', element.attr('aria-hidden'));
+        }
+
+        element.toggleClass('push-hidden', !!hidden);
+        if (hidden) {
+            element.attr('aria-hidden', 'true');
+            element.prop('hidden', true);
+            element.css({ display: 'none', visibility: 'hidden', pointerEvents: 'none' });
+        } else {
+            const originalAriaHidden = element.data('pushOriginalAriaHidden');
+            if (originalAriaHidden === undefined) {
+                element.removeAttr('aria-hidden');
+            } else {
+                element.attr('aria-hidden', originalAriaHidden);
+            }
+            element.prop('hidden', !!element.data('pushOriginalHidden'));
+            element.css({
+                display: element.data('pushOriginalDisplay') ?? '',
+                visibility: element.data('pushOriginalVisibility') ?? '',
+                pointerEvents: element.data('pushOriginalPointerEvents') ?? '',
+            });
+        }
+
+        element.closest('.menu_button, .right_menu_button, .drawer-icon, .inline-drawer-toggle, .popup-button-custom').each(function () {
+            const parent = $(this);
+            if (parent.data('pushOriginalDisplay') === undefined) {
+                parent.data('pushOriginalDisplay', parent[0]?.style?.display ?? '');
+                parent.data('pushOriginalVisibility', parent[0]?.style?.visibility ?? '');
+                parent.data('pushOriginalPointerEvents', parent[0]?.style?.pointerEvents ?? '');
+                parent.data('pushOriginalHidden', parent.prop('hidden'));
+            }
+
+            parent.toggleClass('push-hidden', !!hidden);
+            if (hidden) {
+                parent.prop('hidden', true);
+                parent.css({ display: 'none', visibility: 'hidden', pointerEvents: 'none' });
+            } else {
+                parent.prop('hidden', !!parent.data('pushOriginalHidden'));
+                parent.css({
+                    display: parent.data('pushOriginalDisplay') ?? '',
+                    visibility: parent.data('pushOriginalVisibility') ?? '',
+                    pointerEvents: parent.data('pushOriginalPointerEvents') ?? '',
+                });
+            }
+        });
+    });
+}
+
+function syncAdvancedDefinitionTriggerState(locked) {
+    $(LOCKED_CHARACTER_DEFINITION_TRIGGER_SELECTOR).each(function () {
+        const element = $(this);
+        if (element.data('pushOriginalDisabled') === undefined) {
+            element.data('pushOriginalDisabled', element.prop('disabled'));
+            element.data('pushOriginalTabindex', element.attr('tabindex'));
+        }
+
+        if (locked) {
+            element.prop('disabled', true).attr('tabindex', '-1');
+        } else {
+            element.prop('disabled', !!element.data('pushOriginalDisabled'));
+            const originalTabindex = element.data('pushOriginalTabindex');
+            if (originalTabindex === undefined || originalTabindex === null || originalTabindex === '') {
+                element.removeAttr('tabindex');
+            } else {
+                element.attr('tabindex', originalTabindex);
+            }
+        }
+    });
+}
+
+/**
  * Checks if the current user can access Advanced Definitions for a character.
  * Pushed characters are locked to non-creator / non-admin users.
  * @param {number} chid - Character index
  * @returns {boolean} True if the user can access Advanced Definitions
  */
 function canAccessAdvancedDefs(chid) {
-    const ext = characters[chid]?.data?.extensions;
-    if (!ext?.dreamtavern_pushed) return true;  // not a pushed character
-    if (isAdmin()) return true;
-    if (getCurrentUserHandle() === ext.dreamtavern_creator) return true;
+    return !isCharacterDefinitionLocked(characters[chid]);
+}
+
+/**
+ * Checks if a character object is definition-locked (pushed + non-admin/non-creator).
+ * @param {object} character - Character object from the characters array
+ * @returns {boolean} True if the character definitions should be locked
+ */
+function isCharacterDefinitionLocked(character) {
+    if (!character) return false;
+
+    const userHandle = normalizeHandleForLock(getCurrentUserHandle());
+    const creatorHandle = normalizeHandleForLock(getPushExtensionBySuffix(character, 'creator'));
+    const originalCreatorHandle = normalizeHandleForLock(getPushExtensionBySuffix(character, 'original_creator') || creatorHandle);
+    const worldName = String(character?.data?.extensions?.world || '').trim().toLowerCase();
+    const pushed = isPushedFlag(getPushExtensionBySuffix(character, 'pushed'));
+    const symlinkMode = isPushedFlag(getPushExtensionBySuffix(character, 'symlink_mode'));
+    const isAdminPattern = worldName.startsWith('admin-') || /^admin[a-z0-9._-]+-.+/u.test(worldName);
+
+    if (!userHandle) {
+        return pushed || symlinkMode || isAdminPattern || worldName.startsWith('dd-');
+    }
+
+    if (creatorHandle && userHandle === creatorHandle) return false;
+    if (originalCreatorHandle && userHandle === originalCreatorHandle) return false;
+    if (symlinkMode) return true;
+    if (pushed) return true;
+
+    if (isAdminPattern) return true;
+    if (worldName.startsWith('dd-')) {
+        return !worldName.startsWith(`dd-${userHandle}-`);
+    }
+
     return false;
+}
+
+/**
+ * Applies or removes the character definition lock state.
+ * Disables all definition fields and hides the character popup for locked characters.
+ * @param {boolean} locked - Whether to lock the definitions
+ */
+function applyCharacterDefinitionLockState(locked) {
+    for (const selector of LOCKED_CHARACTER_DEFINITION_SELECTORS) {
+        $(selector).prop('disabled', !!locked);
+    }
+
+    for (const selector of LOCKED_CHARACTER_DEFINITION_HIDE_SELECTORS) {
+        togglePushHidden(selector, locked);
+    }
+
+    // Re-apply the two privacy-critical entry points directly so later redraws
+    // or style changes cannot accidentally resurface them on locked characters.
+    togglePushHidden('#advanced_div, #world_button, #export_button, #set_character_world, label[for="set_character_world"]', locked);
+
+    if (locked) {
+        is_advanced_char_open = false;
+        $('#character_popup').css('display', 'none').removeClass('open');
+    }
+
+    $('#set_character_world, #world_button').prop('disabled', !!locked).toggleClass('push-hidden', !!locked);
+    $('label[for="set_character_world"]').toggleClass('push-hidden', !!locked);
+    $('.open_alternate_greetings').prop('disabled', false).toggleClass('disabled', false);
+    $('#set_chat_character_settings').prop('disabled', !!locked).toggleClass('disabled', !!locked);
+    syncAdvancedDefinitionTriggerState(locked);
+
+    if (locked) {
+        $('#create_button').hide();
+        $('#create_button').attr('title', 'Character definitions are locked on this pushed character.');
+    } else {
+        $('#create_button').show();
+        $('#create_button').removeAttr('title');
+    }
 }
 
 /**
@@ -8471,62 +8962,90 @@ function canAccessAdvancedDefs(chid) {
 export function select_selected_character(chid, { switchMenu = true } = {}) {
     //character select
     //console.log('select_selected_character() -- starting with input of -- ' + chid + ' (name:' + characters[chid].name + ')');
+
+    // If the user is actively filling in the create form and this is a background
+    // refresh (switchMenu=false), do not overwrite the create form with another
+    // character's data. This prevents intros from being pulled in from existing
+    // characters during getCharacters() calls triggered post-creation.
+    if (menu_type === 'create' && !switchMenu) {
+        return;
+    }
+
     select_rm_create({ switchMenu });
     switchMenu && setMenuType('character_edit');
-    $('#delete_button').css('display', 'flex');
-    $('#export_button').css('display', 'flex');
 
-    //create text poles
-    $('#rm_button_back').css('display', 'none');
-    //$("#character_import_button").css("display", "none");
-    $('#create_button').attr('value', 'Save');              // what is the use case for this?
-    $('#dupe_button').show();
-    $('#create_button_label').css('display', 'none');
-    $('#char_connections_button').show();
+    // Use vanilla JS for faster mobile performance instead of jQuery
+    document.getElementById('delete_button').style.display = 'flex';
+    document.getElementById('export_button').style.display = 'flex';
+    document.getElementById('rm_button_back').style.display = 'none';
+    document.getElementById('create_button').value = 'Save';
+    document.getElementById('dupe_button').style.display = '';
+    document.getElementById('create_button_label').style.display = 'none';
+    document.getElementById('char_connections_button').style.display = '';
 
     // Hide the chat scenario button if we're peeking the group member defs
-    $('#set_chat_character_settings').toggle(!selected_group);
+    document.getElementById('set_chat_character_settings').style.display = selected_group ? 'none' : '';
 
     // Don't update the navbar name if we're peeking the group member defs
     if (!selected_group) {
-        $('#rm_button_selected_ch').children('h2').text(characters[chid].name);
+        document.querySelector('#rm_button_selected_ch h2').textContent = characters[chid].name;
     }
 
-    $('#add_avatar_button').val('');
+    document.getElementById('add_avatar_button').value = '';
 
-    $('#character_popup-button-h3').text(characters[chid].name);
-    $('#character_name_pole').val(characters[chid].name);
-    $('#description_textarea').val(characters[chid].description);
-    $('#character_world').val(characters[chid].data?.extensions?.world || '');
-    $('#creator_notes_textarea').val(characters[chid].data?.creator_notes || characters[chid].creatorcomment);
-    $('#creator_notes_spoiler').html(formatCreatorNotes(characters[chid].data?.creator_notes || characters[chid].creatorcomment, characters[chid].avatar));
-    $('#character_version_textarea').val(characters[chid].data?.character_version || '');
-    $('#system_prompt_textarea').val(characters[chid].data?.system_prompt || '');
-    $('#post_history_instructions_textarea').val(characters[chid].data?.post_history_instructions || '');
-    $('#tags_textarea').val(Array.isArray(characters[chid].data?.tags) ? characters[chid].data.tags.join(', ') : '');
-    $('#creator_textarea').val(characters[chid].data?.creator);
-    $('#character_version_textarea').val(characters[chid].data?.character_version || '');
-    $('#personality_textarea').val(characters[chid].personality);
-    $('#firstmessage_textarea').val(characters[chid].first_mes);
-    $('#scenario_pole').val(characters[chid].scenario);
-    $('#depth_prompt_prompt').val(characters[chid].data?.extensions?.depth_prompt?.prompt ?? '');
-    $('#depth_prompt_depth').val(characters[chid].data?.extensions?.depth_prompt?.depth ?? depth_prompt_depth_default);
-    $('#depth_prompt_role').val(characters[chid].data?.extensions?.depth_prompt?.role ?? depth_prompt_role_default);
-    $('#talkativeness_slider').val(characters[chid].talkativeness || talkativeness_default);
-    $('#mes_example_textarea').val(characters[chid].mes_example);
-    $('#selected_chat_pole').val(characters[chid].chat);
-    $('#create_date_pole').val(timestampToMoment(characters[chid].create_date).toISOString());
-    $('#avatar_url_pole').val(characters[chid].avatar);
-    $('#chat_import_avatar_url').val(characters[chid].avatar);
-    $('#chat_import_character_name').val(characters[chid].name);
-    $('#character_json_data').val(characters[chid].json_data);
+    // Batch all form field updates using vanilla JS (much faster than jQuery on mobile)
+    const charData = characters[chid];
+    const formUpdates = {
+        'character_popup-button-h3': charData.name,
+        'character_name_pole': charData.name,
+        'description_textarea': charData.description,
+        'character_world': charData.data?.extensions?.world || '',
+        'character_world_unlink': '',
+        'creator_notes_textarea': charData.data?.creator_notes || charData.creatorcomment,
+        'character_version_textarea': charData.data?.character_version || '',
+        'system_prompt_textarea': charData.data?.system_prompt || '',
+        'post_history_instructions_textarea': charData.data?.post_history_instructions || '',
+        'tags_textarea': Array.isArray(charData.data?.tags) ? charData.data.tags.join(', ') : '',
+        'creator_textarea': charData.data?.creator || '',
+        'personality_textarea': charData.personality,
+        'firstmessage_textarea': charData.first_mes,
+        'scenario_pole': charData.scenario,
+        'depth_prompt_prompt': charData.data?.extensions?.depth_prompt?.prompt ?? '',
+        'depth_prompt_depth': charData.data?.extensions?.depth_prompt?.depth ?? depth_prompt_depth_default,
+        'depth_prompt_role': charData.data?.extensions?.depth_prompt?.role ?? depth_prompt_role_default,
+        'talkativeness_slider': charData.talkativeness || talkativeness_default,
+        'mes_example_textarea': charData.mes_example,
+        'selected_chat_pole': charData.chat,
+        'create_date_pole': timestampToMoment(charData.create_date).toISOString(),
+        'avatar_url_pole': charData.avatar,
+        'chat_import_avatar_url': charData.avatar,
+        'chat_import_character_name': charData.name,
+        'character_json_data': charData.json_data,
+    };
 
-    updateFavButtonState(characters[chid].fav || characters[chid].fav == 'true');
+    for (const [id, value] of Object.entries(formUpdates)) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        // Input/select/textarea elements must use .value, not .textContent
+        if (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
+            el.value = value ?? '';
+        } else {
+            el.textContent = value ?? '';
+        }
+    }
 
-    const avatarUrl = characters[chid].avatar != 'none' ? getThumbnailUrl('avatar', characters[chid].avatar) : default_avatar;
-    $('#avatar_load_preview').attr('src', avatarUrl);
-    $('.open_alternate_greetings').data('chid', chid);
-    $('#set_character_world').data('chid', chid);
+    // Update creator notes spoiler (requires special handling)
+    const spoilerEl = document.getElementById('creator_notes_spoiler');
+    if (spoilerEl) {
+        spoilerEl.innerHTML = formatCreatorNotes(charData.data?.creator_notes || charData.creatorcomment, charData.avatar);
+    }
+
+    updateFavButtonState(charData.fav || charData.fav == 'true');
+
+    const avatarUrl = charData.avatar != 'none' ? getThumbnailUrl('avatar', charData.avatar) : default_avatar;
+    document.getElementById('avatar_load_preview').src = avatarUrl;
+    setAlternateGreetingsEditorChid(chid);
+    document.getElementById('set_character_world').dataset.chid = chid;
     setWorldInfoButtonClass(chid);
     checkEmbeddedWorld(chid);
 
@@ -8547,14 +9066,11 @@ export function select_selected_character(chid, { switchMenu = true } = {}) {
 
     eventSource.emit(event_types.CHARACTER_EDITOR_OPENED, chid);
 
-    // Hide Advanced Definitions for pushed characters (non-admin / non-creator)
-    const advancedAllowed = canAccessAdvancedDefs(chid);
-    $('#advanced_div').toggle(advancedAllowed);
-    // Close the popup if it is currently open and the user lost access
-    if (!advancedAllowed && is_advanced_char_open) {
-        is_advanced_char_open = false;
-        $('#character_popup').css('display', 'none').removeClass('open');
-    }
+    // Apply character definition lock state for pushed characters
+    // This hides Advanced Definitions, disables all definition fields,
+    // and hides the save button for non-admin / non-creator users.
+    const locked = isCharacterDefinitionLocked(characters[chid]);
+    applyCharacterDefinitionLockState(locked);
 
     saveSettingsDebounced();
 }
@@ -8583,49 +9099,72 @@ function select_rm_create({ switchMenu = true } = {}) {
     $('#create_button_label').css('display', '');
     $('#create_button').attr('value', 'Create');
     $('#dupe_button').hide();
-    $('#advanced_div').show(); // Re-show in case it was hidden by a pushed character
+    // Show advanced_div and explicitly unlock all fields — the create form
+    // must never inherit lock state from a previously selected pushed character.
+    $('#advanced_div').show();
+    applyCharacterDefinitionLockState(false);
     $('#char_connections_button').hide();
 
-    //create text poles
-    $('#rm_button_back').css('display', '');
-    $('#character_import_button').css('display', '');
-    $('#character_popup-button-h3').text('Create character');
-    $('#character_name_pole').val(create_save.name);
-    $('#description_textarea').val(create_save.description);
-    $('#character_world').val(create_save.world);
-    $('#creator_notes_textarea').val(create_save.creator_notes);
-    $('#creator_notes_spoiler').html(formatCreatorNotes(create_save.creator_notes, ''));
-    $('#post_history_instructions_textarea').val(create_save.post_history_instructions);
-    $('#system_prompt_textarea').val(create_save.system_prompt);
-    $('#tags_textarea').val(create_save.tags);
-    $('#creator_textarea').val(create_save.creator);
-    $('#character_version_textarea').val(create_save.character_version);
-    $('#personality_textarea').val(create_save.personality);
-    $('#firstmessage_textarea').val(create_save.first_message);
-    $('#talkativeness_slider').val(create_save.talkativeness);
-    $('#scenario_pole').val(create_save.scenario);
-    $('#depth_prompt_prompt').val(create_save.depth_prompt_prompt);
-    $('#depth_prompt_depth').val(create_save.depth_prompt_depth);
-    $('#depth_prompt_role').val(create_save.depth_prompt_role);
-    $('#mes_example_textarea').val(create_save.mes_example);
-    $('#character_json_data').val('');
-    $('#avatar_div').css('display', 'flex');
-    $('#avatar_load_preview').attr('src', default_avatar);
-    $('#renameCharButton').css('display', 'none');
-    $('#name_div').removeClass('displayNone');
-    $('#name_div').addClass('displayBlock');
-    $('.open_alternate_greetings').data('chid', -1);
-    $('#set_character_world').data('chid', -1);
+    //create text poles - Use vanilla JS for faster mobile performance
+    document.getElementById('rm_button_back').style.display = '';
+    document.getElementById('character_import_button').style.display = '';
+    document.getElementById('character_popup-button-h3').textContent = 'Create character';
+
+    // Batch all form field updates using vanilla JS (much faster than jQuery on mobile)
+    const formUpdates = {
+        'character_name_pole': create_save.name,
+        'description_textarea': create_save.description,
+        'character_world': create_save.world,
+        'creator_notes_textarea': create_save.creator_notes,
+        'post_history_instructions_textarea': create_save.post_history_instructions,
+        'system_prompt_textarea': create_save.system_prompt,
+        'tags_textarea': create_save.tags,
+        'creator_textarea': create_save.creator,
+        'character_version_textarea': create_save.character_version,
+        'personality_textarea': create_save.personality,
+        'firstmessage_textarea': create_save.first_message,
+        'talkativeness_slider': create_save.talkativeness,
+        'scenario_pole': create_save.scenario,
+        'depth_prompt_prompt': create_save.depth_prompt_prompt,
+        'depth_prompt_depth': create_save.depth_prompt_depth,
+        'depth_prompt_role': create_save.depth_prompt_role,
+        'mes_example_textarea': create_save.mes_example,
+        'character_json_data': '',
+    };
+
+    for (const [id, value] of Object.entries(formUpdates)) {
+        const el = document.getElementById(id);
+        if (el) el.value = value ?? '';
+    }
+
+    // Update creator notes spoiler (requires special handling)
+    const spoilerEl = document.getElementById('creator_notes_spoiler');
+    if (spoilerEl) {
+        spoilerEl.innerHTML = formatCreatorNotes(create_save.creator_notes, '');
+    }
+
+    document.getElementById('avatar_div').style.display = 'flex';
+    document.getElementById('avatar_load_preview').src = default_avatar;
+    document.getElementById('renameCharButton').style.display = 'none';
+
+    const nameDiv = document.getElementById('name_div');
+    nameDiv.classList.remove('displayNone');
+    nameDiv.classList.add('displayBlock');
+
+    // Set data attributes
+    setAlternateGreetingsEditorChid(-1);
+    document.getElementById('set_character_world').dataset.chid = -1;
+
     setWorldInfoButtonClass(undefined, !!create_save.world);
     updateFavButtonState(false);
     checkEmbeddedWorld();
 
-    $('#form_create').attr('actiontype', 'createcharacter');
-    $('.form_create_bottom_buttons_block .chat_lorebook_button').hide();
-    $('#character_open_media_overrides').hide();
+    document.getElementById('form_create').setAttribute('actiontype', 'createcharacter');
+    document.querySelectorAll('.form_create_bottom_buttons_block .chat_lorebook_button').forEach(el => el.style.display = 'none');
+    document.getElementById('character_open_media_overrides').style.display = 'none';
 }
 
-function select_rm_characters() {
+export function select_rm_characters() {
     const doFullRefresh = menu_type === 'characters';
     setMenuType('characters');
     selectRightMenuWithAnimation('rm_characters_block');
@@ -9234,6 +9773,12 @@ async function openCharacterWorldPopup() {
         return;
     }
 
+    if (menu_type != 'create' && isCharacterDefinitionLocked(characters[chid])) {
+        applyCharacterDefinitionLockState(true);
+        toastr.warning('Lorebook access is locked on this pushed character.');
+        return;
+    }
+
     // TODO: Maybe make this utility function not use the window context?
     const fileName = getCharaFilename(chid);
     const charName = (menu_type == 'create' ? create_save.name : characters[chid]?.data?.name) || 'Nameless';
@@ -9259,19 +9804,23 @@ async function openCharacterWorldPopup() {
     }
 
     // --- Populate Dropdowns ---
-    // Append to primary dropdown.
+    // Append to primary dropdown; exclude hidden lorebooks from the user-facing list.
     const primarySelect = template.find('.character_world_info_selector');
     world_names.forEach((item, i) => {
-        primarySelect.append(new Option(item, String(i), item === worldId, item === worldId));
+        if (isHiddenPushedLorebookForDropdown(item)) return;
+        const displayName = getLorebookDropdownDisplayName(item);
+        primarySelect.append(new Option(displayName, String(i), item === worldId, item === worldId));
     });
 
-    // Append to extras dropdown.
+    // Append to extras dropdown; exclude hidden lorebooks from the user-facing list.
     const extrasSelect = template.find('.character_extra_world_info_selector');
     const existingCharLore = world_info.charLore?.find((e) => e.name === fileName);
     world_names.forEach((item, i) => {
+        if (isHiddenPushedLorebookForDropdown(item)) return;
         const array = (menu_type == 'create' ? create_save.extra_books : existingCharLore?.extraBooks);
         const isSelected = !!array?.includes(item);
-        extrasSelect.append(new Option(item, String(i), isSelected, isSelected));
+        const displayName = getLorebookDropdownDisplayName(item);
+        extrasSelect.append(new Option(displayName, String(i), isSelected, isSelected));
     });
 
     const popup = new Popup(template, POPUP_TYPE.TEXT, '', {
@@ -9281,44 +9830,178 @@ async function openCharacterWorldPopup() {
             primarySelect.on('change', handlePrimaryWorldSelect);
             extrasSelect.on('change', handleExtrasWorldSelect);
 
-            // Not needed on mobile.
-            if (!isMobile()) {
-                extrasSelect.select2({
-                    width: '100%',
-                    placeholder: t`No auxiliary Lorebooks set. Click here to select.`,
-                    allowClear: true,
-                    closeOnSelect: false,
-                    dropdownParent: popupDialog,
-                });
-            }
+            primarySelect.select2({
+                width: '100%',
+                placeholder: t`--- None ---`,
+                searchInputPlaceholder: t`Search lorebooks...`,
+                allowClear: true,
+                closeOnSelect: true,
+                dropdownParent: popupDialog,
+            });
+
+            extrasSelect.select2({
+                width: '100%',
+                placeholder: t`No auxiliary Lorebooks set. Click here to select.`,
+                searchInputPlaceholder: t`Search lorebooks...`,
+                allowClear: true,
+                closeOnSelect: false,
+                dropdownParent: popupDialog,
+            });
         },
     });
 
     await popup.show();
 }
 
-function openAlternateGreetings() {
-    const chid = $('.open_alternate_greetings').data('chid');
+async function saveLockedCharacterAlternateGreetings(chid) {
+    const character = characters[chid];
+    if (!character?.avatar) {
+        throw new Error('Could not determine which pushed character to update.');
+    }
+
+    const alternateGreetings = Array.isArray(character?.data?.alternate_greetings)
+        ? [...character.data.alternate_greetings]
+        : [];
+
+    const response = await fetch('/api/characters/merge-attributes', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            avatar: character.avatar,
+            data: {
+                alternate_greetings: alternateGreetings,
+            },
+        }),
+        cache: 'no-cache',
+    });
+
+    if (!response.ok) {
+        const message = (await response.text()) || 'Failed to save alternate greetings.';
+        throw new Error(message);
+    }
+}
+
+async function saveLockedCharacterFavorite(chid, favState) {
+    const character = characters[chid];
+    if (!character?.avatar) {
+        throw new Error('Could not determine which pushed character to update.');
+    }
+
+    const response = await fetch('/api/characters/merge-attributes', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            avatar: character.avatar,
+            fav: !!favState,
+            data: {
+                extensions: {
+                    fav: !!favState,
+                },
+            },
+        }),
+        cache: 'no-cache',
+    });
+
+    if (!response.ok) {
+        const message = (await response.text()) || 'Failed to save favorite state.';
+        throw new Error(message);
+    }
+
+    character.fav = !!favState;
+    if (character.data?.extensions) {
+        character.data.extensions.fav = !!favState;
+    }
+}
+
+async function saveLockedCharacterAvatar(chid, file, cropData) {
+    const character = characters[chid];
+    if (!character?.avatar) {
+        throw new Error('Could not determine which pushed character to update.');
+    }
+
+    const convertedFile = await ensureImageFormatSupported(file);
+    const formData = new FormData();
+    formData.append('avatar', convertedFile);
+    formData.append('avatar_url', character.avatar);
+
+    let url = '/api/characters/edit-avatar';
+    if (cropData !== undefined) {
+        url += `?crop=${encodeURIComponent(JSON.stringify(cropData))}`;
+    }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: getRequestHeaders({ omitContentType: true }),
+        body: formData,
+        cache: 'no-cache',
+    });
+
+    if (!response.ok) {
+        const message = (await response.text()) || 'Failed to save character image.';
+        throw new Error(message);
+    }
+
+    await getOneCharacter(character.avatar);
+    const avatarUrl = character.avatar;
+    const thumbUrl = getThumbnailUrl('avatar', avatarUrl, true);
+    $(`img[src*="${encodeURIComponent(avatarUrl)}"], img[src*="${avatarUrl}"]`).attr('src', thumbUrl);
+    $('#avatar_load_preview').attr('src', thumbUrl);
+}
+
+function setAlternateGreetingsEditorChid(chid) {
+    document.querySelectorAll('.open_alternate_greetings').forEach(el => {
+        el.dataset.chid = String(chid);
+        $(el).data('chid', chid);
+    });
+}
+
+function getAlternateGreetingsEditorChid(sourceElement = null) {
+    const rawChid = sourceElement?.dataset?.chid ?? document.querySelector('.open_alternate_greetings')?.dataset?.chid;
+    const chid = Number(rawChid);
+    return Number.isFinite(chid) ? chid : undefined;
+}
+
+function getCharacterAlternateGreetings(chid) {
+    const character = characters[chid];
+    if (!character) {
+        return [];
+    }
+
+    character.data ??= {};
+    if (!Array.isArray(character.data.alternate_greetings)) {
+        character.data.alternate_greetings = [];
+    }
+
+    return character.data.alternate_greetings;
+}
+
+function openAlternateGreetings(event) {
+    const chid = getAlternateGreetingsEditorChid(event?.currentTarget);
 
     if (menu_type != 'create' && chid === undefined) {
         toastr.error('Does not have an Id for this character in editor menu.');
         return;
-    } else {
-        // If the character does not have alternate greetings, create an empty array
-        if (characters[chid] && !Array.isArray(characters[chid].data.alternate_greetings)) {
-            characters[chid].data.alternate_greetings = [];
-        }
     }
 
     const template = $('#alternate_greetings_template .alternate_grettings').clone();
-    const getArray = () => menu_type == 'create' ? create_save.alternate_greetings : characters[chid].data.alternate_greetings;
+    const getArray = () => menu_type == 'create' ? create_save.alternate_greetings : getCharacterAlternateGreetings(chid);
     const popup = new Popup(template, POPUP_TYPE.TEXT, '', {
         wide: true,
         large: true,
         allowVerticalScrolling: true,
         onClose: async () => {
             if (menu_type !== 'create') {
-                await createOrEditCharacter();
+                const character = characters[chid];
+                if (isCharacterDefinitionLocked(character)) {
+                    try {
+                        await saveLockedCharacterAlternateGreetings(chid);
+                    } catch (error) {
+                        console.error('Failed to save alternate greetings for pushed character', error);
+                        toastr.error(error?.message || 'Failed to save alternate greetings.');
+                    }
+                } else {
+                    await createOrEditCharacter();
+                }
             }
         },
     });
@@ -9427,6 +10110,17 @@ export async function createOrEditCharacter(e) {
     $('#rm_info_avatar').html('');
     const formData = new FormData(/** @type {HTMLFormElement} */($('#form_create').get(0)));
     formData.set('fav', String(fav_ch_checked));
+
+    // Ensure ch_name is always set - if empty, use the current character's name
+    if (!formData.get('ch_name') && this_chid !== undefined && characters[this_chid]) {
+        formData.set('ch_name', characters[this_chid].name);
+    }
+
+    // Ensure avatar_url is always set - if empty, use the current character's avatar filename
+    if (!formData.get('avatar_url') && this_chid !== undefined && characters[this_chid]) {
+        formData.set('avatar_url', characters[this_chid].avatar);
+    }
+
     const isNewChat = e instanceof CustomEvent && e.type === 'newChat';
 
     const rawFile = formData.get('avatar');
@@ -9495,6 +10189,7 @@ export async function createOrEditCharacter(e) {
                 { id: '#character_json_data', callback: () => { } },
                 { id: '#alternate_greetings_template', callback: value => create_save.alternate_greetings = value, defaultValue: [] },
                 { id: '#character_world', callback: value => create_save.world = value },
+                { id: '#character_world_unlink', callback: () => { } },
                 { id: '#_character_extensions_fake', callback: value => create_save.extensions = {} },
             ];
 
@@ -9540,6 +10235,28 @@ export async function createOrEditCharacter(e) {
         }
     } else {
         try {
+            const currentChid = Number(this_chid);
+            const currentCharacter = characters[currentChid];
+
+            // For locked (pushed/symlinked) characters, only process real avatar changes.
+            // Debounced saves and other background triggers can call this function with
+            // an empty file input — skip silently to avoid hitting the server-side
+            // symlink guard (403) on the normal /edit endpoint.
+            if (isCharacterDefinitionLocked(currentCharacter)) {
+                if (rawFile instanceof File && rawFile.size > 0) {
+                    await saveLockedCharacterAvatar(currentChid, rawFile, crop_data);
+                    $('#character_world_unlink').val('');
+                    favsToHotswap();
+                    $('#add_avatar_button').replaceWith(
+                        $('#add_avatar_button').val('').clone(true),
+                    );
+                    $('#create_button').attr('value', 'Save');
+                    crop_data = undefined;
+                    await eventSource.emit(event_types.CHARACTER_EDITED, { detail: { id: this_chid, character: characters[this_chid] } });
+                }
+                return;
+            }
+
             let url = '/api/characters/edit';
 
             if (crop_data != undefined) {
@@ -9547,9 +10264,8 @@ export async function createOrEditCharacter(e) {
             }
 
             formData.delete('alternate_greetings');
-            const chid = $('.open_alternate_greetings').data('chid');
-            if (characters[chid] && Array.isArray(characters[chid]?.data?.alternate_greetings)) {
-                for (const value of characters[chid].data.alternate_greetings) {
+            if (characters[currentChid] && Array.isArray(characters[currentChid]?.data?.alternate_greetings)) {
+                for (const value of characters[currentChid].data.alternate_greetings) {
                     formData.append('alternate_greetings', value);
                 }
             }
@@ -9566,7 +10282,21 @@ export async function createOrEditCharacter(e) {
             }
 
             await getOneCharacter(formData.get('avatar_url'));
+            $('#character_world_unlink').val('');
             favsToHotswap(); // Update fav state
+
+            await printCharacters(false); // Refresh character list immediately to show new avatar
+
+            // Force-refresh avatar thumbnails in the DOM by appending a cache-bust timestamp
+            // Must run AFTER printCharacters so the re-rendered img srcs get the busted URL
+            if (formData.get('avatar')) {
+                const avatarUrl = formData.get('avatar_url');
+                const thumbUrl = getThumbnailUrl('avatar', avatarUrl, true);
+                // Update character list thumbnail
+                $(`img[src*="${encodeURIComponent(avatarUrl)}"], img[src*="${avatarUrl}"]`).attr('src', thumbUrl);
+                // Update the character editor avatar preview
+                $('#avatar_load_preview').attr('src', thumbUrl);
+            }
 
             $('#add_avatar_button').replaceWith(
                 $('#add_avatar_button').val('').clone(true),
@@ -10277,6 +11007,18 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
             } else {
                 toastr.success(t`Character Created: ${String(data.file_name).replace('.png', '')}`);
             }
+
+            // Display any data integrity warnings
+            if (data.warnings && Array.isArray(data.warnings) && data.warnings.length > 0) {
+                for (const warning of data.warnings) {
+                    if (warning.severity === 'error') {
+                        toastr.error(warning.message, '⚠️ Character Data Issue');
+                    } else if (warning.severity === 'warning') {
+                        toastr.warning(warning.message, '⚠️ Character Data Issue');
+                    }
+                }
+            }
+
             if (importTags) {
                 await importCharactersTags([avatarFileName]);
                 selectImportedChar(data.file_name);
@@ -10399,9 +11141,8 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
             await renameGroupChat(groupId, oldFileName, newFileName);
         }
         else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
-            characters[characterId].chat = newFileName;
-            $('#selected_chat_pole').val(characters[characterId].chat);
-            await createOrEditCharacter();
+            await updateRemoteChatName(characterId, newFileName);
+            $('#selected_chat_pole').val(newFileName);
         }
 
         if (currentChatId) {
@@ -10654,6 +11395,9 @@ export async function doNavbarIconClick() {
         }
         for (const el of $openDrawers) {
             $(el).toggleClass('closedDrawer openDrawer');
+            if ('ontouchstart' in window) {
+                el.style.removeProperty('display');
+            }
         }
         if ($openDrawers.length && animation_duration) {
             await delay(animation_duration);
@@ -10661,9 +11405,29 @@ export async function doNavbarIconClick() {
         icon.toggleClass('openIcon closedIcon');
         drawer.toggleClass('openDrawer closedDrawer');
 
+        // iOS Safari < 17.4: transition-behavior:allow-discrete can leave display:none
+        // even after .openDrawer is added. Force display directly so CSS cascade can't
+        // interfere. On close paths this inline style is cleared (see else branch below).
+        if ('ontouchstart' in window) {
+            const el = drawer[0];
+            if (el) {
+                const isFlexPanel = drawer.hasClass('fillLeft') || drawer.hasClass('fillRight');
+                el.style.setProperty('display', isFlexPanel ? 'flex' : 'block', 'important');
+            }
+        }
+
         if (targetDrawerID === 'right-nav-panel') {
-            favsToHotswap();
-            $('#rm_print_characters_block').trigger('scroll');
+            try {
+                await favsToHotswap();
+            } catch (error) {
+                console.error('[Character Management] Failed to refresh hot swaps:', error);
+            }
+
+            try {
+                $('#rm_print_characters_block').trigger('scroll');
+            } catch (error) {
+                console.error('[Character Management] Failed to refresh character list scroll state:', error);
+            }
         }
 
         // Set the height of "autoSetHeight" textareas within the drawer to their scroll height
@@ -10676,6 +11440,9 @@ export async function doNavbarIconClick() {
     } else if (drawerWasOpenAlready) {
         icon.toggleClass('closedIcon openIcon');
         drawer.toggleClass('closedDrawer openDrawer');
+        if ('ontouchstart' in window && drawer[0]) {
+            drawer[0].style.removeProperty('display');
+        }
     }
 }
 
@@ -11021,7 +11788,14 @@ jQuery(async function () {
         }
     });
 
-    $('#advanced_div').on('click', function () {
+    $(document).on('click', '#advanced_div, #character_open_advanced, .character_open_advanced, .open_character_popup, [data-target="#character_popup"], [data-target="character_popup"]', function (event) {
+        // Block access for non-admin / non-creator on pushed characters
+        if (this_chid !== undefined && !canAccessAdvancedDefs(this_chid)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            applyCharacterDefinitionLockState(true);
+            return false;
+        }
         if (!is_advanced_char_open) {
             is_advanced_char_open = true;
             $('#character_popup').css({ 'display': 'flex', 'opacity': 0.0 }).addClass('open');
@@ -11171,10 +11945,40 @@ jQuery(async function () {
         $('#creator_notes_spoiler').html(formatCreatorNotes(notes, avatar));
     });
 
-    $('#favorite_button').on('click', function () {
-        updateFavButtonState(!fav_ch_checked);
+    $('#favorite_button').on('click', async function () {
+        const nextFavState = !fav_ch_checked;
+        updateFavButtonState(nextFavState);
+
+        // Update character block in the list immediately with the new fav state
+        const chid = Number(this_chid);
+        if (chid !== undefined) {
+            $(`#CharID${chid}`).toggleClass('is_fav', nextFavState);
+        }
+
         if (menu_type != 'create') {
-            saveCharacterDebounced();
+            const character = characters[chid];
+
+            if (isCharacterDefinitionLocked(character)) {
+                try {
+                    await saveLockedCharacterFavorite(chid, nextFavState);
+                    favsToHotswap();
+                } catch (error) {
+                    updateFavButtonState(!nextFavState);
+                    console.error('Failed to save favorite for pushed character', error);
+                    toastr.error(error?.message || 'Failed to save favorite state.');
+                }
+            } else {
+                // Save favorite immediately without debounce delay (same as locked characters)
+                try {
+                    characters[chid].fav = nextFavState;
+                    await createOrEditCharacter();
+                    favsToHotswap();
+                } catch (error) {
+                    updateFavButtonState(!nextFavState);
+                    console.error('Failed to save favorite state', error);
+                    toastr.error(error?.message || 'Failed to save favorite state.');
+                }
+            }
         }
     });
 
@@ -11262,6 +12066,9 @@ jQuery(async function () {
         optionsPopper.update();
         isOptionsMenuVisible = false;
     }
+
+    globalThis.showOptionsMenu = showMenu;
+    globalThis.hideOptionsMenu = hideMenu;
 
     function isMouseOverButtonOrMenu() {
         return menu.is(':hover, :focus-within') || button.is(':hover, :focus');
@@ -11744,6 +12551,14 @@ jQuery(async function () {
     });
 
     $('#export_button').on('click', function () {
+        if (this_chid !== undefined && characters[this_chid] && isCharacterDefinitionLocked(characters[this_chid])) {
+            $(this).prop('hidden', true).css({ display: 'none', visibility: 'hidden', pointerEvents: 'none' });
+            $('#export_format_popup').hide();
+            isExportPopupOpen = false;
+            exportPopper.update();
+            return;
+        }
+
         isExportPopupOpen = !isExportPopupOpen;
         $('#export_format_popup').toggle(isExportPopupOpen);
         exportPopper.update();
@@ -11861,7 +12676,65 @@ jQuery(async function () {
 
     $(document).on('click', '.drawer-opener', doDrawerOpenClick);
 
-    $('.drawer-toggle').on('click', doNavbarIconClick);
+    $(document).on('click', '.drawer-toggle', doNavbarIconClick);
+
+    // iOS Safari fix: convert .drawer-toggle <div>s into real <button>s.
+    // <button> elements are GUARANTEED to fire click events from taps on iOS
+    // — no cursor:pointer, no @supports trick, no touchend/pointerup wiring
+    // required. This is the most fundamental iOS click-handling mechanism
+    // and works even on stripped-down WKWebViews and PWAs.
+    //
+    // The existing $(document).on('click', '.drawer-toggle', ...) delegation
+    // catches the click and runs doNavbarIconClick exactly as before.
+    if (/iP(hone|ad|od)/i.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+
+        const convertToButton = function (div) {
+            if (!div || div.tagName === 'BUTTON' || div._convertedToButton) return;
+            const button = document.createElement('button');
+            button.type = 'button'; // prevent accidental form submission
+            // Copy every attribute (class, id, data-*, title, etc.)
+            for (let i = 0; i < div.attributes.length; i++) {
+                const attr = div.attributes[i];
+                button.setAttribute(attr.name, attr.value);
+            }
+            // Move all child nodes into the button
+            while (div.firstChild) button.appendChild(div.firstChild);
+            // Reset the UA button look so it visually matches the original div
+            button.style.cssText =
+                'background:transparent;border:0;padding:0;margin:0;' +
+                'font:inherit;color:inherit;text-align:inherit;' +
+                'cursor:pointer;outline:none;' +
+                '-webkit-appearance:none;appearance:none;' +
+                'touch-action:manipulation;';
+            button._convertedToButton = true;
+            div.parentNode.replaceChild(button, div);
+            return button;
+        };
+
+        document.querySelectorAll('#top-settings-holder .drawer-toggle').forEach(convertToButton);
+
+        // Cover any toggle that gets injected later (extensions, dynamic UI).
+        const holder = document.getElementById('top-settings-holder');
+        if (holder) {
+            const observer = new MutationObserver(function (mutations) {
+                for (const m of mutations) {
+                    for (const node of m.addedNodes) {
+                        if (node.nodeType !== 1) continue;
+                        if (node.matches && node.matches('.drawer-toggle') && node.tagName !== 'BUTTON') {
+                            convertToButton(node);
+                        }
+                        if (node.querySelectorAll) {
+                            node.querySelectorAll('.drawer-toggle').forEach(el => {
+                                if (el.tagName !== 'BUTTON') convertToButton(el);
+                            });
+                        }
+                    }
+                }
+            });
+            observer.observe(holder, { childList: true, subtree: true });
+        }
+    }
 
     $('html').on('touchstart mousedown', async function (e) {
         const clickTarget = $(e.target);
@@ -11894,12 +12767,15 @@ jQuery(async function () {
 
         // This autocloses open drawers that are not pinned if a click happens inside the app which does not target them.
         const targetParentHasOpenDrawer = clickTarget.parents('.openDrawer').length;
-        if (!clickTarget.hasClass('drawer-icon') && !clickTarget.hasClass('openDrawer')) {
+        if (!clickTarget.hasClass('drawer-icon') && !clickTarget.closest('.drawer-toggle').length && !clickTarget.hasClass('openDrawer')) {
             const $openDrawers = $('.openDrawer').not('.pinnedOpen');
             if ($openDrawers.length && targetParentHasOpenDrawer === 0) {
                 // Toggle icon and drawer classes
                 $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
                 $openDrawers.toggleClass('closedDrawer openDrawer');
+                if ('ontouchstart' in window) {
+                    $openDrawers.each(function () { this.style.removeProperty('display'); });
+                }
             }
         }
     });

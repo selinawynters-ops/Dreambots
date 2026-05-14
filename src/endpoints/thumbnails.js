@@ -8,6 +8,8 @@ import sanitize from 'sanitize-filename';
 import { Jimp, JimpMime } from '../jimp.js';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
+import { DEFAULT_USER } from '../constants.js';
+import { strip as stripCharacterMetadata } from '../character-card-parser.js';
 import { getConfigValue, invalidateFirefoxCache } from '../util.js';
 
 const thumbnailsEnabled = !!getConfigValue('thumbnails.enabled', true, 'boolean');
@@ -24,6 +26,14 @@ export const dimensions = {
     'avatar': getConfigValue('thumbnails.dimensions.avatar', [96, 144]),
     'persona': getConfigValue('thumbnails.dimensions.persona', [96, 144]),
 };
+
+/**
+ * @param {import('express').Request} request
+ * @returns {boolean}
+ */
+function shouldBypassThumbnailSanitization(request) {
+    return request?.user?.profile?.handle === DEFAULT_USER.handle;
+}
 
 /**
  * Gets a path to thumbnail folder based on the type.
@@ -146,6 +156,11 @@ async function generateThumbnail(directories, type, file) {
             buffer = fs.readFileSync(pathToOriginalFile);
         }
 
+        // Avatar-like images should never cache embedded character-card metadata.
+        if ((type === 'avatar' || type === 'persona') && path.extname(file).toLowerCase() === '.png') {
+            buffer = stripCharacterMetadata(buffer);
+        }
+
         writeFileAtomicSync(pathToCachedFile, buffer);
     }
     catch (outer) {
@@ -162,6 +177,7 @@ async function generateThumbnail(directories, type, file) {
  */
 export async function ensureThumbnailCache(directoriesList) {
     for (const directories of directoriesList) {
+        fs.mkdirSync(directories.thumbnailsBg, { recursive: true });
         const cacheFiles = fs.readdirSync(directories.thumbnailsBg);
 
         // files exist, all ok
@@ -208,6 +224,29 @@ router.get('/', async function (request, response) {
             return response.sendStatus(403);
         }
 
+        const bypassSanitization = shouldBypassThumbnailSanitization(request);
+        const shouldServeOriginalAvatar = bypassSanitization
+            && (type === 'avatar' || type === 'persona')
+            && path.extname(file).toLowerCase() === '.png';
+
+        if (shouldServeOriginalAvatar) {
+            const folder = getOriginalFolder(request.user.directories, type);
+            if (folder === undefined) {
+                return response.sendStatus(400);
+            }
+
+            const pathToOriginalFile = path.join(folder, file);
+            if (!fs.existsSync(pathToOriginalFile)) {
+                return response.sendStatus(404);
+            }
+
+            const contentType = mime.lookup(pathToOriginalFile) || 'image/png';
+            const originalFile = await fsPromises.readFile(pathToOriginalFile);
+            response.setHeader('Content-Type', contentType);
+            invalidateFirefoxCache(pathToOriginalFile, request, response);
+            return response.send(originalFile);
+        }
+
         if (!thumbnailsEnabled) {
             const folder = getOriginalFolder(request.user.directories, type);
 
@@ -220,7 +259,10 @@ router.get('/', async function (request, response) {
                 return response.sendStatus(404);
             }
             const contentType = mime.lookup(pathToOriginalFile) || 'image/png';
-            const originalFile = await fsPromises.readFile(pathToOriginalFile);
+            let originalFile = await fsPromises.readFile(pathToOriginalFile);
+            if (!bypassSanitization && (type === 'avatar' || type === 'persona') && path.extname(file).toLowerCase() === '.png') {
+                originalFile = stripCharacterMetadata(originalFile);
+            }
             response.setHeader('Content-Type', contentType);
 
             invalidateFirefoxCache(pathToOriginalFile, request, response);
@@ -239,8 +281,12 @@ router.get('/', async function (request, response) {
         }
 
         const contentType = mime.lookup(pathToCachedFile) || 'image/jpeg';
-        const cachedFile = await fsPromises.readFile(pathToCachedFile);
+        let cachedFile = await fsPromises.readFile(pathToCachedFile);
+        if (!bypassSanitization && (type === 'avatar' || type === 'persona') && path.extname(file).toLowerCase() === '.png') {
+            cachedFile = stripCharacterMetadata(cachedFile);
+        }
         response.setHeader('Content-Type', contentType);
+        response.setHeader('Cache-Control', 'no-cache');
 
         invalidateFirefoxCache(file, request, response);
 

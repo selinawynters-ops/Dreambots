@@ -447,6 +447,177 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
     getBackupFunction(handle)(backupDirectory, cardName, jsonlData);
 }
 
+function sanitizeThreadId(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const safe = sanitize(raw).replace(/[^a-zA-Z0-9_-]/g, '');
+    return safe.slice(0, 100);
+}
+
+function getChunkStagingRoot(userDirectories) {
+    return path.join(userDirectories.chats, '.chunked-save-staging');
+}
+
+function getChunkThreadDirectory(userDirectories, threadId) {
+    return path.join(getChunkStagingRoot(userDirectories), threadId);
+}
+
+function getChunkManifestPath(userDirectories, threadId) {
+    return path.join(getChunkThreadDirectory(userDirectories, threadId), 'manifest.json');
+}
+
+function readChunkManifest(userDirectories, threadId) {
+    const manifestPath = getChunkManifestPath(userDirectories, threadId);
+    if (!fs.existsSync(manifestPath)) return null;
+    return tryParse(tryReadFileSync(manifestPath) || '') || null;
+}
+
+function writeChunkManifest(userDirectories, threadId, manifest) {
+    const threadDir = getChunkThreadDirectory(userDirectories, threadId);
+    if (!fs.existsSync(threadDir)) {
+        fs.mkdirSync(threadDir, { recursive: true });
+    }
+    const manifestPath = getChunkManifestPath(userDirectories, threadId);
+    writeFileAtomicSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+function cleanupChunkThread(userDirectories, threadId) {
+    const threadDir = getChunkThreadDirectory(userDirectories, threadId);
+    if (fs.existsSync(threadDir)) {
+        fs.rmSync(threadDir, { recursive: true, force: true });
+    }
+}
+
+router.post('/save-chunk', validateAvatarUrlMiddleware, async function (request, response) {
+    try {
+        const handle = request.user.profile?.handle;
+        const threadId = sanitizeThreadId(request.body?.thread_id);
+        const chunkIndex = Number(request.body?.chunk_index);
+        const totalChunks = Number(request.body?.total_chunks);
+        const chatChunk = request.body?.chat_chunk;
+        const avatarUrl = String(request.body?.avatar_url || '').trim();
+        const fileName = String(request.body?.file_name || '').trim();
+        const cardName = String(request.body?.ch_name || '').trim() || avatarUrl.replace('.png', '');
+        const force = !!request.body?.force;
+
+        if (!threadId) return response.status(400).json({ error: 'thread_id is required' });
+        if (!avatarUrl) return response.status(400).json({ error: 'avatar_url is required' });
+        if (!fileName) return response.status(400).json({ error: 'file_name is required' });
+        if (!Array.isArray(chatChunk)) return response.status(400).json({ error: 'chat_chunk must be an array' });
+        if (!Number.isInteger(chunkIndex) || chunkIndex < 0) return response.status(400).json({ error: 'chunk_index must be a non-negative integer' });
+        if (!Number.isInteger(totalChunks) || totalChunks < 1) return response.status(400).json({ error: 'total_chunks must be >= 1' });
+        if (chunkIndex >= totalChunks) return response.status(400).json({ error: 'chunk_index out of range' });
+
+        const existingManifest = readChunkManifest(request.user.directories, threadId);
+        const now = Date.now();
+        let manifest = existingManifest;
+        if (!manifest) {
+            manifest = {
+                thread_id: threadId,
+                handle,
+                avatar_url: avatarUrl,
+                file_name: fileName,
+                ch_name: cardName,
+                total_chunks: totalChunks,
+                force,
+                created_at: now,
+                updated_at: now,
+                received_indexes: [],
+            };
+        } else {
+            if (manifest.handle !== handle) return response.status(403).json({ error: 'thread does not belong to current user' });
+            if (manifest.avatar_url !== avatarUrl || manifest.file_name !== fileName) {
+                return response.status(400).json({ error: 'chunk metadata does not match existing thread' });
+            }
+            if (manifest.total_chunks !== totalChunks) {
+                return response.status(400).json({ error: 'total_chunks mismatch for existing thread' });
+            }
+            manifest.force = force;
+            manifest.updated_at = now;
+        }
+
+        const threadDir = getChunkThreadDirectory(request.user.directories, threadId);
+        if (!fs.existsSync(threadDir)) {
+            fs.mkdirSync(threadDir, { recursive: true });
+        }
+
+        const chunkPath = path.join(threadDir, `${chunkIndex}.json`);
+        writeFileAtomicSync(chunkPath, JSON.stringify(chatChunk), 'utf8');
+
+        const received = new Set(Array.isArray(manifest.received_indexes) ? manifest.received_indexes : []);
+        received.add(chunkIndex);
+        manifest.received_indexes = Array.from(received).sort((a, b) => a - b);
+        writeChunkManifest(request.user.directories, threadId, manifest);
+
+        return response.json({
+            ok: true,
+            thread_id: threadId,
+            received_chunks: manifest.received_indexes.length,
+            total_chunks: manifest.total_chunks,
+            complete: manifest.received_indexes.length === manifest.total_chunks,
+        });
+    } catch (error) {
+        console.error('[ChunkedChatSave] Failed to store chat chunk:', error);
+        return response.status(500).json({ error: 'Failed to store chat chunk' });
+    }
+});
+
+router.post('/finalize-chunked-save', async function (request, response) {
+    try {
+        const threadId = sanitizeThreadId(request.body?.thread_id);
+        if (!threadId) return response.status(400).json({ error: 'thread_id is required' });
+
+        const manifest = readChunkManifest(request.user.directories, threadId);
+        if (!manifest) return response.status(404).json({ error: 'Chunk thread not found' });
+        if (manifest.handle !== request.user.profile?.handle) {
+            return response.status(403).json({ error: 'thread does not belong to current user' });
+        }
+
+        const expectedChunks = Number(manifest.total_chunks || 0);
+        if (!Number.isInteger(expectedChunks) || expectedChunks < 1) {
+            return response.status(400).json({ error: 'Invalid chunk manifest' });
+        }
+
+        const chatData = [];
+        const threadDir = getChunkThreadDirectory(request.user.directories, threadId);
+        for (let i = 0; i < expectedChunks; i++) {
+            const chunkPath = path.join(threadDir, `${i}.json`);
+            if (!fs.existsSync(chunkPath)) {
+                return response.status(400).json({ error: `Missing chunk ${i + 1}/${expectedChunks}` });
+            }
+            const parsedChunk = tryParse(tryReadFileSync(chunkPath) || '');
+            if (!Array.isArray(parsedChunk)) {
+                return response.status(400).json({ error: `Invalid chunk ${i + 1}/${expectedChunks}` });
+            }
+            chatData.push(...parsedChunk);
+        }
+
+        const avatarUrl = String(manifest.avatar_url || '');
+        const cardName = String(manifest.ch_name || '').trim() || avatarUrl.replace('.png', '');
+        const chatFileName = `${String(manifest.file_name)}.jsonl`;
+        const chatFilePath = path.join(request.user.directories.chats, cardName, sanitize(chatFileName));
+
+        await trySaveChat(
+            chatData,
+            chatFilePath,
+            !!manifest.force,
+            request.user.profile.handle,
+            cardName,
+            request.user.directories.backups,
+        );
+
+        cleanupChunkThread(request.user.directories, threadId);
+        return response.json({ ok: true, thread_id: threadId, chunked: true, total_chunks: expectedChunks });
+    } catch (error) {
+        if (error instanceof IntegrityMismatchError) {
+            console.error(error.message);
+            return response.status(400).json({ error: 'integrity' });
+        }
+        console.error('[ChunkedChatSave] Failed to finalize chat save:', error);
+        return response.status(500).json({ error: 'Failed to finalize chunked chat save' });
+    }
+});
+
 router.post('/save', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const handle = request.user.profile.handle;

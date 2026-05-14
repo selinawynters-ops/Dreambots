@@ -4,11 +4,13 @@ import crypto from 'node:crypto';
 
 import storage from 'node-persist';
 import express from 'express';
+import QRCode from 'qrcode';
 
 import { getUserAvatar, toKey, getPasswordHash, getPasswordSalt, createBackupArchive, ensurePublicDirectoriesExist, toAvatarKey } from '../users.js';
 import { SETTINGS_FILE } from '../constants.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { color, Cache } from '../util.js';
+import { createTotpUrl, generateBackupCodes, generateTotpSecret, getBackupCodeHash, verifyTotpCode } from '../totp.js';
 
 const RESET_CACHE = new Cache(5 * 60 * 1000);
 
@@ -44,12 +46,126 @@ router.get('/me', async (request, response) => {
             avatar: await getUserAvatar(user.handle),
             admin: user.admin,
             password: !!user.password,
+            twoFactorEnabled: !!user.twoFactorEnabled,
             created: user.created,
         };
 
         return response.json(viewModel);
     } catch (error) {
         console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/2fa/setup', async (request, response) => {
+    try {
+        const handle = String(request.body.handle || request.user.profile.handle);
+
+        if (handle !== request.user.profile.handle) {
+            console.warn('2FA setup failed: Unauthorized');
+            return response.status(403).json({ error: 'Unauthorized' });
+        }
+
+        /** @type {import('../users.js').User} */
+        const user = await storage.getItem(toKey(handle));
+
+        if (!user || !user.enabled) {
+            console.warn('2FA setup failed: User not found or disabled');
+            return response.status(404).json({ error: 'User not found' });
+        }
+
+        if (user.password && user.password !== getPasswordHash(request.body.password, user.salt)) {
+            console.warn('2FA setup failed: Incorrect password');
+            return response.status(403).json({ error: 'Incorrect password' });
+        }
+
+        const secret = generateTotpSecret();
+        const otpauthUrl = createTotpUrl(secret, user.handle);
+        const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
+        return response.json({
+            secret,
+            otpauthUrl,
+            qrCodeDataUrl,
+        });
+    } catch (error) {
+        console.error('2FA setup failed:', error);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/2fa/enable', async (request, response) => {
+    try {
+        const handle = String(request.body.handle || request.user.profile.handle);
+
+        if (handle !== request.user.profile.handle) {
+            console.warn('2FA enable failed: Unauthorized');
+            return response.status(403).json({ error: 'Unauthorized' });
+        }
+
+        /** @type {import('../users.js').User} */
+        const user = await storage.getItem(toKey(handle));
+
+        if (!user || !user.enabled) {
+            console.warn('2FA enable failed: User not found or disabled');
+            return response.status(404).json({ error: 'User not found' });
+        }
+
+        if (user.password && user.password !== getPasswordHash(request.body.password, user.salt)) {
+            console.warn('2FA enable failed: Incorrect password');
+            return response.status(403).json({ error: 'Incorrect password' });
+        }
+
+        const secret = String(request.body.secret || '');
+        const code = String(request.body.code || '');
+
+        if (!verifyTotpCode(secret, code)) {
+            console.warn('2FA enable failed: Incorrect verification code');
+            return response.status(403).json({ error: 'Incorrect verification code' });
+        }
+
+        const backupCodes = generateBackupCodes();
+        user.twoFactorEnabled = true;
+        user.twoFactorSecret = secret;
+        user.twoFactorBackupCodes = backupCodes.map(getBackupCodeHash);
+        await storage.setItem(toKey(handle), user);
+
+        return response.json({ backupCodes });
+    } catch (error) {
+        console.error('2FA enable failed:', error);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/2fa/disable', async (request, response) => {
+    try {
+        const handle = String(request.body.handle || request.user.profile.handle);
+        const isSelf = handle === request.user.profile.handle;
+
+        if (!isSelf && !request.user.profile.admin) {
+            console.warn('2FA disable failed: Unauthorized');
+            return response.status(403).json({ error: 'Unauthorized' });
+        }
+
+        /** @type {import('../users.js').User} */
+        const user = await storage.getItem(toKey(handle));
+
+        if (!user) {
+            console.warn('2FA disable failed: User not found');
+            return response.status(404).json({ error: 'User not found' });
+        }
+
+        if (isSelf && user.password && user.password !== getPasswordHash(request.body.password, user.salt)) {
+            console.warn('2FA disable failed: Incorrect password');
+            return response.status(403).json({ error: 'Incorrect password' });
+        }
+
+        user.twoFactorEnabled = false;
+        user.twoFactorSecret = '';
+        user.twoFactorBackupCodes = [];
+        await storage.setItem(toKey(handle), user);
+        return response.sendStatus(204);
+    } catch (error) {
+        console.error('2FA disable failed:', error);
         return response.sendStatus(500);
     }
 });
@@ -150,7 +266,7 @@ router.post('/backup', async (request, response) => {
             return response.status(403).json({ error: 'Unauthorized' });
         }
 
-        await createBackupArchive(handle, response);
+        await createBackupArchive(handle, response, request.user.profile);
     } catch (error) {
         console.error('Backup failed', error);
         return response.sendStatus(500);

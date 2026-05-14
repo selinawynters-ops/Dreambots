@@ -41,6 +41,7 @@ import {
     PromptManager,
     promptManagerDefaultPromptOrders,
 } from './PromptManager.js';
+import { clearServerHiddenLoreActivations, emitServerHiddenLoreActivations, getServerHiddenLoreActivationsFromResponse } from './world-info.js';
 
 import { forceCharacterEditorTokenize, getCustomStoppingStrings, persona_description_positions, power_user } from './power-user.js';
 import { SECRET_KEYS, secret_state, writeSecret } from './secrets.js';
@@ -62,6 +63,7 @@ import {
     isValidUrl,
     parseJsonFile,
     resetScrollHeight,
+    startsWithMatcher,
     stringFormat,
     textValueMatcher,
     uuidv4,
@@ -197,6 +199,8 @@ export const chat_completion_sources = {
     AZURE_OPENAI: 'azure_openai',
     ZAI: 'zai',
     SILICONFLOW: 'siliconflow',
+    NAVY: 'navy',
+    ROUTEWAY: 'routeway',
 };
 
 const character_names_behavior = {
@@ -301,6 +305,12 @@ export const settingsToUpdate = {
     electronhub_model: ['#model_electronhub_select', 'electronhub_model', false, true],
     electronhub_sort_models: ['#electronhub_sort_models', 'electronhub_sort_models', false, true],
     electronhub_group_models: ['#electronhub_group_models', 'electronhub_group_models', false, true],
+    navy_model: ['#model_navy_select', 'navy_model', false, true],
+    navy_sort_models: ['#navy_sort_models', 'navy_sort_models', false, true],
+    navy_group_models: ['#navy_group_models', 'navy_group_models', false, true],
+    routeway_model: ['#model_routeway_select', 'routeway_model', false, true],
+    routeway_sort_models: ['#routeway_sort_models', 'routeway_sort_models', false, true],
+    routeway_group_models: ['#routeway_group_models', 'routeway_group_models', false, true],
     nanogpt_model: ['#model_nanogpt_select', 'nanogpt_model', false, true],
     deepseek_model: ['#model_deepseek_select', 'deepseek_model', false, true],
     aimlapi_model: ['#model_aimlapi_select', 'aimlapi_model', false, true],
@@ -410,6 +420,12 @@ const default_settings = {
     electronhub_model: 'gpt-4o-mini',
     electronhub_sort_models: 'alphabetically',
     electronhub_group_models: false,
+    navy_model: 'gpt-4o-mini',
+    navy_sort_models: 'alphabetically',
+    navy_group_models: false,
+    routeway_model: 'gpt-4o-mini',
+    routeway_sort_models: 'alphabetically',
+    routeway_group_models: false,
     nanogpt_model: 'gpt-4o-mini',
     deepseek_model: 'deepseek-chat',
     aimlapi_model: 'chatgpt-4o-latest',
@@ -838,6 +854,13 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
 
     chatCompletion.add(new MessageCollection('chatHistory'), prompts.index('chatHistory'));
 
+    // Track message exclusions due to token budget constraints
+    const truncationInfo = {
+        messagesExcluded: 0,
+        firstExcludedIndex: null,
+        totalMessagesRequested: messages.length,
+    };
+
     // Reserve budget for new chat message
     const newChat = selected_group ? oai_settings.new_group_chat_prompt : oai_settings.new_chat_prompt;
     const newChatMessage = await Message.createAsync('system', substituteParams(newChat), 'newMainChat');
@@ -907,14 +930,18 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
          * @param {MediaAttachment} media - The media attachment to inline.
          */
         async function inlineMediaAttachment(media) {
+            console.log('[DIAGNOSTIC] inlineMediaAttachment called:', media?.type, media?.url);
             if (!media || !media.url) {
+                console.log('[DIAGNOSTIC] inlineMediaAttachment skipped: no media or url');
                 return;
             }
             if (!media.type) {
                 media.type = MEDIA_TYPE.IMAGE;
             }
             if (imageInlining && media.type === MEDIA_TYPE.IMAGE) {
+                console.log('[DIAGNOSTIC] Calling addImage for', media.url);
                 await chatMessage.addImage(media.url);
+                console.log('[DIAGNOSTIC] addImage finished. chatMessage.content now has', chatMessage.content?.length, 'parts');
             }
             if (videoInlining && media.type === MEDIA_TYPE.VIDEO) {
                 await chatMessage.addVideo(media.url);
@@ -961,6 +988,11 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
         if (chatCompletion.canAfford(chatMessage)) {
             chatCompletion.insertAtStart(chatMessage, 'chatHistory');
         } else {
+            // Track message exclusion due to budget limits
+            truncationInfo.messagesExcluded++;
+            if (truncationInfo.firstExcludedIndex === null) {
+                truncationInfo.firstExcludedIndex = messages.length - index;
+            }
             break;
         }
     }
@@ -968,6 +1000,18 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
     // Insert and free new chat
     chatCompletion.freeBudget(newChatMessage);
     chatCompletion.insertAtStart(newChatMessage, 'chatHistory');
+
+    // Add a notice if chat history was truncated due to token budget limits
+    if (truncationInfo.messagesExcluded > 0) {
+        const truncationNotice = await Message.createAsync(
+            'system',
+            `[Context Notice: ${truncationInfo.messagesExcluded} earlier message(s) were excluded to fit within the token limit. ` +
+            `The conversation started from message #${truncationInfo.firstExcludedIndex}. ` +
+            `If the context seems incomplete, ask the user for clarification about earlier events.]`,
+            'contextTruncationNotice'
+        );
+        chatCompletion.insertAtStart(truncationNotice, 'chatHistory');
+    }
 
     // Reserve budget for group nudge
     if (selected_group && groupNudgeMessage) {
@@ -1073,7 +1117,11 @@ export function getPromptRole(role) {
  * @param {object[]} options.messageExamples - Array containing all message examples.
  * @returns {Promise<void>}
  */
-async function populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples }) {
+async function populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples, hasRestrictedHiddenLore = false, loreExclusionInfo = {} }) {
+    // NOTE: Hidden lore is hidden from the UI (user interface) but should be fully processed by the LLM
+    // The LLM receives all necessary prompts including enhanceDefinitions and summary
+    // The "9z" prefix on hidden lorebook names ensures they're hidden from user display only
+
     // Helper function for preparing a prompt, that already exists within the prompt collection, for completion
     const addToChatCompletion = async (source, target = null) => {
         // We need the prompts array to determine a position for the source.
@@ -1103,6 +1151,19 @@ async function populateChatCompletion(prompts, chatCompletion, { bias, quietProm
     await addToChatCompletion('worldInfoBefore');
     await addToChatCompletion('main');
     await addToChatCompletion('worldInfoAfter');
+
+    // Add a notice if lore entries were excluded due to budget limits
+    if (loreExclusionInfo?.entriesExcludedByBudget > 0) {
+        const loreWarning = await Message.createAsync(
+            'system',
+            `[Lore Notice: ${loreExclusionInfo.entriesExcludedByBudget} world information ` +
+            `entries were excluded due to token limits. Your character's background knowledge may be incomplete. ` +
+            `Ask the user for specific lore details if needed.]`,
+            'loreExclusionNotice'
+        );
+        chatCompletion.insertAtEnd(loreWarning, 'worldInfoAfter');
+    }
+
     await addToChatCompletion('charDescription');
     await addToChatCompletion('charPersonality');
     await addToChatCompletion('scenario');
@@ -1437,6 +1498,8 @@ export async function prepareOpenAIMessages({
     scenario,
     worldInfoBefore,
     worldInfoAfter,
+    hasRestrictedHiddenLore = false,
+    loreExclusionInfo = {},
     bias,
     type,
     quietPrompt,
@@ -1475,7 +1538,7 @@ export async function prepareOpenAIMessages({
         });
 
         // Fill the chat completion with as much context as the budget allows
-        await populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples });
+        await populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples, hasRestrictedHiddenLore, loreExclusionInfo });
     } catch (error) {
         if (error instanceof TokenBudgetExceededError) {
             toastr.error(t`Mandatory prompts exceed the context size.`);
@@ -1628,6 +1691,10 @@ export function getChatCompletionModel(settings = null) {
             return settings.electronhub_model;
         case chat_completion_sources.CHUTES:
             return settings.chutes_model;
+        case chat_completion_sources.NAVY:
+            return settings.navy_model;
+        case chat_completion_sources.ROUTEWAY:
+            return settings.routeway_model;
         case chat_completion_sources.NANOGPT:
             return settings.nanogpt_model;
         case chat_completion_sources.DEEPSEEK:
@@ -1753,6 +1820,114 @@ function calculateElectronHubCost() {
     $('#electronhub_max_prompt_cost').text(cost);
 }
 
+function getNavyModelTemplate(option) {
+    const optionModel = getNavyOptionModel(option?.element);
+    const model = optionModel || model_list.find(x => x.id === option?.element?.value);
+
+    if (!option.id || !model) {
+        return option.text;
+    }
+
+    const contextLength = getNavyContextLength(model);
+    const contextLabel = Number.isFinite(contextLength) ? `${contextLength} ctx` : 'ctx n/a';
+    const inputPrice = getNavyInputPrice(model);
+    const outputPrice = getNavyOutputPrice(model);
+    let price = 'price n/a';
+    if (Number.isFinite(inputPrice) && Number.isFinite(outputPrice)) {
+        price = (inputPrice === 0 && outputPrice === 0)
+            ? 'Free'
+            : `$${inputPrice}/$${outputPrice} in/out Mtoken`;
+    }
+    const provider = model?.owned_by ? String(model.owned_by) : null;
+    const tokenMultiplier = parseNavyNumeric(model?.token_multiplier);
+    const usageLabel = Number.isFinite(tokenMultiplier) ? `${tokenMultiplier}x usage` : '';
+    const premiumLabel = model?.premium ? 'Premium' : '';
+    const metadataParts = [provider, usageLabel, premiumLabel].filter(Boolean);
+    const metadataLabel = metadataParts.length ? ` | ${metadataParts.join(' | ')}` : '';
+
+    return $((`
+        <div class="flex-container alignItemsBaseline" title="${DOMPurify.sanitize(model.id)}">
+            <strong>${DOMPurify.sanitize(model.name || model.id)}</strong> | ${contextLabel} | <small>${price}</small>${DOMPurify.sanitize(metadataLabel)}
+        </div>
+    `));
+}
+
+function calculateNavyCost() {
+    if (oai_settings.chat_completion_source !== chat_completion_sources.NAVY) {
+        return;
+    }
+
+    let cost = 'N/A';
+    const model = model_list.find(x => x.id === oai_settings.navy_model);
+
+    if (model) {
+        const outputPrice = getNavyOutputPrice(model);
+        const inputPrice = getNavyInputPrice(model);
+        const outputCost = Number(outputPrice / 1000000);
+        const inputCost = Number(inputPrice / 1000000);
+        const outputTokens = oai_settings.openai_max_tokens;
+        const inputTokens = (oai_settings.openai_max_context - outputTokens);
+        const totalCost = (outputCost * outputTokens) + (inputCost * inputTokens);
+        if (!isNaN(totalCost)) {
+            cost = '$' + totalCost.toFixed(4);
+        }
+    }
+
+    $('#navy_max_prompt_cost').text(cost);
+}
+
+function getRoutewayModelTemplate(option) {
+    const optionModel = getRoutewayOptionModel(option?.element);
+    const model = optionModel || model_list.find(x => x.id === option?.element?.value);
+
+    if (!option.id || !model) {
+        return option.text;
+    }
+
+    const contextLength = getRoutewayContextLength(model);
+    const contextLabel = Number.isFinite(contextLength) ? `${contextLength} ctx` : 'ctx n/a';
+    const inputPrice = getRoutewayInputPrice(model);
+    const outputPrice = getRoutewayOutputPrice(model);
+    let price = 'price n/a';
+    if (Number.isFinite(inputPrice) && Number.isFinite(outputPrice)) {
+        price = (inputPrice === 0 && outputPrice === 0)
+            ? 'Free'
+            : `$${inputPrice}/$${outputPrice} in/out Mtoken`;
+    }
+    const provider = model?.owned_by ? String(model.owned_by) : null;
+    const metadataLabel = provider ? ` | ${provider}` : '';
+
+    return $((`
+        <div class="flex-container alignItemsBaseline" title="${DOMPurify.sanitize(model.id)}">
+            <strong>${DOMPurify.sanitize(model.name || model.id)}</strong> | ${contextLabel} | <small>${price}</small>${DOMPurify.sanitize(metadataLabel)}
+        </div>
+    `));
+}
+
+function calculateRoutewayCost() {
+    if (oai_settings.chat_completion_source !== chat_completion_sources.ROUTEWAY) {
+        return;
+    }
+
+    let cost = 'N/A';
+    const model = model_list.find(x => x.id === oai_settings.routeway_model);
+
+    if (model) {
+        const outputPrice = getRoutewayOutputPrice(model);
+        const inputPrice = getRoutewayInputPrice(model);
+        const outputCost = Number(outputPrice / 1000000);
+        const inputCost = Number(inputPrice / 1000000);
+        const outputTokens = oai_settings.openai_max_tokens;
+        const inputTokens = (oai_settings.openai_max_context - outputTokens);
+        const totalCost = (outputCost * outputTokens) + (inputCost * inputTokens);
+        if (!isNaN(totalCost)) {
+            cost = '$' + totalCost.toFixed(4);
+        }
+    }
+
+    $('#routeway_max_prompt_cost').text(cost);
+}
+
 function getChutesModelTemplate(option) {
     const model = model_list.find(x => x.id === option?.element?.value);
 
@@ -1875,28 +2050,30 @@ function saveModelList(data) {
                     text: model.id,
                 }));
         });
-        // If the selected model is not in the list, revert to default
+        // Restore the saved model; only fall back to default when nothing is saved.
         if (oai_settings.show_external_models) {
-            const model = model_list.findIndex((model) => model.id == oai_settings.openai_model) !== -1 ? oai_settings.openai_model : default_settings.openai_model;
+            const model = oai_settings.openai_model || default_settings.openai_model;
             $('#model_openai_select').val(model).trigger('change');
         }
     }
 
     if (oai_settings.chat_completion_source == chat_completion_sources.CUSTOM) {
         $('.model_custom_select').empty();
-        $('.model_custom_select').append('<option value="">None</option>');
         model_list.forEach((model) => {
             $('.model_custom_select').append(
                 $('<option>', {
                     value: model.id,
                     text: model.id,
-                    selected: model.id == oai_settings.custom_model,
                 }));
         });
 
+        // Only fall back to the first available model when nothing has been saved yet.
         if (!oai_settings.custom_model && model_list.length > 0) {
-            $('#model_custom_select').val(model_list[0].id).trigger('change');
+            oai_settings.custom_model = model_list[0].id;
         }
+
+        // Always restore the saved model selection after repopulating (matches all other providers).
+        $('#model_custom_select').val(oai_settings.custom_model).trigger('change');
     }
 
     if (oai_settings.chat_completion_source == chat_completion_sources.AIMLAPI) {
@@ -1919,8 +2096,8 @@ function saveModelList(data) {
             $('#model_mistralai_select').append(new Option(model.id, model.id));
         }
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.mistralai_model);
-        if (!selectedModel) {
+        // Only set a default when no model is saved; keep the user's choice even if not in list.
+        if (!oai_settings.mistralai_model) {
             oai_settings.mistralai_model = model_list.find(model => model?.capabilities?.completion_chat)?.id;
         }
 
@@ -1937,8 +2114,7 @@ function saveModelList(data) {
         const groupedList = oai_settings.electronhub_group_models ? electronHubGroupByVendor(model_list) : model_list;
         appendElectronHubOptions(groupedList, oai_settings.electronhub_group_models);
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.electronhub_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.electronhub_model)) {
+        if (model_list.length > 0 && !oai_settings.electronhub_model) {
             oai_settings.electronhub_model = model_list[0].id;
         }
 
@@ -1958,12 +2134,43 @@ function saveModelList(data) {
             $('#model_chutes_select').append(option);
         }
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.chutes_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.chutes_model)) {
+        if (model_list.length > 0 && !oai_settings.chutes_model) {
             oai_settings.chutes_model = model_list[0].id;
         }
 
         $('#model_chutes_select').val(oai_settings.chutes_model).trigger('change');
+    }
+
+    if (oai_settings.chat_completion_source == chat_completion_sources.NAVY) {
+        model_list = navySortBy(model_list, oai_settings.navy_sort_models);
+
+        $('#model_navy_select').empty();
+
+        const groupedList = oai_settings.navy_group_models ? navyGroupByVendor(model_list) : model_list;
+        appendNavyOptions(groupedList, oai_settings.navy_group_models);
+
+        if (model_list.length > 0 && !oai_settings.navy_model) {
+            oai_settings.navy_model = model_list[0].id;
+        }
+
+        $('#model_navy_select').val(oai_settings.navy_model).trigger('change');
+        hydrateNavyOptionMetadata();
+    }
+
+    if (oai_settings.chat_completion_source == chat_completion_sources.ROUTEWAY) {
+        model_list = routewaySortBy(model_list, oai_settings.routeway_sort_models);
+
+        $('#model_routeway_select').empty();
+
+        const groupedList = oai_settings.routeway_group_models ? routewayGroupByVendor(model_list) : model_list;
+        appendRoutewayOptions(groupedList, oai_settings.routeway_group_models);
+
+        if (model_list.length > 0 && !oai_settings.routeway_model) {
+            oai_settings.routeway_model = model_list[0].id;
+        }
+
+        $('#model_routeway_select').val(oai_settings.routeway_model).trigger('change');
+        hydrateRoutewayOptionMetadata();
     }
 
     if (oai_settings.chat_completion_source == chat_completion_sources.NANOGPT) {
@@ -1976,8 +2183,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.nanogpt_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.nanogpt_model)) {
+        if (model_list.length > 0 && !oai_settings.nanogpt_model) {
             oai_settings.nanogpt_model = model_list[0].id;
         }
 
@@ -1994,8 +2200,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.deepseek_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.deepseek_model)) {
+        if (model_list.length > 0 && !oai_settings.deepseek_model) {
             oai_settings.deepseek_model = model_list[0].id;
         }
 
@@ -2012,8 +2217,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.pollinations_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.pollinations_model)) {
+        if (model_list.length > 0 && !oai_settings.pollinations_model) {
             oai_settings.pollinations_model = model_list[0].id;
         }
 
@@ -2049,8 +2253,7 @@ function saveModelList(data) {
             }
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.google_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.google_model)) {
+        if (model_list.length > 0 && !oai_settings.google_model) {
             oai_settings.google_model = model_list[0].id;
         }
 
@@ -2067,8 +2270,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.groq_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.groq_model)) {
+        if (model_list.length > 0 && !oai_settings.groq_model) {
             oai_settings.groq_model = model_list[0].id;
         }
 
@@ -2085,8 +2287,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.siliconflow_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.siliconflow_model)) {
+        if (model_list.length > 0 && !oai_settings.siliconflow_model) {
             oai_settings.siliconflow_model = model_list[0].id;
         }
 
@@ -2106,8 +2307,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.fireworks_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.fireworks_model)) {
+        if (model_list.length > 0 && !oai_settings.fireworks_model) {
             oai_settings.fireworks_model = model_list[0].id;
         }
 
@@ -2128,8 +2328,7 @@ function saveModelList(data) {
             $('#model_cometapi_select').append(new Option(model.id, model.id));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.cometapi_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.cometapi_model)) {
+        if (model_list.length > 0 && !oai_settings.cometapi_model) {
             oai_settings.cometapi_model = model_list[0].id;
             saveSettingsDebounced();
         }
@@ -2157,8 +2356,7 @@ function saveModelList(data) {
                 }));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.xai_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.xai_model)) {
+        if (model_list.length > 0 && !oai_settings.xai_model) {
             oai_settings.xai_model = model_list[0].id;
         }
 
@@ -2171,8 +2369,7 @@ function saveModelList(data) {
             $('#model_moonshot_select').append(new Option(model.id, model.id));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.moonshot_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.moonshot_model)) {
+        if (model_list.length > 0 && !oai_settings.moonshot_model) {
             oai_settings.moonshot_model = model_list[0].id;
         }
 
@@ -2308,6 +2505,122 @@ function electronHubGroupByVendor(array) {
     }, new Map());
 }
 
+function appendNavyOptions(model_list, groupModels = false) {
+    const appendOption = (model, parent = null) => {
+        const option = $('<option>', {
+            value: model.id,
+            text: model.name || model.id,
+        });
+
+        option.attr('data-model', JSON.stringify(model));
+        (parent || $('#model_navy_select')).append(option);
+    };
+
+    if (groupModels) {
+        model_list.forEach((models, vendor) => {
+            const optgroup = $('<optgroup>').attr('label', vendor);
+
+            models.forEach((model) => {
+                appendOption(model, optgroup);
+            });
+
+            $('#model_navy_select').append(optgroup);
+        });
+    } else {
+        model_list.forEach((model) => {
+            appendOption(model);
+        });
+    }
+}
+
+function appendRoutewayOptions(model_list, groupModels = false) {
+    const appendOption = (model, parent = null) => {
+        const option = $('<option>', {
+            value: model.id,
+            text: model.name || model.id,
+        });
+
+        option.attr('data-model', JSON.stringify(model));
+        (parent || $('#model_routeway_select')).append(option);
+    };
+
+    if (groupModels) {
+        model_list.forEach((models, vendor) => {
+            const optgroup = $('<optgroup>').attr('label', vendor);
+
+            models.forEach((model) => {
+                appendOption(model, optgroup);
+            });
+
+            $('#model_routeway_select').append(optgroup);
+        });
+    } else {
+        model_list.forEach((model) => {
+            appendOption(model);
+        });
+    }
+}
+
+function navySortBy(data, property = 'alphabetically') {
+    return data.sort((a, b) => {
+        if (property === 'context_length') {
+            const bContext = Number.isFinite(getNavyContextLength(b)) ? getNavyContextLength(b) : 0;
+            const aContext = Number.isFinite(getNavyContextLength(a)) ? getNavyContextLength(a) : 0;
+            return bContext - aContext;
+        } else {
+            return (a?.name || a?.id || '').localeCompare(b?.name || b?.id || '');
+        }
+    });
+}
+
+function navyGroupByVendor(array) {
+    return array.reduce((acc, curr) => {
+        const vendor = String(curr?.name || curr?.id || 'Other').split(':')[0].trim() || 'Other';
+
+        if (!acc.has(vendor)) {
+            acc.set(vendor, []);
+        }
+
+        acc.get(vendor).push(curr);
+
+        return acc;
+    }, new Map());
+}
+
+function routewaySortBy(data, property = 'alphabetically') {
+    return data.sort((a, b) => {
+        if (property === 'context_length') {
+            const bContext = Number.isFinite(getRoutewayContextLength(b)) ? getRoutewayContextLength(b) : 0;
+            const aContext = Number.isFinite(getRoutewayContextLength(a)) ? getRoutewayContextLength(a) : 0;
+            return bContext - aContext;
+        } else if (property === 'pricing.input') {
+            const aPrice = Number.isFinite(getRoutewayInputPrice(a)) ? getRoutewayInputPrice(a) : Number.POSITIVE_INFINITY;
+            const bPrice = Number.isFinite(getRoutewayInputPrice(b)) ? getRoutewayInputPrice(b) : Number.POSITIVE_INFINITY;
+            return aPrice - bPrice;
+        } else if (property === 'pricing.output') {
+            const aPrice = Number.isFinite(getRoutewayOutputPrice(a)) ? getRoutewayOutputPrice(a) : Number.POSITIVE_INFINITY;
+            const bPrice = Number.isFinite(getRoutewayOutputPrice(b)) ? getRoutewayOutputPrice(b) : Number.POSITIVE_INFINITY;
+            return aPrice - bPrice;
+        } else {
+            return (a?.name || a?.id || '').localeCompare(b?.name || b?.id || '');
+        }
+    });
+}
+
+function routewayGroupByVendor(array) {
+    return array.reduce((acc, curr) => {
+        const vendor = String(curr?.owned_by || curr?.name || curr?.id || 'Other').trim() || 'Other';
+
+        if (!acc.has(vendor)) {
+            acc.set(vendor, []);
+        }
+
+        acc.get(vendor).push(curr);
+
+        return acc;
+    }, new Map());
+}
+
 function aimlapiGroupByVendor(array) {
     return array.reduce((acc, curr) => {
         const vendor = curr.info.developer;
@@ -2381,6 +2694,7 @@ function getReasoningEffort(settings = null, model = null) {
         chat_completion_sources.COMETAPI,
         chat_completion_sources.ELECTRONHUB,
         chat_completion_sources.CHUTES,
+        chat_completion_sources.ROUTEWAY,
     ];
 
     if (!reasoningEffortSources.includes(settings.chat_completion_source)) {
@@ -2444,7 +2758,7 @@ function getVerbosity(settings = null) {
  * @param {import('../script.js').AdditionalRequestOptions} options Additional request options
  * @returns {Promise<object>} Final generation parameters object appropriate for the chat completion source
  */
-export async function createGenerationParameters(settings, model, type, messages, { jsonSchema = null } = {}) {
+export async function createGenerationParameters(settings, model, type, messages, { jsonSchema = null, hiddenLoreContext = null } = {}) {
     // HACK: Filter out null and non-object messages
     if (!Array.isArray(messages)) {
         throw new Error('messages must be an array');
@@ -2564,6 +2878,10 @@ export async function createGenerationParameters(settings, model, type, messages
         'custom_prompt_post_processing': settings.custom_prompt_post_processing,
         'verbosity': getVerbosity(settings),
     };
+
+    if (hiddenLoreContext) {
+        generate_data.dreamtavern_hidden_lore_context = hiddenLoreContext;
+    }
 
     if (settings.chat_completion_source === chat_completion_sources.AZURE_OPENAI) {
         generate_data.azure_base_url = settings.azure_base_url;
@@ -2805,14 +3123,34 @@ export async function createGenerationParameters(settings, model, type, messages
  * @returns {Promise<unknown>}
  * @throws {Error}
  */
-async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } = {}) {
+async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null, hiddenLoreContext = null } = {}) {
     // Provide default abort signal
     if (!signal) {
         signal = new AbortController().signal;
     }
 
     const model = getChatCompletionModel(oai_settings);
-    const { generate_data, stream, canMultiSwipe } = await createGenerationParameters(oai_settings, model, type, messages, { jsonSchema });
+    const { generate_data, stream, canMultiSwipe } = await createGenerationParameters(oai_settings, model, type, messages, { jsonSchema, hiddenLoreContext });
+
+    // DIAGNOSTIC: Log media in outgoing messages
+    const mediaCounts = { image_url: 0, video_url: 0, audio_url: 0 };
+    if (Array.isArray(generate_data.messages)) {
+        for (const msg of generate_data.messages) {
+            if (Array.isArray(msg.content)) {
+                for (const part of msg.content) {
+                    if (part?.type === 'image_url') mediaCounts.image_url++;
+                    if (part?.type === 'video_url') mediaCounts.video_url++;
+                    if (part?.type === 'audio_url') mediaCounts.audio_url++;
+                }
+            }
+        }
+    }
+    if (mediaCounts.image_url || mediaCounts.video_url || mediaCounts.audio_url) {
+        console.log('[DIAGNOSTIC] Frontend sending media:', mediaCounts, 'source:', generate_data.chat_completion_source, 'model:', generate_data.model);
+    } else {
+        console.log('[DIAGNOSTIC] Frontend sending NO media attachments. source:', generate_data.chat_completion_source, 'model:', generate_data.model);
+    }
+
     await eventSource.emit(event_types.CHAT_COMPLETION_SETTINGS_READY, generate_data);
 
     const generate_url = '/api/backends/chat-completions/generate';
@@ -2827,6 +3165,14 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
         tryParseStreamingError(response, await response.text());
         throw new Error(`Got response status ${response.status}`);
     }
+
+    const hiddenLoreActivations = getServerHiddenLoreActivationsFromResponse(response);
+    if (hiddenLoreActivations.length) {
+        await emitServerHiddenLoreActivations(hiddenLoreActivations);
+    } else {
+        clearServerHiddenLoreActivations();
+    }
+
     if (stream) {
         const eventStream = getEventSourceStream();
         response.body.pipeThrough(eventStream);
@@ -2947,7 +3293,7 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             }
         });
         return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
-    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES].includes(chat_completion_source)) {
+    } else if ([chat_completion_sources.CUSTOM, chat_completion_sources.POLLINATIONS, chat_completion_sources.AIMLAPI, chat_completion_sources.MOONSHOT, chat_completion_sources.COMETAPI, chat_completion_sources.ELECTRONHUB, chat_completion_sources.NANOGPT, chat_completion_sources.NAVY, chat_completion_sources.ZAI, chat_completion_sources.SILICONFLOW, chat_completion_sources.CHUTES].includes(chat_completion_source)) {
         if (show_thoughts) {
             state.reasoning +=
                 data.choices?.filter(x => x?.delta?.reasoning_content)?.[0]?.delta?.reasoning_content ??
@@ -3275,20 +3621,26 @@ class Message {
      */
     async addImage(image) {
         this.content = this.ensureContentIsArray();
+        console.log('[DIAGNOSTIC] addImage called. isDataUrl:', isDataURL(image), 'url:', image?.substring(0, 80));
         const isDataUrl = isDataURL(image);
         if (!isDataUrl) {
             try {
+                console.log('[DIAGNOSTIC] Fetching image from URL...');
                 const response = await fetch(image, { method: 'GET', cache: 'force-cache' });
-                if (!response.ok) throw new Error('Failed to fetch image');
+                if (!response.ok) throw new Error('Failed to fetch image: ' + response.status);
+                console.log('[DIAGNOSTIC] Image fetched, converting to base64...');
                 const blob = await response.blob();
                 image = await getBase64Async(blob);
+                console.log('[DIAGNOSTIC] Image converted to base64. Length:', image?.length);
             } catch (error) {
-                console.error('Image adding skipped', error);
+                console.error('[DIAGNOSTIC] Image adding skipped due to error:', error);
                 return;
             }
         }
 
+        console.log('[DIAGNOSTIC] Compressing image...');
         image = await this.compressImage(image);
+        console.log('[DIAGNOSTIC] Image compressed. Length:', image?.length);
 
         const quality = oai_settings.inline_image_quality || default_settings.inline_image_quality;
         this.content.push({ type: 'image_url', image_url: { 'url': image, 'detail': quality } });
@@ -4974,6 +5326,249 @@ function getElectronHubMaxContext(model, isUnlocked) {
     return max_128k;
 }
 
+function getNavyMaxContext(model, isUnlocked) {
+    if (isUnlocked) {
+        return unlocked_max;
+    }
+
+    if (Array.isArray(model_list)) {
+        const modelInfo = model_list.find(m => m.id === model);
+        const maxContext = getNavyContextLength(modelInfo);
+        if (Number.isFinite(maxContext) && maxContext > 0) {
+            return maxContext;
+        }
+    }
+    return max_128k;
+}
+
+function getRoutewayMaxContext(model, isUnlocked) {
+    if (isUnlocked) {
+        return unlocked_max;
+    }
+
+    if (Array.isArray(model_list)) {
+        const modelInfo = model_list.find(m => m.id === model);
+        const maxContext = getRoutewayContextLength(modelInfo);
+        if (Number.isFinite(maxContext) && maxContext > 0) {
+            return maxContext;
+        }
+    }
+    return max_128k;
+}
+
+function getNavyOptionModel(optionElement) {
+    if (!optionElement) {
+        return null;
+    }
+
+    const serialized = optionElement.getAttribute('data-model');
+    if (!serialized) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(serialized);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function getRoutewayOptionModel(optionElement) {
+    if (!optionElement) {
+        return null;
+    }
+
+    const serialized = optionElement.getAttribute('data-model');
+    if (!serialized) {
+        return null;
+    }
+
+    try {
+        const parsed = JSON.parse(serialized);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function hydrateNavyOptionMetadata() {
+    const select = document.getElementById('model_navy_select');
+    if (!select || !Array.isArray(model_list) || model_list.length === 0) {
+        return;
+    }
+
+    for (const option of select.options) {
+        if (!option?.value || option.hasAttribute('data-model')) {
+            continue;
+        }
+
+        const model = model_list.find(m => m?.id === option.value);
+        if (!model) {
+            continue;
+        }
+
+        option.setAttribute('data-model', JSON.stringify(model));
+    }
+}
+
+function hydrateRoutewayOptionMetadata() {
+    const select = document.getElementById('model_routeway_select');
+    if (!select || !Array.isArray(model_list) || model_list.length === 0) {
+        return;
+    }
+
+    for (const option of select.options) {
+        if (!option?.value || option.hasAttribute('data-model')) {
+            continue;
+        }
+
+        const model = model_list.find(m => m?.id === option.value);
+        if (!model) {
+            continue;
+        }
+
+        option.setAttribute('data-model', JSON.stringify(model));
+    }
+}
+
+function getNavyContextLength(model) {
+    const candidates = [
+        model?.tokens,
+        model?.context_window?.context_length,
+        model?.context_window?.max_input_tokens,
+        model?.context_window?.input_tokens,
+        model?.context_length,
+        model?.max_context_length,
+        model?.max_tokens,
+        model?.max_input_tokens,
+        model?.contextWindow,
+        model?.context,
+        model?.limits?.context,
+        model?.limits?.context_length,
+        model?.model_spec?.context_length,
+        model?.model_spec?.context_window?.context_length,
+    ];
+
+    for (const value of candidates) {
+        const numeric = parseNavyNumeric(value);
+        if (Number.isFinite(numeric) && numeric > 0) {
+            return numeric;
+        }
+    }
+
+    return Number.NaN;
+}
+
+function getNavyInputPrice(model) {
+    const candidates = [
+        model?.pricing?.input,
+        model?.pricing?.prompt,
+        model?.pricing?.input?.price_per_million_t,
+        model?.pricing?.prompt?.price_per_million_t,
+        model?.pricing?.input_cost_per_million_tokens,
+        model?.pricing?.prompt_cost_per_million_tokens,
+        model?.model_spec?.pricing?.input,
+        model?.model_spec?.pricing?.prompt,
+        model?.model_spec?.pricing?.input?.price_per_million_t,
+        model?.model_spec?.pricing?.prompt?.price_per_million_t,
+        model?.model_spec?.pricing?.input_cost_per_million_tokens,
+        model?.model_spec?.pricing?.prompt_cost_per_million_tokens,
+        model?.input_price,
+        model?.prompt_price,
+        model?.prompt_cost,
+        model?.input_cost,
+    ];
+
+    for (const value of candidates) {
+        const numeric = parseNavyNumeric(value);
+        if (Number.isFinite(numeric) && numeric >= 0) {
+            return numeric;
+        }
+    }
+
+    return Number.NaN;
+}
+
+function getNavyOutputPrice(model) {
+    const candidates = [
+        model?.pricing?.output,
+        model?.pricing?.completion,
+        model?.pricing?.output?.price_per_million_t,
+        model?.pricing?.completion?.price_per_million_t,
+        model?.pricing?.output_cost_per_million_tokens,
+        model?.pricing?.completion_cost_per_million_tokens,
+        model?.model_spec?.pricing?.output,
+        model?.model_spec?.pricing?.completion,
+        model?.model_spec?.pricing?.output?.price_per_million_t,
+        model?.model_spec?.pricing?.completion?.price_per_million_t,
+        model?.model_spec?.pricing?.output_cost_per_million_tokens,
+        model?.model_spec?.pricing?.completion_cost_per_million_tokens,
+        model?.output_price,
+        model?.completion_price,
+        model?.completion_cost,
+        model?.output_cost,
+    ];
+
+    for (const value of candidates) {
+        const numeric = parseNavyNumeric(value);
+        if (Number.isFinite(numeric) && numeric >= 0) {
+            return numeric;
+        }
+    }
+
+    return Number.NaN;
+}
+
+function parseNavyNumeric(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.trim().replace(/,/g, '').replace(/^\$/, '');
+        const unitMatch = cleaned.match(/^([0-9]*\.?[0-9]+)\s*([kKmM])$/);
+
+        if (unitMatch) {
+            const amount = Number(unitMatch[1]);
+            if (!Number.isFinite(amount)) {
+                return Number.NaN;
+            }
+            return unitMatch[2].toLowerCase() === 'k' ? amount * 1000 : amount * 1000000;
+        }
+
+        const numeric = Number(cleaned);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+
+        const numericMatch = cleaned.match(/([0-9]*\.?[0-9]+)/);
+        if (numericMatch) {
+            const matchedNumeric = Number(numericMatch[1]);
+            if (Number.isFinite(matchedNumeric)) {
+                return matchedNumeric;
+            }
+        }
+    }
+
+    return Number.NaN;
+}
+
+function getRoutewayContextLength(model) {
+    const numeric = Number(model?.context_length);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : Number.NaN;
+}
+
+function getRoutewayInputPrice(model) {
+    const numeric = Number(model?.pricing?.input);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : Number.NaN;
+}
+
+function getRoutewayOutputPrice(model) {
+    const numeric = Number(model?.pricing?.output);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : Number.NaN;
+}
+
 /**
  * Get the maximum context size for the NanoGPT model
  * @param {string} model Model identifier
@@ -5108,6 +5703,26 @@ async function onModelChange() {
         }
         console.log('Chutes model changed to', value);
         oai_settings.chutes_model = value;
+    }
+
+    if ($(this).is('#model_navy_select')) {
+        if (!value || !hasModelsLoaded) {
+            console.debug('Null Navy model selected. Ignoring.');
+            return;
+        }
+
+        console.log('Navy model changed to', value);
+        oai_settings.navy_model = value;
+    }
+
+    if ($(this).is('#model_routeway_select')) {
+        if (!value || !hasModelsLoaded) {
+            console.debug('Null Routeway model selected. Ignoring.');
+            return;
+        }
+
+        console.log('Routeway model changed to', value);
+        oai_settings.routeway_model = value;
     }
 
     if ($(this).is('#model_nanogpt_select')) {
@@ -5399,6 +6014,28 @@ async function onModelChange() {
         calculateElectronHubCost();
     }
 
+    if (oai_settings.chat_completion_source == chat_completion_sources.NAVY) {
+        const maxContext = getNavyMaxContext(oai_settings.navy_model, oai_settings.max_context_unlocked);
+        $('#openai_max_context').attr('max', maxContext);
+        oai_settings.openai_max_context = Math.min(Number($('#openai_max_context').attr('max')), oai_settings.openai_max_context);
+        $('#openai_max_context').val(oai_settings.openai_max_context).trigger('input');
+        oai_settings.temp_openai = Math.min(oai_max_temp, oai_settings.temp_openai);
+        $('#temp_openai').attr('max', oai_max_temp).val(oai_settings.temp_openai).trigger('input');
+
+        calculateNavyCost();
+    }
+
+    if (oai_settings.chat_completion_source == chat_completion_sources.ROUTEWAY) {
+        const maxContext = getRoutewayMaxContext(oai_settings.routeway_model, oai_settings.max_context_unlocked);
+        $('#openai_max_context').attr('max', maxContext);
+        oai_settings.openai_max_context = Math.min(Number($('#openai_max_context').attr('max')), oai_settings.openai_max_context);
+        $('#openai_max_context').val(oai_settings.openai_max_context).trigger('input');
+        oai_settings.temp_openai = Math.min(oai_max_temp, oai_settings.temp_openai);
+        $('#temp_openai').attr('max', oai_max_temp).val(oai_settings.temp_openai).trigger('input');
+
+        calculateRoutewayCost();
+    }
+
     if (oai_settings.chat_completion_source === chat_completion_sources.NANOGPT) {
         const maxContext = getNanoGptMaxContext(oai_settings.nanogpt_model, oai_settings.max_context_unlocked);
         $('#openai_max_context').attr('max', maxContext);
@@ -5553,6 +6190,14 @@ async function onElectronHubModelSortChange() {
     await getStatusOpen();
 }
 
+async function onNavyModelSortChange() {
+    await getStatusOpen();
+}
+
+async function onRoutewayModelSortChange() {
+    await getStatusOpen();
+}
+
 async function onNewPresetClick() {
     const name = await Popup.show.input(t`Preset name:`, t`Hint: Use a character/group name to bind preset to a specific chat.`, oai_settings.preset_settings_openai);
 
@@ -5596,6 +6241,8 @@ async function onConnectButtonClick(e) {
         [chat_completion_sources.AZURE_OPENAI]: { key: SECRET_KEYS.AZURE_OPENAI, selector: '#api_key_azure_openai', proxy: false },
         [chat_completion_sources.ZAI]: { key: SECRET_KEYS.ZAI, selector: '#api_key_zai', proxy: false },
         [chat_completion_sources.CHUTES]: { key: SECRET_KEYS.CHUTES, selector: '#api_key_chutes', proxy: false },
+        [chat_completion_sources.NAVY]: { key: SECRET_KEYS.NAVY, selector: '#api_key_navy', proxy: false },
+        [chat_completion_sources.ROUTEWAY]: { key: SECRET_KEYS.ROUTEWAY, selector: '#api_key_routeway', proxy: false },
     };
 
     // Vertex AI Express version - use API key
@@ -5709,6 +6356,9 @@ function toggleChatCompletionForms() {
     }
     else if (oai_settings.chat_completion_source == chat_completion_sources.ZAI) {
         $('#model_zai_select').trigger('change');
+    }
+    else if (oai_settings.chat_completion_source == chat_completion_sources.ROUTEWAY) {
+        $('#model_routeway_select').trigger('change');
     }
 
     $('[data-source]').each(function () {
@@ -5840,52 +6490,80 @@ export function isImageInliningSupported() {
         'zai-org/GLM-4.5V',
     ];
 
+    const hasVisionCapability = (m) => Boolean(
+        m?.supports_vision ||
+        m?.vision ||
+        m?.capabilities?.vision ||
+        m?.metadata?.vision ||
+        (Array.isArray(m?.input_modalities) && m.input_modalities.includes('image')) ||
+        (Array.isArray(m?.architecture?.input_modalities) && m.architecture.input_modalities.includes('image')) ||
+        (Array.isArray(m?.features) && m.features.includes('openai/chat-completion.vision'))
+    );
+    const findModel = (id) => (Array.isArray(model_list) ? model_list.find(m => m.id === id) : null);
+
     switch (oai_settings.chat_completion_source) {
         case chat_completion_sources.OPENAI:
         case chat_completion_sources.AZURE_OPENAI: {
             const modelToCheck = oai_settings.chat_completion_source === chat_completion_sources.AZURE_OPENAI
                 ? oai_settings.azure_openai_model
                 : oai_settings.openai_model;
-            return visionSupportedModels.some(model =>
-                modelToCheck.includes(model)
-                && ['gpt-4-turbo-preview', 'o1-mini', 'o3-mini'].some(x => !modelToCheck.includes(x)),
-            );
+            const knownExcluded = ['gpt-4-turbo-preview', 'o1-mini', 'o3-mini'].some(x => modelToCheck.includes(x));
+            const matchedSubstring = visionSupportedModels.some(model => modelToCheck.includes(model))
+                && ['gpt-4-turbo-preview', 'o1-mini', 'o3-mini'].some(x => !modelToCheck.includes(x));
+            if (matchedSubstring) return true;
+            if (knownExcluded) return false;
+            return hasVisionCapability(findModel(modelToCheck));
         }
         case chat_completion_sources.MAKERSUITE:
-            return visionSupportedModels.some(model => oai_settings.google_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.google_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.google_model));
         case chat_completion_sources.VERTEXAI:
-            return visionSupportedModels.some(model => oai_settings.vertexai_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.vertexai_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.vertexai_model));
         case chat_completion_sources.CLAUDE:
-            return visionSupportedModels.some(model => oai_settings.claude_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.claude_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.claude_model));
         case chat_completion_sources.OPENROUTER:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.openrouter_model)?.architecture?.input_modalities?.includes('image'));
+            return hasVisionCapability(findModel(oai_settings.openrouter_model));
         case chat_completion_sources.CUSTOM:
             return true;
         case chat_completion_sources.MISTRALAI:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.mistralai_model)?.capabilities?.vision);
+            return hasVisionCapability(findModel(oai_settings.mistralai_model));
         case chat_completion_sources.COHERE:
-            return visionSupportedModels.some(model => oai_settings.cohere_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.cohere_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.cohere_model));
         case chat_completion_sources.XAI:
-            // TODO: xAI's /models endpoint doesn't return modality info
-            return visionSupportedModels.some(model => oai_settings.xai_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.xai_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.xai_model));
         case chat_completion_sources.AIMLAPI:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.aimlapi_model)?.features?.includes('openai/chat-completion.vision'));
+            return hasVisionCapability(findModel(oai_settings.aimlapi_model));
         case chat_completion_sources.CHUTES:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.chutes_model)?.input_modalities?.includes('image'));
+            return hasVisionCapability(findModel(oai_settings.chutes_model));
         case chat_completion_sources.ELECTRONHUB:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.electronhub_model)?.metadata?.vision);
+            return hasVisionCapability(findModel(oai_settings.electronhub_model));
         case chat_completion_sources.POLLINATIONS:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.pollinations_model)?.vision);
+            return hasVisionCapability(findModel(oai_settings.pollinations_model));
         case chat_completion_sources.COMETAPI:
             return true;
         case chat_completion_sources.MOONSHOT:
-            return visionSupportedModels.some(model => oai_settings.moonshot_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.moonshot_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.moonshot_model));
         case chat_completion_sources.NANOGPT:
-            return (Array.isArray(model_list) && model_list.find(m => m.id === oai_settings.nanogpt_model)?.capabilities?.vision);
+            return hasVisionCapability(findModel(oai_settings.nanogpt_model));
         case chat_completion_sources.ZAI:
-            return visionSupportedModels.some(model => oai_settings.zai_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.zai_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.zai_model));
         case chat_completion_sources.SILICONFLOW:
-            return visionSupportedModels.some(model => oai_settings.siliconflow_model.includes(model));
+            return visionSupportedModels.some(model => oai_settings.siliconflow_model.includes(model))
+                || hasVisionCapability(findModel(oai_settings.siliconflow_model));
+        case chat_completion_sources.ROUTEWAY:
+            return hasVisionCapability(findModel(oai_settings.routeway_model));
+        case chat_completion_sources.NAVY: {
+            const navyModel = findModel(oai_settings.navy_model);
+            const result = hasVisionCapability(navyModel);
+            console.log('[DIAGNOSTIC] Navy vision check:', { navy_model: oai_settings.navy_model, model_found: !!navyModel, supports_vision: navyModel?.supports_vision, input_modalities: navyModel?.input_modalities, capabilities: navyModel?.capabilities, result });
+            return result;
+        }
         default:
             return false;
     }
@@ -6320,6 +6998,8 @@ export function initOpenAI() {
         $('#openai_max_context_counter').val(`${$(this).val()}`);
         calculateOpenRouterCost();
         calculateElectronHubCost();
+        calculateNavyCost();
+        calculateRoutewayCost();
         calculateChutesCost();
         saveSettingsDebounced();
     });
@@ -6328,6 +7008,8 @@ export function initOpenAI() {
         oai_settings.openai_max_tokens = Number($(this).val());
         calculateOpenRouterCost();
         calculateElectronHubCost();
+        calculateNavyCost();
+        calculateRoutewayCost();
         calculateChutesCost();
         saveSettingsDebounced();
     });
@@ -6709,46 +7391,55 @@ export function initOpenAI() {
         });
     }
 
+    // Model selects: auto-discover and apply select2 on all devices.
+    // Known providers with rich templateResult formatters get those applied specifically;
+    // any other model_*_select (including future upstream additions) gets the basic config.
+    const richModelTemplates = {
+        'model_openrouter_select': getOpenRouterModelTemplate,
+        'model_aimlapi_select':    getAimlapiModelTemplate,
+        'model_electronhub_select': getElectronHubModelTemplate,
+        'model_navy_select':       getNavyModelTemplate,
+        'model_routeway_select':   getRoutewayModelTemplate,
+        'model_chutes_select':     getChutesModelTemplate,
+        'model_nanogpt_select':    getNanoGptModelTemplate,
+    };
+
+    const baseModelSelect2Options = {
+        placeholder: t`Select a model`,
+        width: '100%',
+        matcher: startsWithMatcher,
+        searching: false,
+    };
+
+    $('#chat_completion_source').select2({
+        placeholder: t`Select a chat completion source`,
+        width: '100%',
+        matcher: startsWithMatcher,
+    });
+
+    function applyModelSelect2(el) {
+        if (!el || $(el).hasClass('select2-hidden-accessible')) return;
+        const templateResult = richModelTemplates[el.id];
+        const selectOptions = templateResult ? { ...baseModelSelect2Options, templateResult } : { ...baseModelSelect2Options };
+
+        $(el).select2(selectOptions);
+    }
+
+    // Apply to all model selects present at init time
+    document.querySelectorAll('select[id^="model_"][id$="_select"]').forEach(applyModelSelect2);
+
+    // Auto-apply to any model select added later (new providers from upstream updates)
+    new MutationObserver(mutations => {
+        for (const { addedNodes } of mutations) {
+            for (const node of addedNodes) {
+                if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                if (node.matches('select[id^="model_"][id$="_select"]')) applyModelSelect2(node);
+                node.querySelectorAll('select[id^="model_"][id$="_select"]').forEach(applyModelSelect2);
+            }
+        }
+    }).observe(document.body, { childList: true, subtree: true });
+
     if (!isMobile()) {
-        $('#model_openrouter_select').select2({
-            placeholder: t`Select a model`,
-            searchInputPlaceholder: t`Search models...`,
-            searchInputCssClass: 'text_pole',
-            width: '100%',
-            templateResult: getOpenRouterModelTemplate,
-            matcher: textValueMatcher,
-        });
-        $('#model_aimlapi_select').select2({
-            placeholder: t`Select a model`,
-            searchInputPlaceholder: t`Search models...`,
-            searchInputCssClass: 'text_pole',
-            width: '100%',
-            templateResult: getAimlapiModelTemplate,
-        });
-        $('#model_electronhub_select').select2({
-            placeholder: t`Select a model`,
-            searchInputPlaceholder: t`Search models...`,
-            searchInputCssClass: 'text_pole',
-            width: '100%',
-            templateResult: getElectronHubModelTemplate,
-            matcher: textValueMatcher,
-        });
-        $('#model_chutes_select').select2({
-            placeholder: t`Select a model`,
-            searchInputPlaceholder: t`Search models...`,
-            searchInputCssClass: 'text_pole',
-            width: '100%',
-            templateResult: getChutesModelTemplate,
-            matcher: textValueMatcher,
-        });
-        $('#model_nanogpt_select').select2({
-            placeholder: t`Select a model`,
-            searchInputPlaceholder: t`Search models...`,
-            searchInputCssClass: 'text_pole',
-            width: '100%',
-            templateResult: getNanoGptModelTemplate,
-            matcher: textValueMatcher,
-        });
         $('#completion_prompt_manager_popup_entry_form_injection_trigger').select2({
             placeholder: t`All types (default)`,
             width: '100%',
@@ -6802,6 +7493,10 @@ export function initOpenAI() {
     $('#chutes_sort_models').on('change', onChutesModelSortChange);
     $('#electronhub_group_models').on('change', onElectronHubModelSortChange);
     $('#electronhub_sort_models').on('change', onElectronHubModelSortChange);
+    $('#navy_group_models').on('change', onNavyModelSortChange);
+    $('#navy_sort_models').on('change', onNavyModelSortChange);
+    $('#routeway_group_models').on('change', onRoutewayModelSortChange);
+    $('#routeway_sort_models').on('change', onRoutewayModelSortChange);
     $('#model_ai21_select').on('change', onModelChange);
     $('#model_mistralai_select').on('change', onModelChange);
     $('#model_cohere_select').on('change', onModelChange);
@@ -6810,6 +7505,21 @@ export function initOpenAI() {
     $('#model_chutes_select').on('change', onModelChange);
     $('#model_siliconflow_select').on('change', onModelChange);
     $('#model_electronhub_select').on('change', onModelChange);
+    $('#model_navy_select').on('change', onModelChange);
+    $('#model_navy_select').on('select2:open', function () {
+        hydrateNavyOptionMetadata();
+        console.debug('[Navy dropdown] opened', {
+            optionCount: this.options?.length || 0,
+            modelCount: Array.isArray(model_list) ? model_list.length : 0,
+        });
+        // Force Select2 to re-evaluate templateResult on open when options were hydrated late.
+        $(this).trigger('change.select2');
+    });
+    $('#model_routeway_select').on('change', onModelChange);
+    $('#model_routeway_select').on('select2:open', function () {
+        hydrateRoutewayOptionMetadata();
+        $(this).trigger('change.select2');
+    });
     $('#model_nanogpt_select').on('change', onModelChange);
     $('#model_deepseek_select').on('change', onModelChange);
     $('#model_aimlapi_select').on('change', onModelChange);

@@ -52,6 +52,10 @@
                         <i class="hasPassword fa-fw fa-solid fa-lock" data-i18n="[title]This account is password protected." title="This account is password protected."></i>
                         <i class="noPassword fa-fw fa-solid fa-lock-open" data-i18n="[title]This account is not password protected." title="This account is not password protected."></i>
                     </div>
+                    <div>
+                        <span>2FA:</span>
+                        <span class="twoFactorStatus"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -65,6 +69,10 @@
                 <div class="userChangePasswordButton menu_button menu_button_icon" title="Change your password.">
                     <i class="fa-fw fa-solid fa-key"></i>
                     <span data-i18n="Change Password">Change Password</span>
+                </div>
+                <div class="userTwoFactorButton menu_button menu_button_icon" title="Manage two-factor authentication.">
+                    <i class="fa-fw fa-solid fa-shield-halved"></i>
+                    <span class="userTwoFactorButtonText">Set Up 2FA</span>
                 </div>
             </div>
             <div class="flex-container">

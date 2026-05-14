@@ -15,6 +15,7 @@ import {
 } from '../script.js';
 import { t } from './i18n.js';
 import { autoSelectInstructPreset } from './instruct-mode.js';
+import { clearServerHiddenLoreActivations, emitServerHiddenLoreActivations, getServerHiddenLoreActivationsFromResponse } from './world-info.js';
 
 import {
     power_user,
@@ -237,6 +238,14 @@ export async function generateKoboldWithStreaming(generate_data, signal) {
         tryParseStreamingError(response, await response.text());
         throw new Error(`Got response status ${response.status}`);
     }
+
+    const hiddenLoreActivations = getServerHiddenLoreActivationsFromResponse(response);
+    if (hiddenLoreActivations.length) {
+        await emitServerHiddenLoreActivations(hiddenLoreActivations);
+    } else {
+        clearServerHiddenLoreActivations();
+    }
+
     const eventStream = getEventSourceStream();
     response.body.pipeThrough(eventStream);
     const reader = eventStream.readable.getReader();

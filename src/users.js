@@ -20,6 +20,7 @@ import { getConfigValue, color, delay, generateTimestamp, invalidateFirefoxCache
 import { readSecret, writeSecret } from './endpoints/secrets.js';
 import { getContentOfType } from './endpoints/content-manager.js';
 import { serverDirectory } from './server-directory.js';
+import { read as readCharacterCard, strip as stripCharacterMetadata } from './character-card-parser.js';
 
 export const KEY_PREFIX = 'user:';
 const AVATAR_PREFIX = 'avatar:';
@@ -54,6 +55,9 @@ const STORAGE_KEYS = {
  * @property {string} salt - Salt used for hashing the password
  * @property {boolean} enabled - Whether the user is enabled
  * @property {boolean} admin - Whether the user is an admin (can manage other users)
+ * @property {boolean} [twoFactorEnabled] - Whether the user has TOTP two-factor authentication enabled
+ * @property {string} [twoFactorSecret] - Base32 TOTP secret
+ * @property {string[]} [twoFactorBackupCodes] - Hashed one-time backup codes
  */
 
 /**
@@ -63,6 +67,7 @@ const STORAGE_KEYS = {
  * @property {string} avatar - The user's avatar image
  * @property {boolean} [admin] - Whether the user is an admin (can manage other users)
  * @property {boolean} password - Whether the user is password protected
+ * @property {boolean} [twoFactorEnabled] - Whether TOTP two-factor authentication is enabled
  * @property {boolean} [enabled] - Whether the user is enabled
  * @property {number} [created] - The timestamp when the user was created
  */
@@ -935,6 +940,7 @@ export async function loginPageMiddleware(request, response) {
         console.error('Error during auto-login:', error);
     }
 
+    response.setHeader('Cache-Control', 'no-store');
     return response.sendFile('login.html', { root: path.join(serverDirectory, 'public') });
 }
 
@@ -955,6 +961,47 @@ function createRouteHandler(directoryFn) {
 
             invalidateFirefoxCache(filePath, req, res);
             return res.sendFile(filePath, { root: directory });
+        } catch (error) {
+            return res.sendStatus(500);
+        }
+    };
+}
+
+/**
+ * Creates a route handler for serving character files without embedded card metadata.
+ * This keeps browser-visible avatar downloads from exposing the full character card.
+ * @param {(req: import('express').Request) => string} directoryFn A function that returns the directory path to serve files from
+ * @returns {import('express').RequestHandler}
+ */
+function createCharacterRouteHandler(directoryFn) {
+    return async (req, res) => {
+        try {
+            const directory = directoryFn(req);
+            const filePath = decodeURIComponent(req.params[0]);
+            const absolutePath = path.join(directory, filePath);
+            const exists = fs.existsSync(absolutePath);
+            if (!exists) {
+                return res.sendStatus(404);
+            }
+
+            const extension = path.extname(filePath).toLowerCase();
+            if (extension !== '.png') {
+                invalidateFirefoxCache(filePath, req, res);
+                return res.sendFile(filePath, { root: directory });
+            }
+
+            if (req.user?.profile?.handle === DEFAULT_USER.handle) {
+                invalidateFirefoxCache(filePath, req, res);
+                return res.sendFile(filePath, { root: directory });
+            }
+
+            let buffer = await fs.promises.readFile(absolutePath);
+            buffer = stripCharacterMetadata(buffer);
+
+            const contentType = mime.lookup(filePath) || 'image/png';
+            res.setHeader('Content-Type', contentType);
+            invalidateFirefoxCache(filePath, req, res);
+            return res.send(buffer);
         } catch (error) {
             return res.sendStatus(500);
         }
@@ -1013,10 +1060,14 @@ export function requireAdminMiddleware(request, response, next) {
  * Creates an archive of the user's data root directory.
  * @param {string} handle User handle
  * @param {import('express').Response} response Express response object to write to
+ * @param {{ admin?: boolean }} [requesterProfile] Requesting user's profile
  * @returns {Promise<void>} Promise that resolves when the archive is created
  */
-export async function createBackupArchive(handle, response) {
+export async function createBackupArchive(handle, response, requesterProfile = {}) {
     const directories = getUserDirectories(handle);
+    const allHandles = (await getAllUsers()).map(user => user.handle);
+    const skipSanitization = Boolean(requesterProfile?.admin) || requesterProfile?.handle === DEFAULT_USER.handle;
+    const blankedWorldNames = skipSanitization ? new Set() : await collectBlankedBackupWorldNames(directories, handle);
 
     console.info('Backup requested for', handle);
     const archive = archiver('zip');
@@ -1040,23 +1091,228 @@ export async function createBackupArchive(handle, response) {
     // @ts-ignore
     archive.pipe(response);
 
-    // Append files from a sub-directory, putting its contents at the root of archive
-    archive.directory(directories.root, false);
+    await appendBackupDirectoryToArchive(archive, directories.root, '', handle, allHandles, blankedWorldNames, skipSanitization);
     archive.finalize();
+}
+
+function normalizeHandle(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isTrueishFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function getPushExtensionBySuffix(extensions, suffix) {
+    if (!extensions || typeof extensions !== 'object') return undefined;
+    for (const [key, value] of Object.entries(extensions)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+    return undefined;
+}
+
+function isWorldNameHiddenByConvention(worldName) {
+    const normalizedWorld = String(worldName || '').trim().toLowerCase();
+    return normalizedWorld.startsWith('admin-')
+        || /^admin[a-z0-9._-]+-.+/u.test(normalizedWorld)
+        || normalizedWorld.startsWith('dd-');
+}
+
+function findCreatorFromDdName(lorebookName, allHandles) {
+    const name = String(lorebookName || '').trim().toLowerCase();
+    if (!name.startsWith('dd-')) return '';
+    const handles = [...new Set((allHandles || []).map(handle => String(handle || '').trim()).filter(Boolean))]
+        .sort((left, right) => right.length - left.length);
+    for (const handle of handles) {
+        const normalized = handle.toLowerCase();
+        if (name.startsWith(`dd-${normalized}-`)) {
+            return handle;
+        }
+    }
+    return '';
+}
+
+function canBackupUserAccessHiddenLorebook(fileName, extensions, handle, allHandles = []) {
+    const userHandle = normalizeHandle(handle);
+    if (!userHandle) return false;
+
+    const creator = normalizeHandle(getPushExtensionBySuffix(extensions, 'creator'));
+    const originalCreator = normalizeHandle(getPushExtensionBySuffix(extensions, 'original_creator') || creator);
+    if (creator && creator === userHandle) return true;
+    if (originalCreator && originalCreator === userHandle) return true;
+
+    const ddCreator = normalizeHandle(findCreatorFromDdName(fileName, allHandles));
+    if (ddCreator && ddCreator === userHandle) return true;
+
+    return false;
+}
+
+function shouldBlankBackupWorld(fileName, worldInfo, handle, allHandles) {
+    const extensions = worldInfo?.extensions || {};
+    const hidden = isTrueishFlag(getPushExtensionBySuffix(extensions, 'hidden'))
+        || isWorldNameHiddenByConvention(fileName)
+        || !!worldInfo?._dreamtavern_restricted
+        || !!worldInfo?._stw_hidden_restricted;
+    if (!hidden) return false;
+    return !canBackupUserAccessHiddenLorebook(fileName, extensions, handle, allHandles);
+}
+
+function shouldBlankBackupCharacter(characterData, handle) {
+    const userHandle = normalizeHandle(handle);
+    const extensions = characterData?.data?.extensions || {};
+    const creator = normalizeHandle(getPushExtensionBySuffix(extensions, 'creator'));
+    const originalCreator = normalizeHandle(getPushExtensionBySuffix(extensions, 'original_creator') || creator);
+    const worldName = String(extensions?.world || '').trim();
+    const pushed = isTrueishFlag(getPushExtensionBySuffix(extensions, 'pushed'));
+    const hiddenWorld = isWorldNameHiddenByConvention(worldName);
+
+    if (!(pushed || hiddenWorld)) {
+        return false;
+    }
+
+    if (creator && creator === userHandle) return false;
+    if (originalCreator && originalCreator === userHandle) return false;
+
+    return true;
+}
+
+function buildBlankWorldInfoExport() {
+    return {
+        entries: {},
+        extensions: {},
+    };
+}
+
+async function collectBlankedBackupWorldNames(directories, handle) {
+    const blankedWorldNames = new Set();
+    const charactersDirectory = directories?.characters;
+    if (!charactersDirectory || !fs.existsSync(charactersDirectory)) {
+        return blankedWorldNames;
+    }
+
+    const entries = await fs.promises.readdir(charactersDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+        if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.png') {
+            continue;
+        }
+
+        try {
+            const buffer = await fs.promises.readFile(path.join(charactersDirectory, entry.name));
+            const raw = readCharacterCard(buffer);
+            if (!raw) {
+                continue;
+            }
+
+            const parsed = JSON.parse(raw);
+            if (!shouldBlankBackupCharacter(parsed, handle)) {
+                continue;
+            }
+
+            const worldName = String(parsed?.data?.extensions?.world || '').trim();
+            if (worldName) {
+                blankedWorldNames.add(worldName);
+            }
+        } catch {
+            // Skip malformed or unreadable cards during backup sanitization.
+        }
+    }
+
+    return blankedWorldNames;
+}
+
+async function getBackupArchiveEntry(pathToFile, relativePath, handle, allHandles, blankedWorldNames, skipSanitization) {
+    if (skipSanitization) {
+        return null;
+    }
+
+    const normalizedRelativePath = relativePath.replace(/\\/g, '/');
+    const pathParts = normalizedRelativePath.split('/').filter(Boolean);
+    const parentDirectory = pathParts.at(-2) || '';
+    const fileName = path.basename(pathToFile);
+    const extension = path.extname(fileName).toLowerCase();
+
+    if (parentDirectory === 'characters' && extension === '.png') {
+        try {
+            const buffer = await fs.promises.readFile(pathToFile);
+            const raw = readCharacterCard(buffer);
+            if (!raw) return null;
+
+            const parsed = JSON.parse(raw);
+            if (!shouldBlankBackupCharacter(parsed, handle)) {
+                return null;
+            }
+
+            return {
+                name: normalizedRelativePath,
+                content: Buffer.alloc(0),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    if (parentDirectory === 'worlds' && extension === '.json') {
+        try {
+            const raw = await fs.promises.readFile(pathToFile, 'utf8');
+            const parsed = JSON.parse(raw);
+            const worldName = path.parse(fileName).name;
+            const shouldBlank = blankedWorldNames?.has(worldName) || shouldBlankBackupWorld(worldName, parsed, handle, allHandles);
+            if (!shouldBlank) {
+                return null;
+            }
+
+            return {
+                name: normalizedRelativePath,
+                content: Buffer.alloc(0),
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    return null;
+}
+
+async function appendBackupDirectoryToArchive(archive, directoryPath, relativePrefix, handle, allHandles, blankedWorldNames, skipSanitization) {
+    const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+        const absolutePath = path.join(directoryPath, entry.name);
+        const archivePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
+
+        if (entry.isDirectory()) {
+            await appendBackupDirectoryToArchive(archive, absolutePath, archivePath, handle, allHandles, blankedWorldNames, skipSanitization);
+            continue;
+        }
+
+        if (!entry.isFile()) {
+            continue;
+        }
+
+        const sanitizedEntry = await getBackupArchiveEntry(absolutePath, archivePath, handle, allHandles, blankedWorldNames, skipSanitization);
+        if (sanitizedEntry) {
+            archive.append(sanitizedEntry.content, { name: sanitizedEntry.name });
+            continue;
+        }
+
+        archive.file(absolutePath, { name: archivePath });
+    }
 }
 
 /**
  * Gets all of the users.
  * @returns {Promise<User[]>}
  */
-async function getAllUsers() {
+export async function getAllUsers() {
     if (!ENABLE_ACCOUNTS) {
         return [];
     }
     /**
      * @type {User[]}
      */
-    const users = await storage.values();
+    const users = await storage.values(x => x.key.startsWith(KEY_PREFIX));
     return users;
 }
 
@@ -1074,7 +1330,7 @@ export async function getAllEnabledUsers() {
  */
 export const router = express.Router();
 router.use('/backgrounds/*', createRouteHandler(req => req.user.directories.backgrounds));
-router.use('/characters/*', createRouteHandler(req => req.user.directories.characters));
+router.use('/characters/*', createCharacterRouteHandler(req => req.user.directories.characters));
 router.use('/User%20Avatars/*', createRouteHandler(req => req.user.directories.avatars));
 router.use('/assets/*', createRouteHandler(req => req.user.directories.assets));
 router.use('/user/images/*', createRouteHandler(req => req.user.directories.userImages));

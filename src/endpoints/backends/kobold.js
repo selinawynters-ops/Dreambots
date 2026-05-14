@@ -5,11 +5,15 @@ import fetch from 'node-fetch';
 import { forwardFetchResponse, delay } from '../../util.js';
 import { getOverrideHeaders, setAdditionalHeaders, setAdditionalHeadersByType } from '../../additional-headers.js';
 import { TEXTGEN_TYPES } from '../../constants.js';
+import { applyHiddenLoreContextToRequest, setHiddenLoreActivationHeader } from '../hidden-lore.js';
 
 export const router = express.Router();
 
 router.post('/generate', async function (request, response_generate) {
     if (!request.body) return response_generate.sendStatus(400);
+
+    const { activatedWorlds } = await applyHiddenLoreContextToRequest(request);
+    setHiddenLoreActivationHeader(response_generate, activatedWorlds);
 
     if (request.body.api_server.indexOf('localhost') != -1) {
         request.body.api_server = request.body.api_server.replace('localhost', '127.0.0.1');

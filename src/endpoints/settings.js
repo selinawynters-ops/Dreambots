@@ -25,7 +25,7 @@ import path from 'node:path';
 
 import express from 'express';
 import _ from 'lodash';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import writeFileAtomic from 'write-file-atomic';
 
 import { SETTINGS_FILE } from '../constants.js';
 import { getConfigValue, generateTimestamp, removeOldBackups } from '../util.js';
@@ -96,6 +96,118 @@ function readAndParseFromDirectory(directoryPath, fileExtension = '.json') {
  */
 function sortByName(_) {
     return (a, b) => a.localeCompare(b);
+}
+
+function normalizeHandle(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isTrueishFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function getPushExtensionBySuffix(extensions, suffix) {
+    if (!extensions || typeof extensions !== 'object') return undefined;
+    for (const [key, value] of Object.entries(extensions)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+    return undefined;
+}
+
+function findCreatorFromDdName(lorebookName, allHandles) {
+    const name = String(lorebookName || '').trim().toLowerCase();
+    if (!name.startsWith('dd-')) return '';
+    const handles = [...new Set((allHandles || []).map(h => String(h || '').trim()).filter(Boolean))]
+        .sort((a, b) => b.length - a.length);
+    for (const handle of handles) {
+        const normalizedHandle = handle.toLowerCase();
+        if (name.startsWith(`dd-${normalizedHandle}-`)) {
+            return handle;
+        }
+    }
+    return '';
+}
+
+function canUserSeeHiddenLorebook(worldName, extensions, userProfile, allHandles) {
+    if (userProfile?.admin) return true;
+    const userHandle = normalizeHandle(userProfile?.handle);
+    if (!userHandle) return false;
+
+    const creator = normalizeHandle(getPushExtensionBySuffix(extensions, 'creator'));
+    const originalCreator = normalizeHandle(getPushExtensionBySuffix(extensions, 'original_creator') || creator);
+    if (creator && creator === userHandle) return true;
+    if (originalCreator && originalCreator === userHandle) return true;
+
+    const ddCreator = normalizeHandle(findCreatorFromDdName(worldName, allHandles));
+    if (ddCreator && ddCreator === userHandle) return true;
+
+    return false;
+}
+
+function isHiddenLorebookForList(worldName, extensions) {
+    if (String(worldName || '').startsWith('ADMIN-')) return true;
+    if (String(worldName || '').startsWith('dd-')) return true;
+    return isTrueishFlag(getPushExtensionBySuffix(extensions, 'hidden'));
+}
+
+function getPushedWorldOwnershipMap(directories, userProfile) {
+    /** @type {Map<string, { hasPushed: boolean, owner: boolean }>} */
+    const ownership = new Map();
+    const userHandle = normalizeHandle(userProfile?.handle);
+    const isAdminUser = Boolean(userProfile?.admin);
+
+    let files = [];
+    try {
+        files = fs.readdirSync(directories.characters).filter(x => x.toLowerCase().endsWith('.png'));
+    } catch {
+        return ownership;
+    }
+
+    for (const file of files) {
+        const filePath = path.join(directories.characters, file);
+        try {
+            const png = fs.readFileSync(filePath);
+            const raw = readCharacterCard(png);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const ext = parsed?.data?.extensions || {};
+            const worldName = String(ext.world || '').trim();
+            if (!worldName) continue;
+
+            const pushed = isTrueishFlag(getPushExtensionBySuffix(ext, 'pushed'));
+            if (!pushed) continue;
+
+            const creator = normalizeHandle(getPushExtensionBySuffix(ext, 'creator'));
+            const originalCreator = normalizeHandle(getPushExtensionBySuffix(ext, 'original_creator') || creator);
+            const owner = isAdminUser || (userHandle && (userHandle === creator || userHandle === originalCreator));
+
+            const current = ownership.get(worldName) || { hasPushed: false, owner: false };
+            current.hasPushed = true;
+            current.owner = current.owner || owner;
+            ownership.set(worldName, current);
+
+            // Also register secondary/bundle lorebooks so they appear in
+            // hidden_world_names and get the 9z prefix in WorldInfoInfo.
+            const auxRaw = getPushExtensionBySuffix(ext, 'aux_lorebooks')
+                || getPushExtensionBySuffix(ext, 'bundle_lorebooks');
+            const auxNames = Array.isArray(auxRaw)
+                ? auxRaw.map(n => String(n || '').trim()).filter(Boolean)
+                : [];
+            for (const auxName of auxNames) {
+                if (auxName === worldName) continue;
+                const auxCurrent = ownership.get(auxName) || { hasPushed: false, owner: false };
+                auxCurrent.hasPushed = true;
+                auxCurrent.owner = auxCurrent.owner || owner;
+                ownership.set(auxName, auxCurrent);
+            }
+        } catch {
+            // Ignore malformed cards for visibility inference.
+        }
+    }
+
+    return ownership;
 }
 
 /**
@@ -221,26 +333,31 @@ function getLatestBackup(handle) {
 
 export const router = express.Router();
 
-router.post('/save', function (request, response) {
+router.post('/save', async function (request, response) {
     try {
+        if (!request.user || !request.user.directories) {
+            console.error('[settings/save] No request.user.directories — auth/middleware likely failed');
+            return response.status(401).json({ error: 'Not authenticated' });
+        }
         const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
-        writeFileAtomicSync(pathToSettings, JSON.stringify(request.body, null, 4), 'utf8');
+        await writeFileAtomic(pathToSettings, JSON.stringify(request.body, null, 4), 'utf8');
         triggerAutoSave(request.user.profile.handle);
         response.send({ result: 'ok' });
     } catch (err) {
-        console.error(err);
-        response.send(err);
+        console.error('[settings/save] Failed:', err);
+        response.status(500).json({ error: err.message || String(err) });
     }
 });
 
 // Wintermute's code
-router.post('/get', (request, response) => {
+router.post('/get', async (request, response) => {
     let settings;
     try {
         const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
-        settings = fs.readFileSync(pathToSettings, 'utf8');
+        settings = await fs.promises.readFile(pathToSettings, 'utf8');
     } catch (e) {
-        return response.sendStatus(500);
+        console.error('[settings/get] Failed to read settings file:', e?.code || '', e?.message || e);
+        return response.status(500).json({ error: e?.code || 'read_failed', message: e?.message || String(e) });
     }
 
     // NovelAI Settings
@@ -272,42 +389,47 @@ router.post('/get', (request, response) => {
         .readdirSync(request.user.directories.worlds)
         .filter(file => path.extname(file).toLowerCase() === '.json')
         .sort((a, b) => a.localeCompare(b));
+    const allHandles = await getAllUserHandles();
+    const pushedWorldOwnership = getPushedWorldOwnershipMap(request.user.directories, request.user.profile);
+    const world_names = [];
+    const hidden_world_names = [];
+    for (const file of worldFiles) {
+        const worldName = path.parse(file).name;
+        if (request.user.profile?.admin) {
+            world_names.push(worldName);
+            continue;
+        }
 
-    // Filter out hidden lorebooks for non-admin/non-creator users
-    // Rules: ADMIN-* files → hidden from all non-admins
-    //        dd-{handle}-* files → visible only to that handle + admins
-    //        dreamtavern_hidden flag → visible only to creator + admins
-    const isAdmin = request.user.profile?.admin;
-    const userHandle = request.user.profile?.handle;
-    const world_names = worldFiles
-        .filter(file => {
-            // Admin sees everything
-            if (isAdmin) return true;
+        const pushedOwnership = pushedWorldOwnership.get(worldName);
 
-            const baseName = path.parse(file).name;
+        const filePath = path.join(request.user.directories.worlds, file);
+        let extensions = {};
+        try {
+            const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            extensions = _.isObjectLike(parsed?.extensions) ? parsed.extensions : {};
+        } catch {
+            extensions = {};
+        }
 
-            // ADMIN-* lorebooks: hidden from ALL non-admin users
-            if (baseName.startsWith('ADMIN-')) return false;
+        if (!isHiddenLorebookForList(worldName, extensions)) {
+            world_names.push(worldName);
+            continue;
+        }
 
-            // dd-{handle}-* lorebooks: visible only to that handle
-            if (baseName.startsWith('dd-')) {
-                const parts = baseName.split('-');
-                // dd-{handle}-{label} → handle is parts[1]
-                const creatorHandle = parts[1];
-                if (creatorHandle === userHandle) return true;
-                return false;
-            }
+        if (canUserSeeHiddenLorebook(worldName, extensions, request.user.profile, allHandles)) {
+            world_names.push(worldName);
+            continue;
+        }
 
-            // Also check the internal dreamtavern_hidden flag
-            try {
-                const filePath = path.join(request.user.directories.worlds, file);
-                const content = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-                if (!content?.extensions?.dreamtavern_hidden) return true;
-                if (content?.extensions?.dreamtavern_creator === userHandle) return true;
-                return false;
-            } catch { return true; }
-        })
-        .map(item => path.parse(item).name);
+        // Include hidden pushed lorebooks that are bound to this user's pushed characters.
+        // The lorebook itself is hidden from the editor dropdown (filtered on the frontend),
+        // but it must be in world_names so the character's world icon lights up and the
+        // lorebook entries can be loaded for prompt building.
+        if (pushedOwnership?.hasPushed) {
+            world_names.push(worldName);
+            hidden_world_names.push(worldName);
+        }
+    }
 
     const themes = readAndParseFromDirectory(request.user.directories.themes);
     const movingUIPresets = readAndParseFromDirectory(request.user.directories.movingUI);
@@ -322,6 +444,7 @@ router.post('/get', (request, response) => {
         settings,
         koboldai_settings,
         koboldai_setting_names,
+        hidden_world_names,
         world_names,
         novelai_settings,
         novelai_setting_names,
@@ -417,6 +540,52 @@ router.post('/restore-snapshot', getFileNameValidationFunction('name'), async (r
     } catch (error) {
         console.error(error);
         response.sendStatus(500);
+    }
+});
+
+// Fonts endpoint moved to publicFontsRouter for public access
+
+/**
+ * Public fonts router - doesn't require authentication
+ */
+export const publicFontsRouter = express.Router();
+
+publicFontsRouter.get('/fonts', (request, response) => {
+    try {
+        const fontsDir = path.join(process.cwd(), 'public', 'fonts');
+        const supported = ['.woff', '.woff2', '.ttf', '.otf'];
+
+        if (!fs.existsSync(fontsDir)) {
+            return response.json([]);
+        }
+
+        const fonts = fs.readdirSync(fontsDir)
+            .filter(file => supported.includes(path.extname(file).toLowerCase()))
+            .sort((a, b) => a.localeCompare(b))
+            .map(file => {
+                const ext = path.extname(file).toLowerCase();
+                const value = path.basename(file, path.extname(file)).trim();
+                const name = value.replace(/[_-]+/g, ' ').trim();
+                const format = ext === '.ttf'
+                    ? 'truetype'
+                    : ext === '.otf'
+                        ? 'opentype'
+                        : ext === '.woff2'
+                            ? 'woff2'
+                            : 'woff';
+
+                return {
+                    name,
+                    value,
+                    file,
+                    files: [{ url: `/fonts/${file}`, format }],
+                };
+            });
+
+        return response.json(fonts);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
     }
 });
 

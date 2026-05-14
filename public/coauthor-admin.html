@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Co-Author Station · Admin · DreamTavern</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@400;700&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Raleway:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --midnight: #0a0b14;
+    --deep: #0f1020;
+    --surface: #141628;
+    --card: #1a1d35;
+    --border: rgba(140,100,220,0.18);
+    --border-bright: rgba(160,120,255,0.38);
+    --violet: #7c4dff;
+    --indigo: #5c6bc0;
+    --teal: #26c6da;
+    --lavender: #b39ddb;
+    --pink: #ce93d8;
+    --text-primary: #e8e0f8;
+    --text-secondary: #9e92c8;
+    --text-muted: #5c5480;
+    --gold: #f0c060;
+    --pending: #ffd54f;
+    --approved: #80cbc4;
+    --rejected: #ef9a9a;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--midnight);
+    color: var(--text-primary);
+    font-family: 'Raleway', sans-serif;
+    font-weight: 300;
+    min-height: 100vh;
+  }
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background-image:
+      radial-gradient(1px 1px at 10% 15%, rgba(255,255,255,0.55) 0%, transparent 100%),
+      radial-gradient(1px 1px at 25% 40%, rgba(200,180,255,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 70% 22%, rgba(255,255,255,0.4) 0%, transparent 100%),
+      radial-gradient(1px 1px at 85% 70%, rgba(200,180,255,0.5) 0%, transparent 100%),
+      radial-gradient(1.5px 1.5px at 90% 10%, rgba(255,255,255,0.55) 0%, transparent 100%),
+      radial-gradient(1px 1px at 40% 8%, rgba(255,255,255,0.4) 0%, transparent 100%);
+    pointer-events:none; z-index:0;
+  }
+  .app { position:relative; z-index:1; max-width:980px; margin:0 auto; padding:0 20px 60px; }
+
+  /* Header */
+  header { text-align:center; padding:36px 0 28px; }
+  header::after { content:''; display:block; width:160px; height:1px; background:linear-gradient(90deg,transparent,var(--violet),transparent); margin:18px auto 0; }
+  .role-badge { display:inline-flex; align-items:center; gap:6px; background:rgba(240,192,96,0.1); border:1px solid rgba(240,192,96,0.3); border-radius:20px; padding:4px 12px; font-size:9px; letter-spacing:0.25em; text-transform:uppercase; color:var(--gold); margin-bottom:10px; }
+  .site-title { font-family:'Cinzel Decorative',serif; font-size:clamp(12px,2.5vw,16px); letter-spacing:0.3em; color:var(--lavender); text-transform:uppercase; }
+  .page-title { font-family:'Cormorant Garamond',serif; font-size:clamp(26px,5vw,36px); font-weight:300; font-style:italic; color:var(--text-primary); margin-top:4px; }
+  .page-sub { font-size:10px; letter-spacing:0.2em; color:var(--text-muted); text-transform:uppercase; margin-top:4px; }
+  .header-icon { width:38px; height:38px; margin:0 auto 8px; display:block; opacity:0.85; }
+
+  /* Tabs */
+  .tab-nav { display:flex; gap:4px; background:var(--deep); border:1px solid var(--border); border-radius:12px; padding:4px; margin-bottom:24px; flex-wrap:wrap; }
+  .tab-btn { flex:1; min-width:120px; padding:10px 14px; border:none; border-radius:9px; background:transparent; color:var(--text-muted); font-family:'Raleway',sans-serif; font-size:11px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; }
+  .tab-btn:hover { color:var(--text-secondary); }
+  .tab-btn.active { background:linear-gradient(135deg,rgba(124,77,255,0.2),rgba(92,107,192,0.15)); color:var(--lavender); border:1px solid var(--border-bright); box-shadow:0 0 16px rgba(124,77,255,0.12); }
+
+  /* Panels */
+  .panel { display:none; animation:fadeIn 0.3s ease; }
+  .panel.active { display:block; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+
+  /* Cards */
+  .glass-card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:22px; margin-bottom:18px; position:relative; overflow:hidden; }
+  .glass-card::before { content:''; position:absolute; top:0;left:0;right:0; height:1px; background:linear-gradient(90deg,transparent,rgba(160,120,255,0.3),transparent); }
+
+  /* Section label */
+  .section-label { font-size:10px; letter-spacing:0.28em; text-transform:uppercase; color:var(--text-muted); margin-bottom:14px; display:flex; align-items:center; gap:10px; }
+  .section-label::after { content:''; flex:1; height:1px; background:var(--border); }
+
+  /* Stats */
+  .stats-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; margin-bottom:20px; }
+  .stat-box { background:var(--deep); border:1px solid var(--border); border-radius:10px; padding:14px; text-align:center; transition:border-color 0.2s,background 0.2s; }
+  .stat-box[style*="cursor:pointer"]:hover { border-color:rgba(240,192,96,0.4); background:rgba(240,192,96,0.06); }
+  .stat-num { font-family:'Cormorant Garamond',serif; font-size:30px; }
+  .stat-label { font-size:9px; letter-spacing:0.18em; text-transform:uppercase; color:var(--text-muted); margin-top:3px; }
+
+  /* Queue items */
+  .queue-item { background:var(--deep); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:14px; transition:border-color 0.2s; }
+  .queue-item:hover { border-color:var(--border-bright); }
+  .queue-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+  .submitter-chip { display:flex; align-items:center; gap:6px; background:rgba(124,77,255,0.1); border:1px solid rgba(124,77,255,0.2); border-radius:20px; padding:3px 9px 3px 5px; font-size:11px; color:var(--lavender); }
+  .mini-av { width:18px; height:18px; border-radius:50%; background:rgba(124,77,255,0.2); display:flex; align-items:center; justify-content:center; font-size:9px; }
+  .queue-char { font-family:'Cormorant Garamond',serif; font-style:italic; font-size:15px; }
+  .queue-time { margin-left:auto; font-size:10px; color:var(--text-muted); }
+  .field-chips { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:10px; }
+  .field-chip { font-size:9px; letter-spacing:0.12em; text-transform:uppercase; padding:2px 7px; border-radius:4px; background:rgba(179,157,219,0.1); border:1px solid rgba(179,157,219,0.2); color:var(--lavender); }
+  .expand-btn { font-size:11px; color:var(--violet); cursor:pointer; text-decoration:underline; text-decoration-style:dotted; background:none; border:none; padding:0; margin-bottom:10px; display:block; }
+
+  /* Diff */
+  .diff-block { background:rgba(0,0,0,0.2); border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-bottom:10px; }
+  .diff-head { display:flex; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--border); font-size:9px; color:var(--text-muted); letter-spacing:0.15em; text-transform:uppercase; }
+  .diff-body { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:10px 12px; }
+  @media(max-width:500px){.diff-body{grid-template-columns:1fr;}}
+  .diff-col-lbl { font-size:9px; letter-spacing:0.15em; text-transform:uppercase; margin-bottom:5px; }
+  .diff-old .diff-col-lbl { color:var(--rejected); }
+  .diff-new .diff-col-lbl { color:var(--approved); }
+  .diff-text { font-size:12px; font-family:'Cormorant Garamond',serif; font-style:italic; line-height:1.65; color:var(--text-secondary); white-space:pre-wrap; word-break:break-word; }
+  .diff-old .diff-text { text-decoration:line-through; opacity:0.55; }
+  .diff-new .diff-text { color:var(--text-primary); }
+  .sub-note { background:rgba(124,77,255,0.06); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:11px; color:var(--text-secondary); line-height:1.6; margin-bottom:10px; }
+  .inline-diff { display:none; margin-bottom:8px; }
+  .inline-diff.open { display:block; }
+
+  /* Reject textarea */
+  .reject-reply-wrap { display:none; margin-top:8px; }
+  .reject-reply-wrap textarea { width:100%; background:var(--deep); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-family:'Cormorant Garamond',serif; font-size:13px; padding:8px 12px; outline:none; resize:vertical; min-height:60px; }
+  .reject-reply-wrap textarea:focus { border-color:var(--border-bright); }
+
+  /* Buttons */
+  .btn-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:8px; }
+  .btn { padding:9px 20px; border-radius:8px; border:none; font-family:'Raleway',sans-serif; font-size:10px; font-weight:600; letter-spacing:0.15em; text-transform:uppercase; cursor:pointer; transition:all 0.2s; }
+  .btn-approve { background:linear-gradient(135deg,rgba(38,198,218,0.2),rgba(38,198,218,0.1)); border:1px solid rgba(38,198,218,0.4); color:var(--teal); }
+  .btn-approve:hover { background:rgba(38,198,218,0.28); }
+  .btn-approve:disabled { opacity:0.4; cursor:not-allowed; }
+  .btn-reject { background:transparent; border:1px solid rgba(239,154,154,0.3); color:var(--rejected); }
+  .btn-reject:hover { background:rgba(239,154,154,0.08); }
+  .btn-ghost { background:transparent; border:1px solid var(--border); color:var(--text-muted); }
+  .btn-ghost:hover { border-color:var(--border-bright); color:var(--text-secondary); }
+
+  /* Pills */
+  .pill { display:inline-flex; align-items:center; gap:4px; font-size:9px; letter-spacing:0.12em; text-transform:uppercase; padding:3px 9px; border-radius:20px; font-weight:600; }
+  .pill-pending { background:rgba(255,213,79,0.1); color:var(--pending); border:1px solid rgba(255,213,79,0.25); }
+  .pill-approved { background:rgba(128,203,196,0.1); color:var(--approved); border:1px solid rgba(128,203,196,0.25); }
+  .pill-rejected { background:rgba(239,154,154,0.1); color:var(--rejected); border:1px solid rgba(239,154,154,0.25); }
+
+  /* History */
+  .history-row { display:flex; align-items:center; gap:12px; padding:11px 0; border-bottom:1px solid rgba(140,100,220,0.08); flex-wrap:wrap; }
+  .history-row:last-child { border-bottom:none; }
+  .history-char { font-family:'Cormorant Garamond',serif; font-style:italic; font-size:14px; min-width:140px; }
+  .history-meta { font-size:11px; color:var(--text-muted); flex:1; }
+
+  /* Manage tab */
+  .manage-assignment { background:var(--deep); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:14px; }
+  .manage-char-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+  .manage-char-name { font-family:'Cormorant Garamond',serif; font-size:16px; font-style:italic; }
+  .manage-char-file { font-size:10px; color:var(--text-muted); }
+  .slots-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .slot { flex:1; min-width:150px; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:10px 12px; display:flex; align-items:center; gap:8px; }
+  .slot.filled { border-color:rgba(124,77,255,0.28); }
+  .slot.empty { border-style:dashed; opacity:0.5; }
+  .slot-av { width:28px; height:28px; border-radius:50%; background:rgba(124,77,255,0.15); display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0; }
+  .slot-name { font-size:12px; font-weight:400; }
+  .slot-role { font-size:9px; color:var(--text-muted); }
+  .slot-remove { margin-left:auto; font-size:9px; color:var(--rejected); cursor:pointer; background:none; border:none; letter-spacing:0.1em; }
+  .slot-remove:hover { text-decoration:underline; }
+
+  /* Add co-author form */
+  .add-form { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-top:10px; }
+  .add-form input { background:var(--deep); border:1px solid var(--border); border-radius:8px; color:var(--text-secondary); font-family:'Raleway',sans-serif; font-size:12px; padding:8px 10px; outline:none; flex:1; min-width:120px; }
+  .add-form input:focus { border-color:var(--border-bright); }
+
+  /* New assignment form */
+  .new-assignment-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:18px; }
+  .new-assignment-card .form-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  .new-assignment-card input { background:var(--deep); border:1px solid var(--border); border-radius:8px; color:var(--text-secondary); font-family:'Raleway',sans-serif; font-size:12px; padding:8px 10px; outline:none; flex:1; min-width:140px; }
+  .new-assignment-card input:focus { border-color:var(--border-bright); }
+
+  /* ── Searchable Select ─────────────────────────────────────────────────── */
+  .ss-wrap { position:relative; flex:1; min-width:160px; }
+  .ss-trig { display:flex; align-items:center; gap:8px; padding:9px 11px; background:var(--deep); border:1px solid var(--border); border-radius:8px; cursor:pointer; user-select:none; transition:border-color 0.2s, box-shadow 0.2s; height:38px; }
+  .ss-trig:hover, .ss-trig.open { border-color:var(--border-bright); box-shadow:0 0 10px rgba(124,77,255,0.1); }
+  .ss-val { flex:1; font-size:12px; font-family:'Raleway',sans-serif; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-muted); }
+  .ss-val.has-val { color:var(--text-secondary); }
+  .ss-arr { font-size:9px; color:var(--text-muted); flex-shrink:0; transition:transform 0.18s; }
+  .ss-trig.open .ss-arr { transform:rotate(180deg); }
+  .ss-dd { position:fixed; background:var(--surface); border:1px solid var(--border-bright); border-radius:10px; box-shadow:0 10px 36px rgba(0,0,0,0.55); z-index:9999; overflow:hidden; display:none; }
+  .ss-dd.open { display:block; animation:fadeIn 0.14s ease; }
+  .ss-srch { display:block; width:100%; padding:9px 12px; background:rgba(0,0,0,0.3); border:none; border-bottom:1px solid var(--border); color:var(--text-primary); font-family:'Raleway',sans-serif; font-size:12px; outline:none; }
+  .ss-srch::placeholder { color:var(--text-muted); font-style:italic; }
+  .ss-list { max-height:240px; overflow-y:auto; }
+  .ss-list::-webkit-scrollbar { width:4px; }
+  .ss-list::-webkit-scrollbar-track { background:transparent; }
+  .ss-list::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+  .ss-opt { padding:9px 12px; font-size:12px; color:var(--text-secondary); cursor:pointer; transition:background 0.12s, color 0.12s; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; outline:none; }
+  .ss-opt:hover, .ss-opt:focus { background:rgba(124,77,255,0.09); color:var(--text-primary); }
+  .ss-opt.ss-selected { color:var(--lavender); background:rgba(124,77,255,0.07); }
+  .ss-opt.ss-selected::before { content:'✓ '; font-size:10px; }
+  .ss-nores { padding:12px; font-size:11px; color:var(--text-muted); font-style:italic; text-align:center; }
+
+  /* Empty state */
+  .empty-state { text-align:center; padding:36px 20px; color:var(--text-muted); }
+  .empty-state .icon { font-size:28px; margin-bottom:8px; opacity:0.35; }
+  .empty-state p { font-size:12px; font-style:italic; }
+
+  /* Toast */
+  .toast { position:fixed; bottom:24px; right:24px; background:var(--card); border:1px solid var(--border-bright); border-radius:12px; padding:12px 18px; font-size:12px; color:var(--text-primary); box-shadow:0 8px 32px rgba(0,0,0,0.4); transform:translateY(70px); opacity:0; transition:all 0.35s cubic-bezier(0.34,1.56,0.64,1); z-index:100; display:flex; align-items:center; gap:8px; max-width:300px; }
+  .toast.show { transform:translateY(0); opacity:1; }
+
+  /* Loading */
+  .loading { text-align:center; padding:24px; color:var(--text-muted); font-size:12px; font-style:italic; }
+
+  /* Removing animation */
+  .removing { opacity:0; transform:translateX(20px); transition:all 0.3s ease; }
+
+  /* Pending co-author request items */
+  .pending-req-item { background:var(--deep); border:1px solid rgba(255,213,79,0.2); border-radius:12px; padding:16px 18px; margin-bottom:12px; }
+  .preq-header { display:flex; align-items:flex-start; gap:10px; margin-bottom:12px; }
+  .preq-meta { flex:1; }
+  .preq-name { font-size:13px; font-weight:500; color:var(--text-primary); margin-bottom:3px; }
+  .preq-handle { font-size:10px; color:var(--text-muted); }
+  .preq-char { font-family:'Cormorant Garamond',serif; font-style:italic; font-size:13px; color:var(--lavender); margin-top:4px; }
+  .preq-char::before { content:'→ '; font-style:normal; font-size:11px; opacity:0.6; }
+  .preq-msg { font-size:11px; color:var(--text-secondary); line-height:1.55; margin-top:7px; font-style:italic; padding:7px 10px; background:rgba(255,255,255,0.03); border-radius:6px; border-left:2px solid rgba(255,213,79,0.25); }
+  .preq-time { font-size:10px; color:var(--text-muted); flex-shrink:0; }
+  .preq-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .preq-decline-row { display:none; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .preq-decline-row.open { display:flex; }
+  .preq-reply-input { flex:1; min-width:160px; background:var(--deep); border:1px solid var(--border); border-radius:8px; color:var(--text-secondary); font-family:'Raleway',sans-serif; font-size:12px; padding:8px 10px; outline:none; }
+  .preq-reply-input:focus { border-color:var(--border-bright); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <svg class="header-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+      <defs>
+        <radialGradient id="bgA" cx="50%" cy="50%" r="60%"><stop offset="0%" stop-color="#12102a"/><stop offset="100%" stop-color="#070610"/></radialGradient>
+        <linearGradient id="cL" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#2e2060"/><stop offset="100%" stop-color="#1a1540"/></linearGradient>
+        <linearGradient id="cR" x1="100%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#1a3a50"/><stop offset="100%" stop-color="#0f1e30"/></linearGradient>
+        <linearGradient id="pL" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#1e1848"/><stop offset="100%" stop-color="#161240"/></linearGradient>
+        <linearGradient id="pR" x1="100%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#0f2a3e"/><stop offset="100%" stop-color="#0a1828"/></linearGradient>
+        <linearGradient id="spA" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#7c4dff"/><stop offset="100%" stop-color="#f0c060"/></linearGradient>
+        <filter id="gA"><feGaussianBlur stdDeviation="1.3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <rect width="64" height="64" rx="14" fill="url(#bgA)"/>
+      <circle cx="7" cy="8" r="0.6" fill="white" opacity="0.4"/><circle cx="55" cy="7" r="0.5" fill="#b39ddb" opacity="0.5"/><circle cx="59" cy="52" r="0.6" fill="white" opacity="0.35"/>
+      <path d="M 8 48 Q 7 50 8 52 L 30 54 L 30 18 L 8 16 Z" fill="url(#cL)" stroke="#3a2a70" stroke-width="0.5"/>
+      <path d="M 56 48 Q 57 50 56 52 L 34 54 L 34 18 L 56 16 Z" fill="url(#cR)" stroke="#0f2a4a" stroke-width="0.5"/>
+      <path d="M 10 46 Q 9 48 10 50 L 30 52 L 30 20 L 10 18 Z" fill="url(#pL)" stroke="#4a3080" stroke-width="0.4"/>
+      <path d="M 54 46 Q 55 48 54 50 L 34 52 L 34 20 L 54 18 Z" fill="url(#pR)" stroke="#0f3050" stroke-width="0.4"/>
+      <path d="M 30 20 L 30 52 L 34 52 L 34 20 Z" fill="url(#spA)" opacity="0.7"/>
+      <g filter="url(#gA)">
+        <circle cx="15" cy="26" r="1.1" fill="#b39ddb" opacity="0.9"/><circle cx="24" cy="30" r="0.9" fill="#9575cd" opacity="0.85"/><circle cx="18" cy="36" r="1.0" fill="#7c4dff" opacity="0.9"/>
+        <line x1="15" y1="26" x2="24" y2="30" stroke="#b39ddb" stroke-width="0.5" stroke-opacity="0.55"/><line x1="24" y1="30" x2="18" y2="36" stroke="#9575cd" stroke-width="0.5" stroke-opacity="0.55"/>
+      </g>
+      <g filter="url(#gA)">
+        <circle cx="49" cy="26" r="1.1" fill="#f0c060" opacity="0.9"/><circle cx="40" cy="30" r="0.9" fill="#e6a820" opacity="0.85"/><circle cx="46" cy="36" r="1.0" fill="#ffb74d" opacity="0.9"/>
+        <line x1="49" y1="26" x2="40" y2="30" stroke="#f0c060" stroke-width="0.5" stroke-opacity="0.55"/><line x1="40" y1="30" x2="46" y2="36" stroke="#e6a820" stroke-width="0.5" stroke-opacity="0.55"/>
+      </g>
+    </svg>
+    <div class="role-badge">⚙ Admin Panel</div>
+    <div class="site-title">DreamTavern · Co-Author Station</div>
+    <h1 class="page-title">Admin Dashboard</h1>
+    <p class="page-sub">Manage co-authors · Review submissions · Push approved edits</p>
+  </header>
+
+  <div class="tab-nav">
+    <button class="tab-btn active" id="tab-overview" onclick="switchTab('overview',this)">Overview</button>
+    <button class="tab-btn" id="tab-queue" onclick="switchTab('queue',this)">Review Queue <span id="qbadge" style="background:rgba(255,213,79,0.2);color:var(--pending);border-radius:10px;padding:1px 6px;font-size:9px;margin-left:3px;display:none;"></span></button>
+    <button class="tab-btn" id="tab-history" onclick="switchTab('history',this)">History</button>
+    <button class="tab-btn" id="tab-manage" onclick="switchTab('manage',this)">Manage Co-Authors <span id="req-badge" style="background:rgba(255,213,79,0.2);color:var(--pending);border-radius:10px;padding:1px 6px;font-size:9px;margin-left:3px;display:none;"></span></button>
+  </div>
+
+  <!-- OVERVIEW -->
+  <div class="panel active" id="panel-overview">
+    <div class="glass-card">
+      <div class="section-label">At a Glance</div>
+      <div class="stats-row">
+        <div class="stat-box"><div class="stat-num" id="stat-chars" style="color:var(--lavender);">—</div><div class="stat-label">Characters Open</div></div>
+        <div class="stat-box"><div class="stat-num" id="stat-pending" style="color:var(--pending);">—</div><div class="stat-label">Edits Awaiting Review</div></div>
+        <div class="stat-box"><div class="stat-num" id="stat-coauthors" style="color:var(--teal);">—</div><div class="stat-label">Co-Authors Active</div></div>
+        <div class="stat-box" id="stat-requests-box" style="cursor:pointer;" onclick="switchTab('manage',document.getElementById('tab-manage'))">
+          <div class="stat-num" id="stat-requests" style="color:var(--gold);">—</div>
+          <div class="stat-label">Access Requests</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending-requests notice banner (hidden when none pending) -->
+    <div id="overview-req-notice" style="display:none;margin-bottom:18px;padding:13px 16px;border-radius:10px;background:rgba(240,192,96,0.07);border:1px solid rgba(240,192,96,0.22);align-items:center;gap:12px;flex-wrap:wrap;">
+      <div style="font-size:18px;">📩</div>
+      <div style="flex:1;">
+        <div style="font-size:12px;font-weight:500;color:var(--gold);" id="req-notice-text">Co-Author Access Requests Waiting</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Users want to join your characters as co-authors. Review and approve or decline from the Manage tab.</div>
+      </div>
+      <button class="btn btn-approve" style="flex-shrink:0;white-space:nowrap;" onclick="switchTab('manage',document.getElementById('tab-manage'))">Review Requests →</button>
+    </div>
+
+    <div id="overview-assignments">
+      <div class="loading">Loading assignments…</div>
+    </div>
+  </div>
+
+  <!-- REVIEW QUEUE -->
+  <div class="panel" id="panel-queue">
+    <div id="queue-list">
+      <div class="loading">Loading queue…</div>
+    </div>
+  </div>
+
+  <!-- HISTORY -->
+  <div class="panel" id="panel-history">
+    <div class="glass-card">
+      <div class="section-label">Reviewed Submissions</div>
+      <div id="history-list"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- MANAGE CO-AUTHORS -->
+  <div class="panel" id="panel-manage">
+    <!-- Pending co-author access requests (hidden when empty) -->
+    <div class="glass-card" id="pending-requests-card" style="display:none;">
+      <div class="section-label" id="pending-req-label">Access Requests</div>
+      <div id="pending-requests-list">
+        <div class="loading">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Add new assignment -->
+    <div class="glass-card" id="assign-glass-card">
+      <div class="section-label">Assign a New Co-Author</div>
+      <div class="new-assignment-card">
+        <div class="form-row">
+          <!-- Character searchable select -->
+          <div class="ss-wrap" id="ss-achar">
+            <div class="ss-trig" id="ss-achar-trig" onclick="ssToggle('ss-achar')" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+              <span class="ss-val" id="ss-achar-val">— Select character —</span>
+              <span class="ss-arr">▾</span>
+            </div>
+            <div class="ss-dd" id="ss-achar-dd">
+              <input class="ss-srch" id="ss-achar-srch" type="text" placeholder="Type to filter…" autocomplete="off"
+                     oninput="ssFilter('ss-achar',this.value)"
+                     onkeydown="ssSrchKey('ss-achar',event)">
+              <div class="ss-list" id="ss-achar-list" role="listbox"></div>
+            </div>
+          </div>
+          <!-- User searchable select -->
+          <div class="ss-wrap" id="ss-auser">
+            <div class="ss-trig" id="ss-auser-trig" onclick="ssToggle('ss-auser')" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+              <span class="ss-val" id="ss-auser-val">— Select user —</span>
+              <span class="ss-arr">▾</span>
+            </div>
+            <div class="ss-dd" id="ss-auser-dd">
+              <input class="ss-srch" id="ss-auser-srch" type="text" placeholder="Type to filter…" autocomplete="off"
+                     oninput="ssFilter('ss-auser',this.value)"
+                     onkeydown="ssSrchKey('ss-auser',event)">
+              <div class="ss-list" id="ss-auser-list" role="listbox"></div>
+            </div>
+          </div>
+        </div>
+        <div class="btn-row" style="justify-content:flex-start;">
+          <button class="btn btn-approve" onclick="doAssign()">✦ Grant Co-Author Access</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Existing assignments -->
+    <div id="manage-list">
+      <div class="loading">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span id="t-icon">✦</span><span id="t-msg">Done!</span></div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let csrfToken = '';
+  let allAssignments = [];  // from /list
+  let allCharacters = [];   // from /admin-characters
+  let allUsers = [];        // from /user-list
+
+  const FIELD_LABELS = {
+    description: 'Description',
+    personality: 'Personality',
+    scenario: 'Scenario',
+    mes_example: 'Example Dialogue',
+    system_prompt: 'System Prompt',
+    creator_notes: 'Creator Notes',
+  };
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  async function init() {
+    await getCsrf();
+    await loadOverview();
+    loadPendingRequests(); // populate the badge immediately on page load
+  }
+
+  async function getCsrf() {
+    try {
+      const r = await fetch('/csrf-token', { credentials: 'include' });
+      csrfToken = (await r.json()).token || '';
+    } catch {}
+  }
+
+  function postHeaders() {
+    return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken };
+  }
+
+  // ── Overview ───────────────────────────────────────────────────────────────
+  async function loadOverview() {
+    try {
+      const [listRes, queueRes, reqsRes] = await Promise.all([
+        fetch('/api/coauthors/list',          { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+        fetch('/api/coauthors/pending-edits', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+        fetch('/api/coauthors/pending-requests', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+      ]);
+      const listData  = await listRes.json();
+      const queueData = await queueRes.json();
+      const reqsData  = await reqsRes.json();
+
+      allAssignments = listData.assignments || [];
+      const pending  = queueData.submissions || [];
+      const reqs     = reqsData.requests    || [];
+
+      // ── Stats ──
+      document.getElementById('stat-chars').textContent    = allAssignments.length;
+      document.getElementById('stat-pending').textContent  = pending.length;
+      const uniqueCoAuthors = new Set(allAssignments.flatMap(a => a.co_authors || []));
+      document.getElementById('stat-coauthors').textContent = uniqueCoAuthors.size;
+      document.getElementById('stat-requests').textContent  = reqs.length;
+
+      // Highlight the requests stat box when there are pending requests
+      const reqBox = document.getElementById('stat-requests-box');
+      reqBox.style.borderColor = reqs.length ? 'rgba(240,192,96,0.35)' : '';
+      reqBox.style.background  = reqs.length ? 'rgba(240,192,96,0.06)' : '';
+      reqBox.title = reqs.length ? `${reqs.length} pending request(s) — click to review` : '';
+
+      // ── Queue badge ──
+      const badge = document.getElementById('qbadge');
+      if (pending.length) { badge.textContent = pending.length; badge.style.display = 'inline'; }
+      else badge.style.display = 'none';
+
+      // ── Manage-tab badge ──
+      const reqBadge = document.getElementById('req-badge');
+      if (reqs.length) { reqBadge.textContent = reqs.length; reqBadge.style.display = 'inline'; }
+      else reqBadge.style.display = 'none';
+
+      // ── Pending-requests notice card ──
+      const notice = document.getElementById('overview-req-notice');
+      if (reqs.length) {
+        document.getElementById('req-notice-text').textContent =
+          reqs.length === 1
+            ? '1 Co-Author Access Request Waiting'
+            : `${reqs.length} Co-Author Access Requests Waiting`;
+        notice.style.display = 'flex';
+      } else {
+        notice.style.display = 'none';
+      }
+
+      renderOverviewAssignments(allAssignments);
+    } catch (err) {
+      document.getElementById('overview-assignments').innerHTML = '<div class="empty-state"><div class="icon">⚠</div><p>Could not load data.</p></div>';
+    }
+  }
+
+  function renderOverviewAssignments(asgns) {
+    const wrap = document.getElementById('overview-assignments');
+    if (!asgns.length) {
+      wrap.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No co-author assignments yet. Use the Manage tab to add some.</p></div>';
+      return;
+    }
+    wrap.innerHTML = asgns.map(a => `
+      <div class="glass-card" style="margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
+          <div style="font-family:'Cormorant Garamond',serif;font-size:18px;font-weight:400;">${esc(a.character_display_name)}</div>
+          <div style="font-size:10px;color:var(--text-muted);">${esc(a.character_file)}</div>
+          ${a.pending_count ? `<span class="pill pill-pending" style="margin-left:auto;">${a.pending_count} pending</span>` : ''}
+        </div>
+        <div class="slots-row">
+          ${(a.co_authors || []).map(h => `
+            <div class="slot filled">
+              <div class="slot-av">✦</div>
+              <div><div class="slot-name">${esc(h)}</div><div class="slot-role">Co-Author</div></div>
+            </div>
+          `).join('')}
+          ${Array.from({length: Math.max(0, 3 - (a.co_authors||[]).length)}).map(() => `
+            <div class="slot empty">
+              <div class="slot-av" style="opacity:0.3;">+</div>
+              <div style="font-size:11px;color:var(--text-muted);">Open slot</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // ── Review Queue ───────────────────────────────────────────────────────────
+  async function loadQueue() {
+    const list = document.getElementById('queue-list');
+    list.innerHTML = '<div class="loading">Loading queue…</div>';
+    try {
+      const r = await fetch('/api/coauthors/pending-edits', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' });
+      const data = await r.json();
+      renderQueue(data.submissions || []);
+    } catch {
+      list.innerHTML = '<div class="empty-state"><div class="icon">⚠</div><p>Could not load queue.</p></div>';
+    }
+  }
+
+  // ── Lorebook diff helpers ──────────────────────────────────────────────────
+  function formatLbEntry(entry) {
+    if (!entry) return '<em>—</em>';
+    const parts = [];
+    if (entry.comment) parts.push(`<strong>Name:</strong> ${esc(entry.comment)}`);
+    if (Array.isArray(entry.key) && entry.key.length) parts.push(`<strong>Keys:</strong> ${esc(entry.key.join(', '))}`);
+    if (Array.isArray(entry.keysecondary) && entry.keysecondary.length) parts.push(`<strong>2nd Keys:</strong> ${esc(entry.keysecondary.join(', '))}`);
+    if (entry.content) parts.push(`<strong>Content:</strong><br>${esc(entry.content.substring(0, 300))}${entry.content.length > 300 ? '…' : ''}`);
+    if (entry.disable) parts.push(`<em style="color:var(--rejected);">⊘ Disabled</em>`);
+    return parts.join('<br>') || '<em>—</em>';
+  }
+
+  function renderLorebookDiffs(changes) {
+    if (!changes || !changes.length) return '<div style="color:var(--text-muted);font-size:12px;padding:8px;">No changes recorded.</div>';
+    return changes.map(c => {
+      const actionColor = c.action === 'add' ? 'var(--approved)' : c.action === 'delete' ? 'var(--rejected)' : 'var(--pending)';
+      const actionLabel = c.action.toUpperCase();
+      const entryTitle = c.action === 'add'
+        ? (c.proposed?.comment || 'New Entry')
+        : (c.original?.comment || `uid ${c.entry_uid}`);
+
+      let body = '';
+      if (c.action === 'add') {
+        body = `<div class="diff-new" style="grid-column:1/-1;"><div class="diff-col-lbl">New Entry</div><div class="diff-text">${formatLbEntry(c.proposed)}</div></div>`;
+      } else if (c.action === 'delete') {
+        body = `<div class="diff-old" style="grid-column:1/-1;"><div class="diff-col-lbl">Entry to Delete</div><div class="diff-text">${formatLbEntry(c.original)}</div></div>`;
+      } else {
+        body = `
+          <div class="diff-old"><div class="diff-col-lbl">Before</div><div class="diff-text">${formatLbEntry(c.original)}</div></div>
+          <div class="diff-new"><div class="diff-col-lbl">Proposed</div><div class="diff-text">${formatLbEntry(c.proposed)}</div></div>`;
+      }
+      return `
+        <div class="diff-block">
+          <div class="diff-head">
+            <span>${esc(entryTitle)}</span>
+            <span style="color:${actionColor};font-weight:600;">${actionLabel}</span>
+          </div>
+          <div class="diff-body">${body}</div>
+        </div>`;
+    }).join('');
+  }
+
+  function renderQueue(subs) {
+    const list = document.getElementById('queue-list');
+    if (!subs.length) {
+      list.innerHTML = `<div class="glass-card"><div class="empty-state"><div class="icon">✓</div><p>Nothing in the review queue right now.</p></div></div>`;
+      return;
+    }
+    list.innerHTML = subs.map((s, idx) => {
+      const isLorebook = s.edit_type === 'lorebook';
+      let chips = '';
+      let diffs = '';
+
+      if (isLorebook) {
+        chips = `<span class="field-chip" style="color:var(--teal);border-color:rgba(38,198,218,0.3);">📚 Lorebook</span>` +
+          (s.lorebook_name ? `<span class="field-chip">${esc(s.lorebook_name)}</span>` : '') +
+          (s.lorebook_changes || []).map(c =>
+            `<span class="field-chip">${esc(c.action)}: ${esc(c.original?.comment || (c.action==='add'?'new entry':`uid ${c.entry_uid}`))}</span>`
+          ).join('');
+        diffs = renderLorebookDiffs(s.lorebook_changes || []);
+      } else {
+        const fields = s.changed_fields || [];
+        chips = fields.map(f => `<span class="field-chip">${esc(FIELD_LABELS[f] || f)}</span>`).join('');
+        diffs = fields.map(f => `
+          <div class="diff-block">
+            <div class="diff-head"><span>${esc(FIELD_LABELS[f] || f)}</span></div>
+            <div class="diff-body">
+              <div class="diff-old"><div class="diff-col-lbl">Before</div><div class="diff-text">${esc(s.original_fields?.[f] || '—')}</div></div>
+              <div class="diff-new"><div class="diff-col-lbl">Proposed</div><div class="diff-text">${esc(s.proposed_fields?.[f] || '')}</div></div>
+            </div>
+          </div>`).join('');
+      }
+
+      const showLabel = isLorebook ? '▸ Show lorebook changes' : '▸ Show field changes';
+      return `
+        <div class="queue-item" id="qi-${esc(s.submission_id)}">
+          <div class="queue-header">
+            <div class="submitter-chip"><div class="mini-av">✦</div>${esc(s.submitter_name || s.submitter_handle)}</div>
+            <div class="queue-char">${esc(s.character_display_name || s.target_character_file)}</div>
+            <div class="queue-time">${timeAgo(s.created_at)}</div>
+          </div>
+          <div class="field-chips">${chips}</div>
+          ${s.notes ? `<div class="sub-note">📝 ${esc(s.notes)}</div>` : ''}
+          <button class="expand-btn" onclick="toggleDiff('diff-${idx}',this)">${showLabel}</button>
+          <div class="inline-diff" id="diff-${idx}">${diffs}</div>
+          <div class="reject-reply-wrap" id="reply-wrap-${idx}">
+            <textarea id="reply-txt-${idx}" placeholder="Optional note to the co-author explaining the rejection…"></textarea>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-reject" onclick="toggleRejectReply('${esc(s.submission_id)}',${idx})">✕ Reject</button>
+            <button class="btn btn-ghost" id="confirm-reject-${idx}" style="display:none;" onclick="doAction('${esc(s.submission_id)}','reject',${idx})">Confirm Reject</button>
+            <button class="btn btn-approve" onclick="doAction('${esc(s.submission_id)}','approve',${idx})">✓ Approve &amp; Push</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function toggleDiff(id, btn) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('open');
+    btn.textContent = el.classList.contains('open') ? '▾ Hide field changes' : '▸ Show field changes';
+  }
+
+  function toggleRejectReply(submissionId, idx) {
+    const wrap = document.getElementById(`reply-wrap-${idx}`);
+    const confirmBtn = document.getElementById(`confirm-reject-${idx}`);
+    if (!wrap) return;
+    const isOpen = wrap.style.display === 'block';
+    if (isOpen) {
+      // Cancel
+      wrap.style.display = 'none';
+      confirmBtn.style.display = 'none';
+    } else {
+      wrap.style.display = 'block';
+      confirmBtn.style.display = 'inline-flex';
+    }
+  }
+
+  async function doAction(submissionId, action, idx) {
+    const reply = action === 'reject' ? (document.getElementById(`reply-txt-${idx}`)?.value || '') : '';
+    const btn = document.querySelector(`#qi-${submissionId} .btn-${action === 'approve' ? 'approve' : 'ghost'}`);
+    if (btn) { btn.disabled = true; btn.textContent = action === 'approve' ? 'Approving…' : 'Rejecting…'; }
+
+    try {
+      const r = await fetch('/api/coauthors/admin-action', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify({ submission_id: submissionId, action, reply }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        showToast('✕', data.error || 'Action failed.');
+        if (btn) { btn.disabled = false; btn.textContent = action === 'approve' ? '✓ Approve & Push' : 'Confirm Reject'; }
+        return;
+      }
+      const el = document.getElementById(`qi-${submissionId}`);
+      if (el) {
+        el.classList.add('removing');
+        setTimeout(() => el.remove(), 300);
+      }
+      if (action === 'approve') {
+        showToast('✓', `Approved! Queued for ${data.recipients_notified} recipient(s).`);
+      } else {
+        showToast('✦', 'Submission rejected.');
+      }
+      // Refresh overview badge
+      loadOverview();
+    } catch {
+      showToast('✕', 'Network error — please try again.');
+      if (btn) { btn.disabled = false; }
+    }
+  }
+
+  // ── History ────────────────────────────────────────────────────────────────
+  async function loadHistory() {
+    const list = document.getElementById('history-list');
+    list.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const r = await fetch('/api/coauthors/history', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' });
+      const data = await r.json();
+      renderHistory(data.submissions || []);
+    } catch {
+      list.innerHTML = '<div class="empty-state"><div class="icon">⚠</div><p>Could not load history.</p></div>';
+    }
+  }
+
+  function renderHistory(subs) {
+    const list = document.getElementById('history-list');
+    if (!subs.length) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No reviewed submissions yet.</p></div>';
+      return;
+    }
+    list.innerHTML = subs.map(s => {
+      const pillClass = s.status === 'approved' ? 'pill-approved' : 'pill-rejected';
+      const pillIcon = s.status === 'approved' ? '✓' : '✕';
+      const isLorebook = s.edit_type === 'lorebook';
+      const metaChanges = isLorebook
+        ? `📚 Lorebook · ${(s.lorebook_changes||[]).length} change(s)`
+        : (s.changed_fields||[]).map(f => FIELD_LABELS[f] || f).join(', ');
+      return `
+        <div class="history-row">
+          <div class="history-char">${esc(s.character_display_name || s.target_character_file)}</div>
+          <div class="history-meta">${esc(s.submitter_name || s.submitter_handle)} · ${esc(metaChanges)}</div>
+          <div style="font-size:10px;color:var(--text-muted);">${timeAgo(s.reviewed_at || s.created_at)}</div>
+          <span class="pill ${pillClass}">${pillIcon} ${s.status}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ── Manage Co-Authors ──────────────────────────────────────────────────────
+  async function loadManage() {
+    const list = document.getElementById('manage-list');
+    list.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const [listRes, charsRes, usersRes] = await Promise.all([
+        fetch('/api/coauthors/list', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+        fetch('/api/coauthors/admin-characters', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+        fetch('/api/coauthors/user-list', { method:'POST', credentials:'include', headers:postHeaders(), body:'{}' }),
+      ]);
+      const listData = await listRes.json();
+      const charsData = await charsRes.json();
+      const usersData = await usersRes.json();
+
+      allAssignments = listData.assignments || [];
+      allCharacters = charsData.characters || [];
+      allUsers = usersData.users || [];
+
+      populateAssignSelects();
+      renderManageList(allAssignments);
+    } catch {
+      list.innerHTML = '<div class="empty-state"><div class="icon">⚠</div><p>Could not load manage data.</p></div>';
+    }
+    // Load pending requests in parallel
+    loadPendingRequests();
+  }
+
+  // ── Pending Co-Author Requests ─────────────────────────────────────────────
+  async function loadPendingRequests() {
+    try {
+      const r = await fetch('/api/coauthors/pending-requests', {
+        method: 'POST', credentials: 'include', headers: postHeaders(), body: '{}',
+      });
+      const data = await r.json();
+      const reqs = data.requests || [];
+
+      const card  = document.getElementById('pending-requests-card');
+      const badge = document.getElementById('req-badge');
+      const label = document.getElementById('pending-req-label');
+
+      if (reqs.length) {
+        card.style.display = '';
+        label.textContent  = `Access Requests (${reqs.length} pending)`;
+        badge.textContent  = reqs.length;
+        badge.style.display = '';
+      } else {
+        card.style.display  = 'none';
+        badge.style.display = 'none';
+      }
+      renderPendingRequests(reqs);
+    } catch { /* silent — badge stays hidden */ }
+  }
+
+  function renderPendingRequests(reqs) {
+    const list = document.getElementById('pending-requests-list');
+    if (!reqs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = reqs.map(req => `
+      <div class="pending-req-item" id="preq-${esc(req.request_id)}">
+        <div class="preq-header">
+          <div class="preq-meta">
+            <div class="preq-name">${esc(req.requester_name || req.requester_handle)} <span class="preq-handle">(${esc(req.requester_handle)})</span></div>
+            <div class="preq-char">${esc(req.character_display_name || req.character_file)}</div>
+            ${req.message ? `<div class="preq-msg">${esc(req.message)}</div>` : ''}
+          </div>
+          <div class="preq-time">${timeAgo(req.created_at)}</div>
+        </div>
+        <div class="preq-actions" id="preq-actions-${esc(req.request_id)}">
+          <button class="btn btn-approve" onclick="doRequestAction('${esc(req.request_id)}','approve')">✓ Approve</button>
+          <button class="btn btn-reject"  onclick="showDeclineInput('${esc(req.request_id)}')">✕ Decline</button>
+        </div>
+        <div class="preq-decline-row" id="preq-decline-${esc(req.request_id)}">
+          <input class="preq-reply-input" id="preq-reply-${esc(req.request_id)}" type="text" placeholder="Optional decline note…">
+          <button class="btn btn-reject"  onclick="doRequestAction('${esc(req.request_id)}','decline')">Confirm Decline</button>
+          <button class="btn btn-ghost"   onclick="hideDeclineInput('${esc(req.request_id)}')">Cancel</button>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function showDeclineInput(reqId) {
+    document.getElementById('preq-actions-' + reqId).style.display = 'none';
+    const row = document.getElementById('preq-decline-' + reqId);
+    row.classList.add('open');
+    document.getElementById('preq-reply-' + reqId)?.focus();
+  }
+
+  function hideDeclineInput(reqId) {
+    document.getElementById('preq-actions-' + reqId).style.display = '';
+    document.getElementById('preq-decline-' + reqId).classList.remove('open');
+  }
+
+  async function doRequestAction(requestId, action) {
+    const reply = (document.getElementById('preq-reply-' + requestId)?.value || '').trim();
+    try {
+      const r = await fetch('/api/coauthors/request-action', {
+        method: 'POST', credentials: 'include', headers: postHeaders(),
+        body: JSON.stringify({ request_id: requestId, action, reply }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { showToast('✕', data.error || 'Could not process request.'); return; }
+      const label = action === 'approve' ? 'approved — user added as co-author.' : 'declined.';
+      showToast(action === 'approve' ? '✓' : '✦', `Request ${label}`);
+      // Remove the item with animation
+      const el = document.getElementById('preq-' + requestId);
+      if (el) { el.classList.add('removing'); setTimeout(() => loadManage(), 350); }
+      else await loadManage();
+    } catch { showToast('✕', 'Network error.'); }
+  }
+
+  function populateAssignSelects() {
+    ssInit('ss-achar',
+      allCharacters.map(c => ({
+        value: c.character_registry_key || c.character_file,
+        label: `${c.character_display_name} (${c.owner_handle})`,
+        data: {
+          character_registry_key: c.character_registry_key || '',
+          character_file: c.character_file,
+          owner_handle: c.owner_handle,
+          character_display_name: c.character_display_name,
+        },
+      })),
+      '— Select character —');
+
+    ssInit('ss-auser',
+      allUsers.map(u => ({ value: u.handle, label: u.handle })),
+      '— Select user —');
+  }
+
+  async function doAssign() {
+    const selectedCharacterKey = ssGet('ss-achar');
+    const userHandle = ssGet('ss-auser');
+    if (!selectedCharacterKey || !userHandle) { showToast('⚠', 'Select both a character and a user.'); return; }
+
+    const charData       = ssGetData('ss-achar');
+    const charFile       = charData?.character_file || '';
+    const ownerHandle    = charData?.owner_handle || '';
+    const charDisplayName = charData?.character_display_name || charFile;
+
+    try {
+      const r = await fetch('/api/coauthors/assign', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify({
+          character_file: charFile,
+          character_registry_key: charData?.character_registry_key || selectedCharacterKey,
+          character_display_name: charDisplayName,
+          owner_handle: ownerHandle,
+          handle: userHandle,
+          action: 'add',
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { showToast('✕', data.error || 'Could not assign.'); return; }
+      showToast('✓', `${userHandle} added as co-author of ${charDisplayName}.`);
+      await loadManage();
+    } catch { showToast('✕', 'Network error.'); }
+  }
+
+  async function doRemove(characterRegistryKey, charFile, handle, charDisplayName, ownerHandle) {
+    if (!confirm(`Remove ${handle} as co-author of "${charDisplayName}"?`)) return;
+    try {
+      const r = await fetch('/api/coauthors/assign', {
+        method: 'POST',
+        credentials: 'include',
+        headers: postHeaders(),
+        body: JSON.stringify({
+          character_file: charFile,
+          character_registry_key: characterRegistryKey,
+          owner_handle: ownerHandle,
+          handle,
+          action: 'remove',
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) { showToast('✕', data.error || 'Could not remove.'); return; }
+      showToast('✦', `${handle} removed.`);
+      await loadManage();
+    } catch { showToast('✕', 'Network error.'); }
+  }
+
+  function renderManageList(asgns) {
+    const list = document.getElementById('manage-list');
+    if (!asgns.length) {
+      list.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No co-author assignments yet. Use the form above to add one.</p></div>';
+      return;
+    }
+    list.innerHTML = asgns.map(a => `
+      <div class="manage-assignment">
+        <div class="manage-char-header">
+          <div>
+            <div class="manage-char-name">${esc(a.character_display_name)}</div>
+            <div class="manage-char-file">${esc(a.character_file)} · owner: ${esc(a.owner_handle)}</div>
+          </div>
+          ${a.pending_count ? `<span class="pill pill-pending" style="margin-left:auto;">${a.pending_count} pending</span>` : ''}
+        </div>
+        <div class="slots-row">
+          ${(a.co_authors || []).map(h => `
+            <div class="slot filled">
+              <div class="slot-av">✦</div>
+              <div style="flex:1;"><div class="slot-name">${esc(h)}</div><div class="slot-role">Co-Author</div></div>
+              <button class="slot-remove" onclick='doRemove(${JSON.stringify(a.character_registry_key || "")},${JSON.stringify(a.character_file || "")},${JSON.stringify(h || "")},${JSON.stringify(a.character_display_name || "")},${JSON.stringify(a.owner_handle || "")})'>✕ Remove</button>
+            </div>
+          `).join('')}
+          ${Array.from({length: Math.max(0, 3 - (a.co_authors||[]).length)}).map(() => `
+            <div class="slot empty">
+              <div class="slot-av" style="opacity:0.3;">+</div>
+              <div style="font-size:11px;color:var(--text-muted);">Open slot (${3 - (a.co_authors||[]).length} of 3 available)</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // ── Searchable Select engine ───────────────────────────────────────────────
+  const _ssOpts = {};
+  const _ssSel  = {};
+
+  function ssInit(wrapId, opts, placeholder) {
+    _ssOpts[wrapId] = opts || [];
+    _ssSel[wrapId]  = { value: '', label: '', idx: -1, data: null };
+    const list = document.getElementById(wrapId + '-list');
+    if (list) list.innerHTML = opts.length
+      ? opts.map((o, i) => `<div class="ss-opt" tabindex="0" data-i="${i}"
+            onclick="ssSelect('${wrapId}',${i})"
+            onkeydown="ssOptKey('${wrapId}',${i},event)"
+          >${esc(o.label)}</div>`).join('')
+      : '<div class="ss-nores">No options available</div>';
+    const valEl = document.getElementById(wrapId + '-val');
+    if (valEl) { valEl.textContent = placeholder || '— Select —'; valEl.classList.remove('has-val'); }
+  }
+
+  function ssToggle(wrapId) {
+    const dd   = document.getElementById(wrapId + '-dd');
+    const trig = document.getElementById(wrapId + '-trig');
+    if (!dd) return;
+    if (dd.classList.contains('open')) { ssClose(wrapId); return; }
+    document.querySelectorAll('.ss-dd.open').forEach(el => {
+      const ow = el.id.replace('-dd','');
+      if (ow !== wrapId) ssClose(ow);
+    });
+    const rect = trig.getBoundingClientRect();
+    dd.style.left  = rect.left + 'px';
+    dd.style.width = rect.width + 'px';
+    dd.style.top   = (rect.bottom + 4) + 'px';
+    dd.classList.add('open');
+    trig.classList.add('open');
+    trig.setAttribute('aria-expanded', 'true');
+    const srch = document.getElementById(wrapId + '-srch');
+    if (srch) { srch.value = ''; ssFilter(wrapId, ''); srch.focus(); }
+  }
+
+  function ssClose(wrapId) {
+    const dd   = document.getElementById(wrapId + '-dd');
+    const trig = document.getElementById(wrapId + '-trig');
+    dd?.classList.remove('open');
+    trig?.classList.remove('open');
+    trig?.setAttribute('aria-expanded', 'false');
+  }
+
+  function ssFilter(wrapId, term) {
+    const list = document.getElementById(wrapId + '-list');
+    if (!list) return;
+    const t = term.trim().toLowerCase();
+    let visible = 0;
+    list.querySelectorAll('.ss-opt').forEach(el => {
+      const i = parseInt(el.dataset.i, 10);
+      const label = (_ssOpts[wrapId]?.[i]?.label || '').toLowerCase();
+      const show = !t || label.includes(t);
+      el.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    let noRes = list.querySelector('.ss-nores');
+    if (!visible) {
+      if (!noRes) { noRes = document.createElement('div'); noRes.className = 'ss-nores'; list.appendChild(noRes); }
+      noRes.textContent = t ? 'No matches found' : 'No options available';
+      noRes.style.display = '';
+    } else if (noRes) noRes.style.display = 'none';
+  }
+
+  function ssSelect(wrapId, idx) {
+    const opt = _ssOpts[wrapId]?.[idx];
+    if (!opt) return;
+    _ssSel[wrapId] = { value: opt.value, label: opt.label, idx, data: opt.data || null };
+    const valEl = document.getElementById(wrapId + '-val');
+    if (valEl) { valEl.textContent = opt.label; valEl.classList.add('has-val'); }
+    const list = document.getElementById(wrapId + '-list');
+    list?.querySelectorAll('.ss-opt').forEach(el => {
+      el.classList.toggle('ss-selected', parseInt(el.dataset.i, 10) === idx);
+    });
+    ssClose(wrapId);
+  }
+
+  function ssGet(wrapId)      { return _ssSel[wrapId]?.value || ''; }
+  function ssGetData(wrapId)  { return _ssSel[wrapId]?.data || null; }
+
+  function ssSrchKey(wrapId, e) {
+    const list  = document.getElementById(wrapId + '-list');
+    const first = list?.querySelector('.ss-opt:not([style*="display: none"])');
+    if (e.key === 'ArrowDown') { e.preventDefault(); first?.focus(); }
+    else if (e.key === 'Escape') ssClose(wrapId);
+    else if (e.key === 'Enter' && first) { e.preventDefault(); first.click(); }
+  }
+
+  function ssOptKey(wrapId, idx, e) {
+    const list    = document.getElementById(wrapId + '-list');
+    const visible = Array.from(list?.querySelectorAll('.ss-opt:not([style*="display: none"])') || []);
+    const pos     = visible.indexOf(e.currentTarget);
+    if (e.key === 'ArrowDown')  { e.preventDefault(); visible[pos + 1]?.focus(); }
+    else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (pos === 0) document.getElementById(wrapId + '-srch')?.focus();
+      else visible[pos - 1]?.focus();
+    }
+    else if (e.key === 'Enter')  { e.preventDefault(); ssSelect(wrapId, idx); }
+    else if (e.key === 'Escape') ssClose(wrapId);
+  }
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.ss-wrap') && !e.target.closest('.ss-dd')) {
+      document.querySelectorAll('.ss-dd.open').forEach(el => ssClose(el.id.replace('-dd','')));
+    }
+  });
+
+  // ── Tab switching ──────────────────────────────────────────────────────────
+  function switchTab(name, btn) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('panel-' + name).classList.add('active');
+    if (btn) btn.classList.add('active');
+    if (name === 'queue')   loadQueue();
+    else if (name === 'history')  loadHistory();
+    else if (name === 'manage')   loadManage();
+    else if (name === 'overview') { loadOverview(); loadPendingRequests(); /* keep badge fresh */ }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function esc(str) {
+    return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function timeAgo(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    const m = Math.floor(diff / 60000);
+    if (m < 60) return `${Math.max(0,m)}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h/24)}d ago`;
+  }
+
+  function showToast(icon, msg) {
+    const t = document.getElementById('toast');
+    document.getElementById('t-icon').textContent = icon;
+    document.getElementById('t-msg').textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3500);
+  }
+
+  init();
+</script>
+</body>
+</html>

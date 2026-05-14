@@ -692,6 +692,51 @@ export function getImages(directoryPath, sortBy = 'name', type = MEDIA_REQUEST_T
 }
 
 /**
+ * Async version of getImages that doesn't block the event loop.
+ * @param {string} directoryPath Path to the directory containing the images
+ * @param {'name' | 'date'} sortBy Sort images by name or date
+ * @param {number} type Bitwise flag representing media types to include
+ * @returns {Promise<string[]>} List of image file names
+ */
+export async function getImagesAsync(directoryPath, sortBy = 'name', type = MEDIA_REQUEST_TYPE.IMAGE) {
+    const dirents = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+    let files = dirents
+        .filter(dirent => dirent.isFile())
+        .map(dirent => dirent.name)
+        .filter(file => {
+            const fileType = mime.lookup(file);
+            if (!fileType) {
+                return false;
+            }
+            if ((type & MEDIA_REQUEST_TYPE.IMAGE) && fileType.startsWith('image/')) {
+                return true;
+            }
+            if ((type & MEDIA_REQUEST_TYPE.VIDEO) && fileType.startsWith('video/')) {
+                return true;
+            }
+            if ((type & MEDIA_REQUEST_TYPE.AUDIO) && fileType.startsWith('audio/')) {
+                return true;
+            }
+            return false;
+        });
+
+    if (sortBy === 'name') {
+        files.sort(Intl.Collator().compare);
+    } else if (sortBy === 'date') {
+        const stats = await Promise.all(
+            files.map(async (file) => {
+                const stat = await fs.promises.stat(path.join(directoryPath, file));
+                return { file, mtimeMs: stat.mtimeMs };
+            }),
+        );
+        stats.sort((a, b) => a.mtimeMs - b.mtimeMs);
+        files = stats.map(s => s.file);
+    }
+
+    return files;
+}
+
+/**
  * Pipe a fetch() response to an Express.js Response, including status code.
  * @param {import('node-fetch').Response} from The Fetch API response to pipe from.
  * @param {import('express').Response} to The Express response to pipe to.

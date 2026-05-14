@@ -6,6 +6,7 @@ import express from 'express';
 
 import { readSecret, SECRET_KEYS } from './secrets.js';
 import { readAllChunks, extractFileFromZipBuffer, forwardFetchResponse } from '../util.js';
+import { applyHiddenLoreContextToRequest, setHiddenLoreActivationHeader } from './hidden-lore.js';
 
 const API_NOVELAI = 'https://api.novelai.net';
 const TEXT_NOVELAI = 'https://text.novelai.net';
@@ -167,6 +168,9 @@ router.post('/status', async function (req, res) {
 
 router.post('/generate', async function (req, res) {
     if (!req.body) return res.sendStatus(400);
+
+    const { activatedWorlds } = await applyHiddenLoreContextToRequest(req);
+    setHiddenLoreActivationHeader(res, activatedWorlds);
 
     const api_key_novel = readSecret(req.user.directories, SECRET_KEYS.NOVEL);
 

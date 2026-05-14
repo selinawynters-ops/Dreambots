@@ -106,9 +106,11 @@ async function sendRecoveryPart2(handle, code, newPassword) {
  * @returns {Promise<void>}
  */
 async function performLogin(handle, password) {
+    const mfaCode = getMfaCode();
     const userInfo = {
         handle: handle,
         password: password,
+        mfaCode: mfaCode,
     };
 
     try {
@@ -145,7 +147,7 @@ async function performLogin(handle, password) {
  */
 async function onUserSelected(user) {
     // No password, just log in
-    if (!user.password) {
+    if (!user.password && !user.twoFactorEnabled) {
         return await performLogin(user.handle, '');
     }
 
@@ -175,6 +177,16 @@ async function onUserSelected(user) {
  */
 function displayError(message) {
     $('#errorMessage').text(message);
+}
+
+function getMfaCode() {
+    const inputCode = String($('#userMfaCode').val() || '').trim();
+
+    if (inputCode) {
+        return inputCode;
+    }
+
+    return $('.twofa-box').toArray().map(x => String($(x).val() || '')).join('').trim();
 }
 
 /**

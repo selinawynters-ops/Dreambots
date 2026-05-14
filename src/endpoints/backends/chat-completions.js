@@ -27,6 +27,7 @@ import {
     trimTrailingSlash,
     flattenSchema,
 } from '../../util.js';
+import { applyHiddenLoreContextToRequest, setHiddenLoreActivationHeader } from '../hidden-lore.js';
 import {
     convertClaudeMessages,
     convertGooglePrompt,
@@ -85,6 +86,9 @@ const API_ZAI_COMMON = 'https://api.z.ai/api/paas/v4';
 const API_ZAI_CODING = 'https://api.z.ai/api/coding/paas/v4';
 const API_SILICONFLOW = 'https://api.siliconflow.com/v1';
 const API_OPENROUTER = 'https://openrouter.ai/api/v1';
+const API_NAVY = 'https://api.navy/v1';
+const API_ROUTEWAY = 'https://api.routeway.ai/v1';
+const API_POE_MODELS = 'https://api.poe.com/v1/models';
 
 /**
  * Module-scoped Claude caching configuration values.
@@ -101,6 +105,317 @@ const cachingAtDepth = (() => {
  * @type {string[]}
  */
 const openRouterCacheableModels = [];
+const NAVY_ENRICHMENT_TTL_MS = 10 * 60 * 1000;
+const navyEnrichmentCache = {
+    fetchedAt: 0,
+    /** @type {Map<string, any>} */
+    map: new Map(),
+};
+
+function parseMaybeNumber(value) {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : undefined;
+    }
+
+    if (typeof value === 'string') {
+        const cleaned = value.trim().replace(/,/g, '').replace(/^\$/, '');
+        const unitMatch = cleaned.match(/^([0-9]*\.?[0-9]+)\s*([kKmM])$/);
+
+        if (unitMatch) {
+            const num = Number(unitMatch[1]);
+            if (!Number.isFinite(num)) {
+                return undefined;
+            }
+
+            return unitMatch[2].toLowerCase() === 'k' ? num * 1000 : num * 1000000;
+        }
+
+        const numeric = Number(cleaned);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+
+        const numericMatch = cleaned.match(/([0-9]*\.?[0-9]+)/);
+        if (numericMatch) {
+            const matchedNumeric = Number(numericMatch[1]);
+            if (Number.isFinite(matchedNumeric)) {
+                return matchedNumeric;
+            }
+        }
+    }
+
+    return undefined;
+}
+
+function firstParsedNumber(...values) {
+    for (const value of values) {
+        const numeric = parseMaybeNumber(value);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+    }
+
+    return undefined;
+}
+
+function getNavyContextLengthFromModel(model) {
+    return firstParsedNumber(
+        model?.tokens,
+        model?.context_window?.context_length,
+        model?.context_window?.max_input_tokens,
+        model?.context_window?.input_tokens,
+        model?.context_length,
+        model?.max_context_length,
+        model?.max_tokens,
+        model?.max_input_tokens,
+        model?.contextWindow,
+        model?.context,
+        model?.limits?.context,
+        model?.limits?.context_length,
+        model?.model_spec?.context_length,
+        model?.model_spec?.context_window?.context_length,
+    );
+}
+
+function getNavyInputPriceFromModel(model) {
+    return firstParsedNumber(
+        model?.pricing?.input,
+        model?.pricing?.prompt,
+        model?.pricing?.input?.price_per_million_t,
+        model?.pricing?.prompt?.price_per_million_t,
+        model?.pricing?.input_cost_per_million_tokens,
+        model?.pricing?.prompt_cost_per_million_tokens,
+        model?.model_spec?.pricing?.input,
+        model?.model_spec?.pricing?.prompt,
+        model?.model_spec?.pricing?.input?.price_per_million_t,
+        model?.model_spec?.pricing?.prompt?.price_per_million_t,
+        model?.model_spec?.pricing?.input_cost_per_million_tokens,
+        model?.model_spec?.pricing?.prompt_cost_per_million_tokens,
+        model?.input_price,
+        model?.prompt_price,
+        model?.prompt_cost,
+        model?.input_cost,
+    );
+}
+
+function getNavyOutputPriceFromModel(model) {
+    return firstParsedNumber(
+        model?.pricing?.output,
+        model?.pricing?.completion,
+        model?.pricing?.output?.price_per_million_t,
+        model?.pricing?.completion?.price_per_million_t,
+        model?.pricing?.output_cost_per_million_tokens,
+        model?.pricing?.completion_cost_per_million_tokens,
+        model?.model_spec?.pricing?.output,
+        model?.model_spec?.pricing?.completion,
+        model?.model_spec?.pricing?.output?.price_per_million_t,
+        model?.model_spec?.pricing?.completion?.price_per_million_t,
+        model?.model_spec?.pricing?.output_cost_per_million_tokens,
+        model?.model_spec?.pricing?.completion_cost_per_million_tokens,
+        model?.output_price,
+        model?.completion_price,
+        model?.completion_cost,
+        model?.output_cost,
+    );
+}
+
+function getNavyLookupVariants(id) {
+    const raw = String(id || '').trim().toLowerCase();
+    if (!raw) {
+        return [];
+    }
+
+    const variants = new Set([raw]);
+
+    if (raw.includes('/')) {
+        variants.add(raw.slice(raw.indexOf('/') + 1));
+    }
+
+    if (raw.includes(':')) {
+        variants.add(raw.slice(0, raw.indexOf(':')));
+    }
+
+    variants.add(raw.replace(/[-_.]/g, ''));
+
+    // Strip trailing date-like suffix (e.g. devstral-medium-2507 → devstral-medium)
+    variants.add(raw.replace(/-\d{4}$/, ''));
+    // Strip trailing known qualifier suffixes
+    variants.add(raw.replace(/-(latest|preview|venice|beta|mini|turbo|free|pro|flash)$/, ''));
+    // Strip dot-separated trailing segment (e.g. deepseek-v5.2-venice → deepseek-v5)
+    variants.add(raw.replace(/\.[^.]+$/, ''));
+
+    return [...variants].filter(Boolean);
+}
+
+function mergeNavySpec(target, source) {
+    if (!source) {
+        return target;
+    }
+
+    const merged = {
+        ...target,
+        ...source,
+    };
+
+    if (target?.pricing || source?.pricing) {
+        merged.pricing = {
+            ...(source?.pricing || {}),
+        };
+
+        for (const [key, value] of Object.entries(target?.pricing || {})) {
+            if (value !== undefined && value !== null) {
+                merged.pricing[key] = value;
+            }
+        }
+    }
+
+    if (target?.top_provider || source?.top_provider) {
+        merged.top_provider = {
+            ...(source?.top_provider || {}),
+            ...(target?.top_provider || {}),
+        };
+    }
+
+    if (target?.architecture || source?.architecture) {
+        merged.architecture = {
+            ...(source?.architecture || {}),
+            ...(target?.architecture || {}),
+        };
+    }
+
+    return merged;
+}
+
+function setNavyEnrichmentSpec(map, modelId, spec) {
+    const variants = getNavyLookupVariants(modelId);
+    for (const key of variants) {
+        const existing = map.get(key) || {};
+        map.set(key, mergeNavySpec(existing, spec));
+    }
+}
+
+function getNavyEnrichmentSpec(map, model) {
+    const variants = getNavyLookupVariants(model?.id || model?.model || model?.name);
+    let spec = {};
+
+    for (const key of variants) {
+        const next = map.get(key);
+        if (next) {
+            spec = mergeNavySpec(spec, next);
+        }
+    }
+
+    return Object.keys(spec).length ? spec : null;
+}
+
+async function fetchNavyEnrichmentMap() {
+    const now = Date.now();
+    if (now - navyEnrichmentCache.fetchedAt < NAVY_ENRICHMENT_TTL_MS && navyEnrichmentCache.map.size > 0) {
+        return navyEnrichmentCache.map;
+    }
+
+    const newMap = new Map();
+
+    try {
+        const [openRouterRes, poeRes, veniceRes] = await Promise.all([
+            fetch(`${API_OPENROUTER}/models`, { signal: AbortSignal.timeout(8000) }).catch(() => null),
+            fetch(API_POE_MODELS, { signal: AbortSignal.timeout(8000) }).catch(() => null),
+            fetch('https://api.venice.ai/api/v1/models', { signal: AbortSignal.timeout(8000) }).catch(() => null),
+        ]);
+
+        if (openRouterRes?.ok) {
+            /** @type {any} */
+            const openRouterData = await openRouterRes.json();
+            for (const model of Array.isArray(openRouterData?.data) ? openRouterData.data : []) {
+                if (!model?.id) {
+                    continue;
+                }
+
+                const spec = {
+                    context_length: parseMaybeNumber(model.context_length),
+                    pricing: {
+                        prompt: parseMaybeNumber(model?.pricing?.prompt),
+                        completion: parseMaybeNumber(model?.pricing?.completion),
+                    },
+                    top_provider: {
+                        max_completion_tokens: parseMaybeNumber(model?.top_provider?.max_completion_tokens),
+                    },
+                    architecture: model?.architecture,
+                    supported_parameters: model?.supported_parameters,
+                    description: model?.description,
+                };
+
+                setNavyEnrichmentSpec(newMap, model.id, spec);
+            }
+        }
+
+        if (poeRes?.ok) {
+            /** @type {any} */
+            const poeData = await poeRes.json();
+            for (const model of Array.isArray(poeData?.data) ? poeData.data : []) {
+                if (!model?.id) {
+                    continue;
+                }
+
+                const spec = {
+                    context_length: parseMaybeNumber(model?.context_window?.context_length) ?? parseMaybeNumber(model?.context_length),
+                    pricing: {
+                        prompt: parseMaybeNumber(model?.pricing?.prompt),
+                        completion: parseMaybeNumber(model?.pricing?.completion),
+                    },
+                    top_provider: {
+                        max_completion_tokens: parseMaybeNumber(model?.context_window?.max_output_tokens),
+                    },
+                    architecture: model?.architecture,
+                    supported_parameters: model?.supported_features,
+                    description: model?.description,
+                };
+
+                setNavyEnrichmentSpec(newMap, model.id, spec);
+            }
+        }
+
+        if (veniceRes?.ok) {
+            /** @type {any} */
+            const veniceData = await veniceRes.json();
+            const veniceModels = Array.isArray(veniceData?.data) ? veniceData.data : Array.isArray(veniceData) ? veniceData : [];
+            for (const model of veniceModels) {
+                if (!model?.id) {
+                    continue;
+                }
+
+                // Venice models nest specs under model_spec; fall back to top-level fields
+                const spec = model?.model_spec ?? model;
+                const inputPrice = getNavyInputPriceFromModel(spec) ?? getNavyInputPriceFromModel(model);
+                const outputPrice = getNavyOutputPriceFromModel(spec) ?? getNavyOutputPriceFromModel(model);
+                const contextLength = getNavyContextLengthFromModel(spec) ?? getNavyContextLengthFromModel(model);
+
+                const enrichment = {
+                    context_length: contextLength,
+                    pricing: {
+                        prompt: inputPrice,
+                        completion: outputPrice,
+                    },
+                };
+
+                setNavyEnrichmentSpec(newMap, model.id, enrichment);
+                // Also index by display_name if present (Venice sometimes uses a friendlier slug)
+                if (model.display_name && model.display_name !== model.id) {
+                    setNavyEnrichmentSpec(newMap, model.display_name, enrichment);
+                }
+            }
+        }
+    } catch (error) {
+        console.warn('[Navy status] Failed to build enrichment map:', error?.message || error);
+    }
+
+    if (newMap.size > 0) {
+        navyEnrichmentCache.map = newMap;
+        navyEnrichmentCache.fetchedAt = now;
+    }
+
+    return navyEnrichmentCache.map;
+}
 
 /**
  * Checks if an OpenRouter model supports prompt cache writing.
@@ -1434,6 +1749,115 @@ async function sendElectronHubRequest(request, response) {
 }
 
 /**
+ * Sends a request to Navy.
+ * @param {express.Request} request Express request
+ * @param {express.Response} response Express response
+ */
+async function sendNavyRequest(request, response) {
+    const apiUrl = API_NAVY;
+    const apiKey = readSecret(request.user.directories, SECRET_KEYS.NAVY);
+
+    if (!apiKey) {
+        console.warn('Navy key is missing.');
+        return response.status(400).send({ error: true });
+    }
+
+    const controller = new AbortController();
+    request.socket.removeAllListeners('close');
+    request.socket.on('close', function () {
+        controller.abort();
+    });
+
+    try {
+        let bodyParams = {};
+
+        if (request.body.enable_web_search) {
+            bodyParams['web_search'] = true;
+        }
+
+        if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
+            bodyParams['tools'] = request.body.tools;
+            bodyParams['tool_choice'] = request.body.tool_choice;
+        }
+
+        if (request.body.json_schema) {
+            bodyParams['response_format'] = {
+                type: 'json_schema',
+                json_schema: {
+                    name: request.body.json_schema.name,
+                    description: request.body.json_schema.description,
+                    schema: request.body.json_schema.value,
+                    strict: request.body.json_schema.strict ?? true,
+                },
+            };
+        }
+
+        const isClaude = /^claude-/.test(request.body.model);
+
+        if (Array.isArray(request.body.messages) && isClaude) {
+            if (enableSystemPromptCache) {
+                cachingSystemPromptForOpenRouter(request.body.messages, cacheTTL);
+            }
+
+            if (cachingAtDepth !== -1) {
+                cachingAtDepthForOpenRouterClaude(request.body.messages, cachingAtDepth, cacheTTL);
+            }
+        }
+
+        const requestBody = {
+            'messages': request.body.messages,
+            'model': request.body.model,
+            'temperature': request.body.temperature,
+            'max_tokens': request.body.max_tokens,
+            'stream': request.body.stream,
+            'presence_penalty': request.body.presence_penalty,
+            'frequency_penalty': request.body.frequency_penalty,
+            'top_p': request.body.top_p,
+            'top_k': request.body.top_k,
+            'logit_bias': request.body.logit_bias,
+            'seed': request.body.seed,
+            ...bodyParams,
+        };
+
+        const config = {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey,
+            },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+        };
+
+        console.debug('Navy request:', requestBody);
+
+        const generateResponse = await fetch(apiUrl + '/chat/completions', config);
+
+        if (request.body.stream) {
+            forwardFetchResponse(generateResponse, response);
+        } else {
+            if (!generateResponse.ok) {
+                const errorText = await generateResponse.text();
+                console.warn('Navy returned error: ', errorText);
+                const errorJson = tryParse(errorText) ?? { error: true };
+                return response.status(500).send(errorJson);
+            }
+            const generateResponseJson = await generateResponse.json();
+            console.debug('Navy response:', generateResponseJson);
+            return response.send(generateResponseJson);
+        }
+    }
+    catch (error) {
+        console.error('Error communicating with Navy: ', error);
+        if (!response.headersSent) {
+            response.send({ error: true });
+        } else {
+            response.end();
+        }
+    }
+}
+
+/**
  * Sends a request to Chutes.
  * @param {express.Request} request Express request
  * @param {express.Response} response Express response
@@ -1670,6 +2094,10 @@ router.post('/status', async function (request, statusResponse) {
             apiUrl = API_ELECTRONHUB;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.ELECTRONHUB);
             headers = {};
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NAVY) {
+            apiUrl = API_NAVY;
+            apiKey = readSecret(request.user.directories, SECRET_KEYS.NAVY);
+            headers = {};
         } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NANOGPT) {
             apiUrl = API_NANOGPT;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
@@ -1826,6 +2254,10 @@ router.post('/status', async function (request, statusResponse) {
             apiUrl = API_SILICONFLOW;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.SILICONFLOW);
             headers = {};
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.ROUTEWAY) {
+            apiUrl = API_ROUTEWAY;
+            apiKey = readSecret(request.user.directories, SECRET_KEYS.ROUTEWAY);
+            headers = {};
         } else {
             console.warn('This chat completion source is not supported yet.');
             return statusResponse.status(400).send({ error: true });
@@ -1872,6 +2304,83 @@ router.post('/status', async function (request, statusResponse) {
                         }
                         return model;
                     });
+            }
+
+            if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NAVY) {
+                const navyModels = Array.isArray(data?.data)
+                    ? data.data
+                    : Array.isArray(data?.models)
+                        ? data.models
+                        : Array.isArray(data)
+                            ? data
+                            : [];
+                const enrichmentMap = await fetchNavyEnrichmentMap();
+                let enrichedCount = 0;
+
+                // Lightweight diagnostics to track Navy model payload shape changes.
+                const firstModel = navyModels[0];
+                const firstModelKeys = firstModel && typeof firstModel === 'object' ? Object.keys(firstModel).slice(0, 25) : [];
+                console.info('[Navy status] /models response shape:', {
+                    hasDataArray: Array.isArray(data?.data),
+                    hasModelsArray: Array.isArray(data?.models),
+                    isTopLevelArray: Array.isArray(data),
+                    modelCount: navyModels.length,
+                    sampleKeys: firstModelKeys,
+                });
+
+                data.data = navyModels
+                    .map(model => {
+                        const enrichment = getNavyEnrichmentSpec(enrichmentMap, model);
+                        if (enrichment) {
+                            enrichedCount++;
+                        }
+                        const mergedModel = mergeNavySpec(model, enrichment || {});
+                        const id = mergedModel?.id || mergedModel?.model || mergedModel?.model_id || mergedModel?.name;
+                        const context = getNavyContextLengthFromModel(mergedModel) ?? 'Unknown';
+                        const input = getNavyInputPriceFromModel(mergedModel);
+                        const output = getNavyOutputPriceFromModel(mergedModel);
+                        const pricing = Number.isFinite(input) && Number.isFinite(output)
+                            ? { input, output }
+                            : undefined;
+
+                        return {
+                            ...mergedModel,
+                            id,
+                            name: mergedModel?.name || mergedModel?.display_name || id,
+                            tokens: context,
+                            pricing,
+                        };
+                    })
+                    .filter(model => !model?.endpoint || model.endpoint === '/v1/chat/completions')
+                    .filter(model => Boolean(model?.id));
+
+                console.info('[Navy status] enrichment:', {
+                    enrichmentMapSize: enrichmentMap.size,
+                    enrichedModels: enrichedCount,
+                    totalModels: navyModels.length,
+                });
+            }
+
+            if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.ROUTEWAY) {
+                const routewayModels = Array.isArray(data?.data)
+                    ? data.data
+                    : Array.isArray(data?.models)
+                        ? data.models
+                        : Array.isArray(data)
+                            ? data
+                            : [];
+
+                data.data = routewayModels
+                    .filter(model => Array.isArray(model?.endpoints) && model.endpoints.includes('/v1/chat/completions'))
+                    .filter(model => model?.available !== false)
+                    .map(model => ({
+                        ...model,
+                        pricing: {
+                            input: model?.pricing?.input?.price_per_million_t,
+                            output: model?.pricing?.output?.price_per_million_t,
+                        },
+                    }))
+                    .filter(model => Boolean(model?.id));
             }
 
             statusResponse.send(data);
@@ -2011,6 +2520,9 @@ router.post('/generate', async function (request, response) {
     try {
         if (!request.body) return response.status(400).send({ error: true });
 
+        const { activatedWorlds } = await applyHiddenLoreContextToRequest(request);
+        setHiddenLoreActivationHeader(response, activatedWorlds);
+
         const postProcessingType = request.body.custom_prompt_post_processing;
         if (Array.isArray(request.body.messages) && postProcessingType) {
             console.info('Applying custom prompt post-processing of type', postProcessingType);
@@ -2036,6 +2548,7 @@ router.post('/generate', async function (request, response) {
             case CHAT_COMPLETION_SOURCES.XAI: return await sendXaiRequest(request, response);
             case CHAT_COMPLETION_SOURCES.CHUTES: return await sendChutesRequest(request, response);
             case CHAT_COMPLETION_SOURCES.ELECTRONHUB: return await sendElectronHubRequest(request, response);
+            case CHAT_COMPLETION_SOURCES.NAVY: return await sendNavyRequest(request, response);
             case CHAT_COMPLETION_SOURCES.AZURE_OPENAI: return await sendAzureOpenAIRequest(request, response);
         }
 
@@ -2208,6 +2721,11 @@ router.post('/generate', async function (request, response) {
                     },
                 };
             }
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NAVY) {
+            apiUrl = API_NAVY;
+            apiKey = readSecret(request.user.directories, SECRET_KEYS.NAVY);
+            headers = {};
+            bodyParams = {};
         } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.NANOGPT) {
             apiUrl = API_NANOGPT;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
@@ -2283,6 +2801,17 @@ router.post('/generate', async function (request, response) {
             apiKey = readSecret(request.user.directories, SECRET_KEYS.SILICONFLOW);
             headers = {};
             bodyParams = {};
+            if (request.body.json_schema) {
+                setJsonObjectFormat(bodyParams, request.body.messages, request.body.json_schema);
+            }
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.ROUTEWAY) {
+            apiUrl = API_ROUTEWAY;
+            apiKey = readSecret(request.user.directories, SECRET_KEYS.ROUTEWAY);
+            headers = {};
+            bodyParams = {};
+            if (request.body.reasoning_effort) {
+                bodyParams['reasoning_effort'] = request.body.reasoning_effort;
+            }
             if (request.body.json_schema) {
                 setJsonObjectFormat(bodyParams, request.body.messages, request.body.json_schema);
             }
@@ -2471,6 +3000,29 @@ multimodalModels.post('/aimlapi', async (_req, res) => {
 multimodalModels.post('/nanogpt', async (_req, res) => {
     try {
         const response = await fetch('https://nano-gpt.com/api/v1/models?detailed=true');
+
+        if (!response.ok) {
+            return res.json([]);
+        }
+
+        /** @type {any} */
+        const data = await response.json();
+
+        if (!Array.isArray(data?.data)) {
+            return res.json([]);
+        }
+
+        const multimodalModels = data.data.filter(m => m?.capabilities?.vision).map(m => m.id);
+        return res.json(multimodalModels);
+    } catch (error) {
+        console.error(error);
+        return res.sendStatus(500);
+    }
+});
+
+multimodalModels.post('/navy', async (_req, res) => {
+    try {
+        const response = await fetch(`${API_NAVY}/models`);
 
         if (!response.ok) {
             return res.json([]);

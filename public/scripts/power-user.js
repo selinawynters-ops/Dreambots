@@ -159,6 +159,12 @@ export const power_user = {
     sort_order: 'asc',
     sort_rule: null,
     font_scale: 1,
+    font_family: '',
+    font_family_user: '',
+    font_family_character: '',
+    font_style_size_adjust_px: 0,
+    font_style_user_size_adjust_px: 0,
+    font_style_character_size_adjust_px: 0,
     blur_strength: 10,
     shadow_width: 2,
 
@@ -1185,6 +1191,280 @@ function applyFontScale(type) {
     $('#font_scale').val(power_user.font_scale);
 }
 
+/** Available fonts for the font picker populated dynamically from the server. */
+let AVAILABLE_FONTS = [{ name: 'Noto Sans (Default)', value: '' }];
+let AVAILABLE_FONT_VALUES = new Set(['']);
+
+const FONT_PICKER_CONFIGS = [
+    {
+        settingKey: 'font_family',
+        sizeAdjustKey: 'font_style_size_adjust_px',
+        cssVar: '--mainFontFamily',
+        pickerId: 'font_family_picker',
+        selectedId: 'font_family_selected',
+        dropdownId: 'font_family_dropdown',
+        searchId: 'font_family_search',
+        listId: 'font_family_list',
+        previewId: 'font_family_preview',
+        labelId: 'font_family_label',
+    },
+    {
+        settingKey: 'font_family_user',
+        cssVar: '--userChatFontFamily',
+        pickerId: 'font_family_user_picker',
+        selectedId: 'font_family_user_selected',
+        dropdownId: 'font_family_user_dropdown',
+        searchId: 'font_family_user_search',
+        listId: 'font_family_user_list',
+        previewId: 'font_family_user_preview',
+        labelId: 'font_family_user_label',
+    },
+    {
+        settingKey: 'font_family_character',
+        cssVar: '--characterChatFontFamily',
+        pickerId: 'font_family_character_picker',
+        selectedId: 'font_family_character_selected',
+        dropdownId: 'font_family_character_dropdown',
+        searchId: 'font_family_character_search',
+        listId: 'font_family_character_list',
+        previewId: 'font_family_character_preview',
+        labelId: 'font_family_character_label',
+    },
+];
+
+const FONT_SIZE_CONFIGS = [
+    {
+        settingKey: 'font_style_size_adjust_px',
+        cssVar: '--mainFontSizeAdjust',
+        inputId: 'font_style_size_adjust_px',
+        counterId: 'font_style_size_adjust_px_counter',
+        previewId: 'font_family_preview',
+    },
+    {
+        settingKey: 'font_style_user_size_adjust_px',
+        cssVar: '--userChatFontSizeAdjust',
+        inputId: 'font_style_user_size_adjust_px',
+        counterId: 'font_style_user_size_adjust_px_counter',
+        previewId: 'font_family_user_preview',
+    },
+    {
+        settingKey: 'font_style_character_size_adjust_px',
+        cssVar: '--characterChatFontSizeAdjust',
+        inputId: 'font_style_character_size_adjust_px',
+        counterId: 'font_style_character_size_adjust_px_counter',
+        previewId: 'font_family_character_preview',
+    },
+];
+
+/**
+ * Injects @font-face CSS rules for a list of fonts returned by the server.
+ * @param {Array<{name:string, files:Array<{url:string, format:string}>}>} fonts
+ */
+function injectFontFaces(fonts) {
+    let styleEl = document.getElementById('dynamic-font-faces');
+    if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'dynamic-font-faces';
+        document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = fonts.map(font => {
+        const src = font.files.map(f => `url('${f.url}') format('${f.format}')`).join(', ');
+        return `@font-face { font-family: "${font.value}"; src: ${src}; }`;
+    }).join('\n');
+}
+
+/**
+ * Reads @font-face font-family names from the already-loaded fonts.css stylesheet.
+ * @returns {string[]}
+ */
+function getFontFacesFromCSS() {
+    const names = new Set();
+    for (const sheet of document.styleSheets) {
+        if (!sheet.href || !sheet.href.includes('/css/fonts.css')) continue;
+        try {
+            for (const rule of sheet.cssRules || []) {
+                if (rule.type === CSSRule.FONT_FACE_RULE) {
+                    const family = rule.style.getPropertyValue('font-family').replace(/['"]/g, '').trim();
+                    if (family) names.add(family);
+                }
+            }
+        } catch {
+            // Cross-origin or unreadable stylesheet
+        }
+    }
+    return [...names];
+}
+
+/**
+ * Fetches available fonts by scanning public/fonts/ on the server.
+ * Falls back to reading @font-face names from fonts.css if the API is unavailable.
+ * @returns {Promise<void>}
+ */
+async function loadAvailableFonts() {
+    let fontNames = [];
+
+    try {
+        const response = await fetch('/api/public/fonts');
+        if (response.ok) {
+            const serverFonts = await response.json();
+            injectFontFaces(serverFonts);
+            AVAILABLE_FONTS = [
+                { name: 'Noto Sans (Default)', value: '' },
+                ...serverFonts.map(font => ({
+                    name: String(font.name || font.value || '').trim(),
+                    value: String(font.value || font.name || '').trim(),
+                })).filter(font => font.name && font.value),
+            ];
+            AVAILABLE_FONT_VALUES = new Set(AVAILABLE_FONTS.map(font => font.value));
+            return;
+        }
+    } catch {
+        fontNames = getFontFacesFromCSS();
+    }
+
+    const uniqueFontNames = [...new Set(fontNames.map(name => String(name || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    AVAILABLE_FONTS = [
+        { name: 'Noto Sans (Default)', value: '' },
+        ...uniqueFontNames.map(name => ({ name, value: name })),
+    ];
+    AVAILABLE_FONT_VALUES = new Set(AVAILABLE_FONTS.map(font => font.value));
+}
+
+function getFontCssValue(fontValue) {
+    return fontValue ? `"${fontValue}", sans-serif` : '"Noto Sans", sans-serif';
+}
+
+function getFontDisplayName(fontValue) {
+    const font = AVAILABLE_FONTS.find(f => f.value === fontValue);
+    return font ? font.name : (fontValue || 'Noto Sans (Default)');
+}
+
+function normalizeFontValue(fontValue) {
+    const normalized = String(fontValue || '').trim();
+    return AVAILABLE_FONT_VALUES.has(normalized) ? normalized : '';
+}
+
+function getFontPreviewSize(value) {
+    return `${16 + Number(value || 0)}px`;
+}
+
+function applyFontFamilySetting(config) {
+    const fontValue = normalizeFontValue(power_user[config.settingKey]);
+    power_user[config.settingKey] = fontValue;
+    const cssValue = getFontCssValue(fontValue);
+    document.documentElement.style.setProperty(config.cssVar, cssValue);
+
+    const previewEl = document.getElementById(config.previewId);
+    if (previewEl) {
+        previewEl.style.fontFamily = cssValue;
+        previewEl.style.fontSize = getFontPreviewSize(power_user[config.sizeAdjustKey]);
+    }
+
+    const selectedEl = document.getElementById(config.selectedId);
+    if (selectedEl) {
+        selectedEl.textContent = getFontDisplayName(fontValue);
+    }
+
+    const labelEl = document.getElementById(config.labelId);
+    if (labelEl) {
+        labelEl.textContent = getFontDisplayName(fontValue);
+        labelEl.style.fontFamily = fontValue ? `"${fontValue}", sans-serif` : '';
+    }
+}
+
+function applyFontSizeAdjustSetting(config) {
+    const value = Number(power_user[config.settingKey] || 0);
+    power_user[config.settingKey] = value;
+    document.documentElement.style.setProperty(config.cssVar, `${value}px`);
+    $(`#${config.inputId}`).val(value);
+    $(`#${config.counterId}`).val(value);
+
+    const previewEl = document.getElementById(config.previewId);
+    if (previewEl) {
+        previewEl.style.fontSize = getFontPreviewSize(value);
+    }
+
+}
+
+function applyFontFamily() {
+    FONT_PICKER_CONFIGS.forEach(applyFontFamilySetting);
+}
+
+function applyFontSizeAdjustments() {
+    FONT_SIZE_CONFIGS.forEach(applyFontSizeAdjustSetting);
+}
+
+function initFontPicker(config) {
+    const listEl = document.getElementById(config.listId);
+    const selectedEl = document.getElementById(config.selectedId);
+    const dropdownEl = document.getElementById(config.dropdownId);
+    const searchEl = document.getElementById(config.searchId);
+    const pickerEl = document.getElementById(config.pickerId);
+
+    if (!listEl || !selectedEl || !dropdownEl || !searchEl || !pickerEl) return;
+    if (pickerEl.dataset.fontPickerInitialized === 'true') {
+        applyFontFamilySetting(config);
+        return;
+    }
+
+    function renderList(filter) {
+        filter = (filter || '').toLowerCase();
+        listEl.innerHTML = '';
+        AVAILABLE_FONTS
+            .filter(font => font.name.toLowerCase().includes(filter))
+            .forEach(font => {
+                const item = document.createElement('div');
+                const isSelected = font.value === (power_user[config.settingKey] || '');
+                item.className = 'font-picker-item' + (isSelected ? ' is-selected' : '');
+                item.style.fontFamily = font.value ? `"${font.value}",sans-serif` : '"Noto Sans",sans-serif';
+                item.textContent = font.name;
+
+                item.addEventListener('mouseenter', () => {
+                    const previewEl = document.getElementById(config.previewId);
+                    if (previewEl) {
+                        previewEl.style.fontFamily = getFontCssValue(font.value);
+                    }
+                });
+                item.addEventListener('mouseleave', () => applyFontFamilySetting(config));
+                item.addEventListener('click', () => {
+                    power_user[config.settingKey] = font.value;
+                    applyFontFamilySetting(config);
+                    renderList(searchEl.value);
+                    dropdownEl.style.display = 'none';
+                    saveSettingsDebounced();
+                });
+                listEl.appendChild(item);
+            });
+    }
+
+    renderList(searchEl.value);
+    applyFontFamilySetting(config);
+    pickerEl.dataset.fontPickerInitialized = 'true';
+
+    selectedEl.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const isOpen = dropdownEl.style.display !== 'none';
+        dropdownEl.style.display = isOpen ? 'none' : 'block';
+        if (!isOpen) {
+            searchEl.focus();
+        }
+    });
+
+    searchEl.addEventListener('input', () => renderList(searchEl.value));
+
+    document.addEventListener('click', (event) => {
+        if (!pickerEl.contains(event.target)) {
+            dropdownEl.style.display = 'none';
+        }
+    });
+}
+
+async function initFontPickers() {
+    await loadAvailableFonts();
+    FONT_PICKER_CONFIGS.forEach(initFontPicker);
+    applyFontFamily();
+    applyFontSizeAdjustments();
+}
 /**
  * Checks if the chat needs to be reloaded to apply media display settings.
  * @returns {boolean} True if the chat needs reload to apply media display settings
@@ -1265,6 +1545,42 @@ function applyTheme(name) {
             key: 'font_scale',
             action: () => {
                 applyFontScale('forced');
+            },
+        },
+        {
+            key: 'font_family',
+            action: () => {
+                applyFontFamily();
+            },
+        },
+        {
+            key: 'font_family_user',
+            action: () => {
+                applyFontFamily();
+            },
+        },
+        {
+            key: 'font_family_character',
+            action: () => {
+                applyFontFamily();
+            },
+        },
+        {
+            key: 'font_style_size_adjust_px',
+            action: () => {
+                applyFontSizeAdjustments();
+            },
+        },
+        {
+            key: 'font_style_user_size_adjust_px',
+            action: () => {
+                applyFontSizeAdjustments();
+            },
+        },
+        {
+            key: 'font_style_character_size_adjust_px',
+            action: () => {
+                applyFontSizeAdjustments();
             },
         },
         {
@@ -1476,6 +1792,7 @@ async function showDebugMenu() {
 export function applyPowerUserSettings() {
     switchUiMode();
     applyFontScale('forced');
+    applyFontFamily();
     applyThemeColor();
     applyChatWidth('forced');
     applyAvatarStyle();
@@ -1755,6 +2072,14 @@ export async function loadPowerUserSettings(settings, data) {
 
     $('#font_scale').val(power_user.font_scale);
     $('#font_scale_counter').val(power_user.font_scale);
+    $('#font_style_size_adjust_px').val(power_user.font_style_size_adjust_px);
+    $('#font_style_size_adjust_px_counter').val(power_user.font_style_size_adjust_px);
+    $('#font_style_user_size_adjust_px').val(power_user.font_style_user_size_adjust_px);
+    $('#font_style_user_size_adjust_px_counter').val(power_user.font_style_user_size_adjust_px);
+    $('#font_style_character_size_adjust_px').val(power_user.font_style_character_size_adjust_px);
+    $('#font_style_character_size_adjust_px_counter').val(power_user.font_style_character_size_adjust_px);
+
+    await initFontPickers();
 
     $('#blur_strength').val(power_user.blur_strength);
     $('#blur_strength_counter').val(power_user.blur_strength);
@@ -3575,6 +3900,14 @@ jQuery(() => {
         $('#font_scale_counter').val(power_user.font_scale);
         applyFontScale(applyMode);
         saveSettingsDebounced();
+    });
+
+    FONT_SIZE_CONFIGS.forEach(config => {
+        $(`input[name="${config.settingKey}"]`).on('input', function () {
+            power_user[config.settingKey] = Number($(this).val());
+            applyFontSizeAdjustSetting(config);
+            saveSettingsDebounced();
+        });
     });
 
     $('input[name="blur_strength"]').on('input', async function (e) {

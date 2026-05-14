@@ -1,86 +1,85 @@
-/*
- * ============================================================================
- * DREAMTAVERN CUSTOMIZATION - Chat Chunking System
- * ============================================================================
- * 
- * NEW FILE - NOT IN DEFAULT SILLYTAVERN
- * 
- * PURPOSE:
- * Handles saving and loading of large chat conversations (>750 messages) by
- * splitting them into manageable chunks to prevent browser memory issues and
- * file system limitations.
- * 
- * FEATURES:
- * 1. AUTOMATIC CHUNKING:
- *    - Detects when chat exceeds 750 messages
- *    - Splits chat into chunks for efficient storage
- *    - Transparent to user - works automatically
- * 
- * 2. CHUNK MANAGEMENT:
- *    - Saves chunks separately to avoid single-file size limits
- *    - Reconstructs full chat when loading
- *    - Maintains message order and integrity
- * 
- * 3. INTEGRATION:
- *    - Triggered from index.html override of saveChat() function
- *    - Falls back to standard save for smaller chats
- *    - window.chatChunker namespace for global access
- * 
- * RELATED FILES:
- *    - public/index.html (triggers chunking for large chats)
- *    - Original save/load functions remain unchanged for small chats
- * 
- * ============================================================================
- */
+const DEFAULT_CHUNK_SIZE = 150;
+const DEFAULT_CHUNKING_THRESHOLD = 750;
 
-// Simple chunking for large chats
-class ChatChunker {
-    constructor() {
-        this.chunkSize = 150; // 150 messages per chunk
-    }
-
-    async saveLargeChat(chatData) {
-        console.log('Using chunking for large chat');
-
-        const threadId = 'chat_' + Date.now();
-        const messages = chatData.messages;
-        const totalChunks = Math.ceil(messages.length / this.chunkSize);
-
-        console.log(`Splitting ${messages.length} messages into ${totalChunks} chunks`);
-
-        // Send each chunk
-        for (let chunkNum = 0; chunkNum < totalChunks; chunkNum++) {
-            const start = chunkNum * this.chunkSize;
-            const end = start + this.chunkSize;
-            const chunk = messages.slice(start, end);
-
-            console.log(`Sending chunk ${chunkNum + 1}/${totalChunks} (${chunk.length} messages)`);
-
-            await fetch('/api/save-chunk', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    threadId,
-                    chunkIndex: chunkNum,
-                    totalChunks,
-                    messages: chunk
-                })
-            });
-        }
-
-        // Finalize
-        console.log('All chunks sent, finalizing...');
-        const response = await fetch('/api/finalize-thread', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ threadId })
-        });
-
-        const result = await response.json();
-        console.log('Chunking complete:', result);
-        return result;
-    }
+function makeThreadId() {
+    return `chat_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// Make it available
-window.chatChunker = new ChatChunker();
+async function postJson(url, payload, headers = {}) {
+    const response = await fetch(url, {
+        method: 'POST',
+        cache: 'no-cache',
+        headers,
+        body: JSON.stringify(payload),
+    });
+
+    let responseBody = null;
+    try {
+        responseBody = await response.json();
+    } catch {
+        responseBody = null;
+    }
+
+    if (response.ok) {
+        return responseBody || { ok: true };
+    }
+
+    const err = new Error(responseBody?.error || `Request failed (${response.status})`);
+    if (responseBody?.error === 'integrity') {
+        err.code = 'integrity';
+    }
+    err.status = response.status;
+    err.payload = responseBody;
+    throw err;
+}
+
+function shouldUseChunkedChatSave(messageCount, threshold = DEFAULT_CHUNKING_THRESHOLD) {
+    return Number(messageCount || 0) > Number(threshold || DEFAULT_CHUNKING_THRESHOLD);
+}
+
+async function saveChatInChunks({
+    chatData,
+    avatarUrl,
+    fileName,
+    cardName,
+    force = false,
+    headers,
+    chunkSize = DEFAULT_CHUNK_SIZE,
+}) {
+    const messages = Array.isArray(chatData) ? chatData : [];
+    if (messages.length === 0) {
+        throw new Error('Chunked save requires a non-empty chat array.');
+    }
+
+    const effectiveChunkSize = Math.max(1, Number(chunkSize || DEFAULT_CHUNK_SIZE));
+    const threadId = makeThreadId();
+    const totalChunks = Math.ceil(messages.length / effectiveChunkSize);
+
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * effectiveChunkSize;
+        const end = start + effectiveChunkSize;
+        const chatChunk = messages.slice(start, end);
+
+        await postJson('/api/chats/save-chunk', {
+            thread_id: threadId,
+            chunk_index: chunkIndex,
+            total_chunks: totalChunks,
+            chat_chunk: chatChunk,
+            avatar_url: avatarUrl,
+            file_name: fileName,
+            ch_name: cardName,
+            force: !!force,
+        }, headers);
+    }
+
+    return await postJson('/api/chats/finalize-chunked-save', {
+        thread_id: threadId,
+    }, headers);
+}
+
+window.chatChunking = {
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNKING_THRESHOLD,
+    shouldUseChunkedChatSave,
+    saveChatInChunks,
+};

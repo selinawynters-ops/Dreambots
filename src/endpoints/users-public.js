@@ -6,6 +6,8 @@ import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
 import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt } from '../users.js';
+import { syncOnLogin } from './sync-manager.js';
+import { consumeBackupCode, verifyTotpCode } from '../totp.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
@@ -43,6 +45,7 @@ router.post('/list', async (_request, response) => {
                         created: user.created,
                         avatar: avatar,
                         password: !!user.password,
+                        twoFactorEnabled: !!user.twoFactorEnabled,
                     }),
                 );
             }));
@@ -84,6 +87,26 @@ router.post('/login', async (request, response) => {
             return response.status(403).json({ error: 'Incorrect credentials' });
         }
 
+        if (user.twoFactorEnabled) {
+            const mfaCode = String(request.body.mfaCode || '');
+            let verified = verifyTotpCode(user.twoFactorSecret, mfaCode);
+
+            if (!verified) {
+                const backupResult = consumeBackupCode(user.twoFactorBackupCodes, mfaCode);
+                verified = backupResult.matched;
+
+                if (backupResult.matched) {
+                    user.twoFactorBackupCodes = backupResult.hashes;
+                    await storage.setItem(toKey(user.handle), user);
+                }
+            }
+
+            if (!verified) {
+                console.warn('Login failed: Incorrect two-factor code for', user.handle);
+                return response.status(403).json({ error: 'Incorrect two-factor code' });
+            }
+        }
+
         if (!request.session) {
             console.error('Session not available');
             return response.sendStatus(500);
@@ -92,6 +115,8 @@ router.post('/login', async (request, response) => {
         await loginLimiter.delete(ip);
         request.session.handle = user.handle;
         console.info('Login successful:', user.handle, 'from', ip, 'at', new Date().toLocaleString());
+        // Fire-and-forget: sync global lorebooks/presets to this user (does not block login)
+        syncOnLogin(user.handle).catch(() => {});
         return response.json({ handle: user.handle });
     } catch (error) {
         if (error instanceof RateLimiterRes) {

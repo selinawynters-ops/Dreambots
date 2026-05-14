@@ -182,8 +182,8 @@
 }
 
 #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name {
-    white-space: nowrap;
-    overflow: hidden;
+    word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 #completion_prompt_manager #completion_prompt_manager_list .completion_prompt_manager_prompt_name .prompt-manager-inspect-action {

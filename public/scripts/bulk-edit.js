@@ -85,7 +85,18 @@ function enableBulkSelect() {
         }
         const checkbox = $('<input type=\'checkbox\' class=\'bulk_select_checkbox\'>');
         checkbox.on('change', () => {
-            // Do something when the checkbox is changed
+            const character = checkbox.closest('.character_select').get(0);
+            if (!(character instanceof HTMLElement)) {
+                return;
+            }
+
+            const characterId = Number(character.getAttribute('data-chid'));
+            const isSelected = characterGroupOverlay.selectedCharacters.includes(characterId);
+            const shouldSelect = !!checkbox.prop('checked');
+
+            if (shouldSelect !== isSelected) {
+                characterGroupOverlay.toggleSingleCharacter(character);
+            }
         });
         $(el).prepend(checkbox);
     });

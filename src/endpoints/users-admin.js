@@ -19,28 +19,44 @@ import { DEFAULT_USER } from '../constants.js';
 
 export const router = express.Router();
 
-router.post('/get', requireAdminMiddleware, async (_request, response) => {
+router.post('/get', requireAdminMiddleware, async (request, response) => {
     try {
+        const includeAvatars = request.body?.include_avatars !== false;
         /** @type {import('../users.js').User[]} */
         const users = await storage.values(x => x.key.startsWith(KEY_PREFIX));
 
-        /** @type {Promise<import('../users.js').UserViewModel>[]} */
-        const viewModelPromises = users
-            .map(user => new Promise(resolve => {
-                getUserAvatar(user.handle).then(avatar =>
-                    resolve({
-                        handle: user.handle,
-                        name: user.name,
-                        avatar: avatar,
-                        admin: user.admin,
-                        enabled: user.enabled,
-                        created: user.created,
-                        password: !!user.password,
-                    }),
-                );
-            }));
+        let viewModels;
+        if (includeAvatars) {
+            /** @type {Promise<import('../users.js').UserViewModel>[]} */
+            const viewModelPromises = users
+                .map(user => new Promise(resolve => {
+                    getUserAvatar(user.handle).then(avatar =>
+                        resolve({
+                            handle: user.handle,
+                            name: user.name,
+                            avatar: avatar,
+                            admin: user.admin,
+                            enabled: user.enabled,
+                            created: user.created,
+                            password: !!user.password,
+                            twoFactorEnabled: !!user.twoFactorEnabled,
+                        }),
+                    );
+                }));
 
-        const viewModels = await Promise.all(viewModelPromises);
+            viewModels = await Promise.all(viewModelPromises);
+        } else {
+            viewModels = users.map(user => ({
+                handle: user.handle,
+                name: user.name,
+                admin: user.admin,
+                enabled: user.enabled,
+                created: user.created,
+                password: !!user.password,
+                twoFactorEnabled: !!user.twoFactorEnabled,
+            }));
+        }
+
         viewModels.sort((x, y) => (x.created ?? 0) - (y.created ?? 0));
         return response.json(viewModels);
     } catch (error) {
@@ -194,7 +210,7 @@ router.post('/create', requireAdminMiddleware, async (request, response) => {
         console.info('Creating data directories for', newUser.handle);
         await ensurePublicDirectoriesExist();
         const directories = getUserDirectories(newUser.handle);
-        await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
+        await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS, CONTENT_TYPES.OPENAI_PRESET]);
         return response.json({ handle: newUser.handle });
     } catch (error) {
         console.error('User create failed:', error);

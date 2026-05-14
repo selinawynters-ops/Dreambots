@@ -1,0 +1,2349 @@
+/*
+ * ============================================================================
+ * DREAMTAVERN CUSTOMIZATION - World Info Push System
+ * ============================================================================
+ * 
+ * MODIFICATIONS FROM DEFAULT SILLYTAVERN:
+ * 
+ * 1. LOREBOOK PUSH/SHARE SYSTEM:
+ *    - Allows admin users to push (share) lorebooks to specific users or all users
+ *    - Tracks pushed lorebooks via push-manifest.json in each user's data folder
+ *    - Pushed lorebooks are automatically synced when the creator makes edits
+ *    - Recipients see pushed lorebooks as character-seeded (locked from editing)
+ * 
+ * 2. PUSH MANIFEST TRACKING:
+ *    - readPushManifest() - Read which lorebooks were pushed to whom
+ *    - writePushManifest() - Save push tracking data
+ *    - mergePushRecord() - Update manifest when new pushes occur
+ * 
+ * 3. NEW ENDPOINTS:
+ *    - POST /api/worldinfo/push - Push a lorebook to selected users
+ *    - GET /api/worldinfo/find-characters - Find characters using a specific lorebook
+ *    - Auto-embed pushed lorebooks in character cards for recipients
+ * 
+ * 4. AUTOMATIC SYNC:
+ *    - When creator edits a pushed lorebook, changes propagate to all recipients
+ *    - Recipients cannot edit pushed lorebooks (displayed as character-embedded)
+ * 
+ * RELATED FILES:
+ *    - src/endpoints/characters.js (character protection system)
+ *    - public/scripts/world-info.js (frontend push UI, admin checks)
+ *    - public/index.html (push/share buttons in world info panel)
+ * 
+ * ============================================================================
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+import express from 'express';
+import sanitize from 'sanitize-filename';
+import _ from 'lodash';
+import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { tryParse, getConfigValue } from '../util.js';
+import { getAllUserHandles, getUserDirectories, getAllUsers } from '../users.js';
+import { findCharactersByWorld } from './characters.js';
+import { read as readCharacterCard, write as writeCharacterCard } from '../character-card-parser.js';
+
+// ────────────────────────────────────────────────────────
+// Push manifest – tracks which files were pushed to whom
+// so edits can be synced back automatically.
+// Stored at  data/{handle}/push-manifest.json
+// ────────────────────────────────────────────────────────
+
+/**
+ * Returns the path to a user's push manifest file.
+ * @param {string} handle User handle
+ * @returns {string}
+ */
+function getPushManifestPath(handle) {
+    const dirs = getUserDirectories(handle);
+    // dirs.root is  data/{handle}  — go one level up from any sub-dir
+    return path.join(path.dirname(dirs.worlds), 'push-manifest.json');
+}
+
+/**
+ * Read the push manifest for a creator. Returns [] if missing/corrupt.
+ * @param {string} handle Creator handle
+ * @returns {Array<{source_lorebook:string, pushed_lorebook_name:string, character_files:string[], recipients:string[]}>}
+ */
+export function readPushManifest(handle) {
+    try {
+        const p = getPushManifestPath(handle);
+        if (!fs.existsSync(p)) return [];
+        return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Write the push manifest for a creator.
+ * @param {string} handle Creator handle
+ * @param {Array} records Manifest records
+ */
+function writePushManifest(handle, records) {
+    const p = getPushManifestPath(handle);
+    writeFileAtomicSync(p, JSON.stringify(records, null, 2));
+}
+
+/**
+ * Merge a new push into the manifest.
+ * If a record with the same pushed_lorebook_name already exists, its
+ * recipients list is extended (de-duped).  Otherwise a new entry is added.
+ * @param {string} creatorHandle
+ * @param {{source_lorebook:string, pushed_lorebook_name:string, character_files:string[], recipients:string[]}} record
+ */
+function recordPush(creatorHandle, record) {
+    if (!record.recipients || record.recipients.length === 0) return;
+    const manifest = readPushManifest(creatorHandle);
+    const existing = manifest.find(r => r.pushed_lorebook_name === record.pushed_lorebook_name);
+    if (existing) {
+        const set = new Set(existing.recipients);
+        for (const h of record.recipients) set.add(h);
+        existing.recipients = [...set];
+        // Also merge any new character files
+        const charSet = new Set(existing.character_files);
+        for (const f of record.character_files) charSet.add(f);
+        existing.character_files = [...charSet];
+    } else {
+        manifest.push(record);
+    }
+    writePushManifest(creatorHandle, manifest);
+}
+
+/**
+ * Rename a lorebook file to match the pushed naming convention.
+ * This is CRITICAL for the hidden lorebook system to work correctly.
+ * Naming convention:
+ *   ADMIN-{name}       = Admin direct push (hidden from users)
+ *   dd-{handle}-{name} = User submission (only creator sees)
+ *   No prefix          = Regular book (visible to all)
+ * @param {string} dirPath - Directory containing the lorebook file
+ * @param {string} currentName - Current filename (without .json)
+ * @param {string} newName - New pushed name (without .json)
+ * @returns {boolean} True if renamed (or no rename needed), false if failed
+ */
+function renameLoreBookIfNeeded(dirPath, currentName, newName) {
+    if (currentName === newName) {
+        console.log(`[Push] Lorebook name unchanged: "${currentName}"`);
+        return true;
+    }
+
+    const sourcePath = path.join(dirPath, sanitize(`${currentName}.json`));
+    if (!fs.existsSync(sourcePath)) {
+        console.warn(`[Push] Source lorebook not found for rename: ${sourcePath}`);
+        return false;
+    }
+
+    try {
+        const newPath = path.join(dirPath, sanitize(`${newName}.json`));
+        fs.renameSync(sourcePath, newPath);
+        console.log(`[Push] Renamed lorebook: "${currentName}" → "${newName}"`);
+        return true;
+    } catch (err) {
+        console.error(`[Push] Failed to rename lorebook:`, err.message);
+        return false;
+    }
+}
+
+/**
+ * Write a push notification file for a recipient user.
+ * The client polls /api/worldinfo/push-notifications to pick these up.
+ * @param {string} handle Recipient user handle
+ * @param {string} message Notification message
+ */
+function writePushNotification(handle, message) {
+    try {
+        const userDirs = getUserDirectories(handle);
+        const notifDir = path.join(path.dirname(userDirs.worlds), 'push-notifications');
+        if (!fs.existsSync(notifDir)) fs.mkdirSync(notifDir, { recursive: true });
+        const notifFile = path.join(notifDir, `${Date.now()}.json`);
+        writeFileAtomicSync(notifFile, JSON.stringify({ message, ts: Date.now() }));
+    } catch (err) {
+        console.warn(`[Push] Failed to write notification for ${handle}:`, err.message);
+    }
+}
+
+function getPendingPushesPath(handle) {
+    const dirs = getUserDirectories(handle);
+    return path.join(path.dirname(dirs.worlds), 'pending-pushes.json');
+}
+
+function readPendingPushes(handle) {
+    try {
+        const p = getPendingPushesPath(handle);
+        if (!fs.existsSync(p)) return [];
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function writePendingPushes(handle, items) {
+    const p = getPendingPushesPath(handle);
+    writeFileAtomicSync(p, JSON.stringify(items, null, 2));
+}
+
+function getUserInboxPath(handle) {
+    const dirs = getUserDirectories(handle);
+    return path.join(path.dirname(dirs.worlds), 'user-inbox.json');
+}
+
+function readUserInbox(handle) {
+    try {
+        const p = getUserInboxPath(handle);
+        if (!fs.existsSync(p)) return [];
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function writeUserInbox(handle, items) {
+    const p = getUserInboxPath(handle);
+    writeFileAtomicSync(p, JSON.stringify(items, null, 2));
+}
+
+function normalizeInboxPriority(priority) {
+    return ['low', 'normal', 'high'].includes(priority) ? priority : 'normal';
+}
+
+function appendUserInbox(handle, item) {
+    const current = readUserInbox(handle);
+    const record = {
+        inbox_id: makeId('inbox'),
+        type: item.type || 'system',
+        title: String(item.title || ''),
+        body: String(item.body || ''),
+        priority: normalizeInboxPriority(item.priority || 'normal'),
+        from_handle: item.from_handle || null,
+        from_name: item.from_name || item.from_handle || 'System',
+        created_at: Date.now(),
+        read_at: null,
+        status: item.status || null,
+        context: item.context && typeof item.context === 'object' ? item.context : null,
+    };
+    current.push(record);
+    writeUserInbox(handle, current);
+    return record;
+}
+
+function summarizeUserInbox(items) {
+    const total = items.length;
+    const unread_count = items.filter(x => !x.read_at).length;
+    return { total, unread_count };
+}
+
+
+const ADMIN_SUBMISSIONS_PATH = path.join(process.cwd(), 'data', 'admin-submissions.json');
+const ADMIN_NOTES_PATH = path.join(process.cwd(), 'data', 'admin-notes.json');
+
+function readAdminSubmissions() {
+    try {
+        if (!fs.existsSync(ADMIN_SUBMISSIONS_PATH)) return [];
+        const parsed = JSON.parse(fs.readFileSync(ADMIN_SUBMISSIONS_PATH, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function writeAdminSubmissions(items) {
+    writeFileAtomicSync(ADMIN_SUBMISSIONS_PATH, JSON.stringify(items, null, 2));
+}
+
+function readAdminNotes() {
+    try {
+        if (!fs.existsSync(ADMIN_NOTES_PATH)) return [];
+        const parsed = JSON.parse(fs.readFileSync(ADMIN_NOTES_PATH, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
+function writeAdminNotes(items) {
+    writeFileAtomicSync(ADMIN_NOTES_PATH, JSON.stringify(items, null, 2));
+}
+
+function appendAdminNote(noteData) {
+    const notes = readAdminNotes();
+    const noteId = makeId('admin_note');
+    const note = {
+        note_id: noteId,
+        created_at: Date.now(),
+        read_at: null,
+        status: 'pending',
+        ...noteData,
+    };
+    notes.push(note);
+    writeAdminNotes(notes);
+    return note;
+}
+
+function summarizeAdminNotes(items) {
+    const total = items.length;
+    const unread_count = items.filter(x => !x.read_at).length;
+    const pending_count = items.filter(x => String(x.status || 'pending') === 'pending').length;
+    return { total, unread_count, pending_count };
+}
+
+function normalizeAdminInboxItem(item) {
+    if (item?.inbox_item_type === 'admin_note') {
+        return {
+            ...item,
+            priority: item.priority || 'normal',
+            item_id: item.note_id,
+            preview_text: item.message || '',
+        };
+    }
+    return {
+        ...item,
+        inbox_item_type: 'submission',
+        item_id: item.submission_id,
+        preview_text: item.notes || '',
+    };
+}
+
+function makeId(prefix) {
+    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeTargets(targets, selfHandle, allHandles) {
+    if (targets === 'all') {
+        return allHandles.filter(h => h !== selfHandle);
+    }
+    if (Array.isArray(targets)) {
+        return [...new Set(targets.filter(h => h && h !== selfHandle))];
+    }
+    return null;
+}
+
+function isPendingStatus(status) {
+    return String(status || '').toLowerCase() === 'pending';
+}
+
+function isUnreadFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function normalizeHandle(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isTrueishFlag(value) {
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function getPushExtensionBySuffix(extensions, suffix) {
+    if (!extensions || typeof extensions !== 'object') return undefined;
+    const exact = extensions[NS(suffix)];
+    if (exact !== undefined) return exact;
+    for (const [key, value] of Object.entries(extensions)) {
+        if (key.endsWith(`_${suffix}`)) {
+            return value;
+        }
+    }
+    return undefined;
+}
+
+function findCreatorFromDdName(lorebookName, allHandles) {
+    const name = String(lorebookName || '').trim().toLowerCase();
+    if (!name.startsWith('dd-')) return '';
+    const handles = [...new Set((allHandles || []).map(h => String(h || '').trim()).filter(Boolean))]
+        .sort((a, b) => b.length - a.length);
+    for (const handle of handles) {
+        const normalizedHandle = handle.toLowerCase();
+        if (name.startsWith(`dd-${normalizedHandle}-`)) {
+            return handle;
+        }
+    }
+    return '';
+}
+
+function isLorebookHidden(fileName, extensions) {
+    const normalizedName = String(fileName || '').trim();
+    const hiddenFlag = isTrueishFlag(getPushExtensionBySuffix(extensions, 'hidden'));
+    if (hiddenFlag) return true;
+    if (normalizedName.startsWith('ADMIN-')) return true;
+    if (normalizedName.startsWith('dd-')) return true;
+    return false;
+}
+
+function canUserAccessHiddenLorebook(fileName, extensions, userProfile, allHandles = []) {
+    if (userProfile?.admin) return true;
+    const userHandle = normalizeHandle(userProfile?.handle);
+    if (!userHandle) return false;
+
+    const creator = normalizeHandle(getPushExtensionBySuffix(extensions, 'creator'));
+    const originalCreator = normalizeHandle(getPushExtensionBySuffix(extensions, 'original_creator') || creator);
+    if (creator && creator === userHandle) return true;
+    if (originalCreator && originalCreator === userHandle) return true;
+
+    const ddCreator = normalizeHandle(findCreatorFromDdName(fileName, allHandles));
+    if (ddCreator && ddCreator === userHandle) return true;
+
+    return false;
+}
+
+function getPushedWorldOwnershipMap(directories, userProfile) {
+    /** @type {Map<string, { hasPushed: boolean, owner: boolean }>} */
+    const ownership = new Map();
+    const userHandle = normalizeHandle(userProfile?.handle);
+    const isAdminUser = Boolean(userProfile?.admin);
+
+    let files = [];
+    try {
+        files = fs.readdirSync(directories.characters).filter(x => x.toLowerCase().endsWith('.png'));
+    } catch {
+        return ownership;
+    }
+
+    for (const file of files) {
+        const charPath = path.join(directories.characters, file);
+        try {
+            const png = fs.readFileSync(charPath);
+            const raw = readCharacterCard(png);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const ext = parsed?.data?.extensions || {};
+            const worldName = String(ext.world || '').trim();
+            if (!worldName) continue;
+
+            const pushed = isTrueishFlag(getPushExtensionBySuffix(ext, 'pushed'));
+            if (!pushed) continue;
+
+            const creator = normalizeHandle(getPushExtensionBySuffix(ext, 'creator'));
+            const originalCreator = normalizeHandle(getPushExtensionBySuffix(ext, 'original_creator') || creator);
+            const owner = isAdminUser || (userHandle && (userHandle === creator || userHandle === originalCreator));
+
+            const current = ownership.get(worldName) || { hasPushed: false, owner: false };
+            current.hasPushed = true;
+            current.owner = current.owner || owner;
+            ownership.set(worldName, current);
+        } catch {
+            // Ignore malformed cards for visibility inference.
+        }
+    }
+
+    return ownership;
+}
+
+function normalizeCreatorHandle(primary, fallback = '') {
+    return String(primary || fallback || '').trim();
+}
+
+/**
+ * Fallback resolver: find a character PNG file by display name.
+ * Used when world-binding lookup returns no character files.
+ * @param {import('../users.js').UserDirectoryList} directories
+ * @param {string} characterLabel
+ * @returns {string[]} matching PNG filenames
+ */
+function findCharacterFilesByName(directories, characterLabel) {
+    const wanted = String(characterLabel || '').trim().toLowerCase();
+    if (!wanted) return [];
+    const charDir = directories.characters;
+    if (!fs.existsSync(charDir)) return [];
+
+    const matches = [];
+    const pngFiles = fs.readdirSync(charDir).filter(f => f.toLowerCase().endsWith('.png'));
+    for (const file of pngFiles) {
+        const charPath = path.join(charDir, file);
+        try {
+            const pngBuffer = fs.readFileSync(charPath);
+            const raw = readCharacterCard(pngBuffer);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const name = String(parsed?.name || parsed?.data?.name || '').trim().toLowerCase();
+            if (name && name === wanted) {
+                matches.push(file);
+            }
+        } catch {
+            // skip unreadable character cards
+        }
+    }
+    return matches;
+}
+
+function findCreatorFromCharacterFiles(directories, characterFiles) {
+    for (const charFile of characterFiles || []) {
+        const charPath = path.join(directories.characters, charFile);
+        if (!fs.existsSync(charPath)) continue;
+        try {
+            const pngBuffer = fs.readFileSync(charPath);
+            const raw = readCharacterCard(pngBuffer);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const creator = String(
+                parsed?.data?.extensions?.[NS('original_creator')]
+                || parsed?.data?.extensions?.[NS('creator')]
+                || '',
+            ).trim();
+            if (creator) return creator;
+        } catch {
+            // skip unreadable cards
+        }
+    }
+    return '';
+}
+
+function findCharacterNameFromFiles(directories, characterFiles, fallback = '') {
+    for (const charFile of characterFiles || []) {
+        const charPath = path.join(directories.characters, charFile);
+        if (!fs.existsSync(charPath)) continue;
+        try {
+            const pngBuffer = fs.readFileSync(charPath);
+            const raw = readCharacterCard(pngBuffer);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            const name = String(parsed?.name || parsed?.data?.name || '').trim();
+            if (name) return name;
+        } catch {
+            // skip unreadable cards
+        }
+    }
+    return String(fallback || '').trim();
+}
+
+/**
+ * Renames a source lorebook file and updates linked character card world bindings.
+ * Used by user submission flow when submitter renames before sending to admin.
+ * @param {import('express').Request} request
+ * @param {string} fromLorebookName
+ * @param {string} toLorebookName
+ * @param {string} characterLabel
+ * @returns {Promise<{ok:boolean,status?:number,reason?:string,renamed:boolean,source_lorebook_name:string,updated_characters:string[]}>}
+ */
+async function renameLorebookForSubmission(request, fromLorebookName, toLorebookName, characterLabel = '') {
+    const fromName = String(fromLorebookName || '').trim();
+    const toName = String(toLorebookName || '').trim();
+
+    if (!fromName || !toName || fromName === toName) {
+        return {
+            ok: true,
+            renamed: false,
+            source_lorebook_name: fromName || toName,
+            updated_characters: [],
+        };
+    }
+
+    const sourcePath = path.join(request.user.directories.worlds, sanitize(`${fromName}.json`));
+    const destPath = path.join(request.user.directories.worlds, sanitize(`${toName}.json`));
+
+    if (!sourcePath || !destPath || sourcePath === destPath) {
+        return {
+            ok: false,
+            status: 400,
+            reason: `Lorebook rename "${fromName}" -> "${toName}" is invalid for this filesystem.`,
+            renamed: false,
+            source_lorebook_name: fromName,
+            updated_characters: [],
+        };
+    }
+
+    if (!fs.existsSync(sourcePath)) {
+        if (fs.existsSync(destPath)) {
+            return {
+                ok: true,
+                renamed: false,
+                source_lorebook_name: toName,
+                updated_characters: [],
+            };
+        }
+        return {
+            ok: false,
+            status: 404,
+            reason: `Source lorebook "${fromName}" not found.`,
+            renamed: false,
+            source_lorebook_name: fromName,
+            updated_characters: [],
+        };
+    }
+
+    if (fs.existsSync(destPath)) {
+        return {
+            ok: false,
+            status: 409,
+            reason: `Lorebook "${toName}" already exists.`,
+            renamed: false,
+            source_lorebook_name: fromName,
+            updated_characters: [],
+        };
+    }
+
+    const lock = checkLock(sourcePath, request.user.profile);
+    if (lock.locked) {
+        return {
+            ok: false,
+            status: 403,
+            reason: lock.reason || 'Source lorebook is locked.',
+            renamed: false,
+            source_lorebook_name: fromName,
+            updated_characters: [],
+        };
+    }
+
+    fs.renameSync(sourcePath, destPath);
+
+    let linkedCharacterFiles = await findCharactersByWorld(request.user.directories, fromName);
+    if (linkedCharacterFiles.length === 0 && characterLabel) {
+        const byName = findCharacterFilesByName(request.user.directories, characterLabel);
+        for (const f of byName) {
+            if (!linkedCharacterFiles.includes(f)) linkedCharacterFiles.push(f);
+        }
+    }
+
+    const updatedCharacters = [];
+    for (const charFile of linkedCharacterFiles) {
+        const charPath = path.join(request.user.directories.characters, charFile);
+        if (!fs.existsSync(charPath)) continue;
+        try {
+            const pngBuffer = fs.readFileSync(charPath);
+            const raw = readCharacterCard(pngBuffer);
+            if (!raw) continue;
+            const parsed = JSON.parse(raw);
+            if (!parsed.data) parsed.data = {};
+            if (!parsed.data.extensions) parsed.data.extensions = {};
+            parsed.data.extensions.world = toName;
+            const rewritten = writeCharacterCard(pngBuffer, JSON.stringify(parsed));
+            fs.writeFileSync(charPath, rewritten);
+            updatedCharacters.push(charFile);
+        } catch (err) {
+            console.warn(`[SubmitRename] Failed to rebind character ${charFile}:`, err.message);
+        }
+    }
+
+    return {
+        ok: true,
+        renamed: true,
+        source_lorebook_name: toName,
+        updated_characters: updatedCharacters,
+    };
+}
+
+function getPushConflictPaths(recipientDirs, item) {
+    const conflicts = [];
+    const lorebookPath = path.join(recipientDirs.worlds, sanitize(`${item.pushed_lorebook_name}.json`));
+    if (fs.existsSync(lorebookPath)) conflicts.push({ type: 'lorebook', path: lorebookPath });
+
+    for (const charFile of item.character_files || []) {
+        const charPath = path.join(recipientDirs.characters, charFile);
+        if (fs.existsSync(charPath)) conflicts.push({ type: 'character', path: charPath });
+    }
+
+    return conflicts;
+}
+
+function applyQueuedPushToRecipient(recipientHandle, item, forceOverwrite = false) {
+    const sourceDirs = getUserDirectories(item.creator_handle);
+    const recipientDirs = getUserDirectories(recipientHandle);
+
+    // Try pushed_lorebook_name first (file may have been renamed), then fallback to source_lorebook_name
+    let sourceLorebookPath = null;
+    let attemptPath = path.join(sourceDirs.worlds, sanitize(`${item.pushed_lorebook_name}.json`));
+    if (fs.existsSync(attemptPath)) {
+        sourceLorebookPath = attemptPath;
+        console.log(`[Push] Found source lorebook with pushed name: "${item.pushed_lorebook_name}"`);
+    }
+
+    if (!sourceLorebookPath) {
+        attemptPath = path.join(sourceDirs.worlds, sanitize(`${item.source_lorebook_name}.json`));
+        if (fs.existsSync(attemptPath)) {
+            sourceLorebookPath = attemptPath;
+            console.log(`[Push] Found source lorebook with source name: "${item.source_lorebook_name}"`);
+        }
+    }
+
+    if (!sourceLorebookPath) {
+        console.error(`[Push] Source lorebook not found. Tried: "${item.pushed_lorebook_name}", "${item.source_lorebook_name}" (creator: ${item.creator_handle})`);
+        return { ok: false, status: 404, error: `Source lorebook "${item.pushed_lorebook_name}" or "${item.source_lorebook_name}" no longer exists.` };
+    }
+
+    const destLorebookPath = path.join(recipientDirs.worlds, sanitize(`${item.pushed_lorebook_name}.json`));
+
+    if (!fs.existsSync(recipientDirs.worlds)) fs.mkdirSync(recipientDirs.worlds, { recursive: true });
+    if (!fs.existsSync(recipientDirs.characters)) fs.mkdirSync(recipientDirs.characters, { recursive: true });
+
+    const resolvedCharacterFiles = Array.isArray(item.character_files) ? [...item.character_files] : [];
+    if (resolvedCharacterFiles.length === 0) {
+        const fallbackLabel = item?.source_names?.character_label || '';
+        const byName = findCharacterFilesByName(sourceDirs, fallbackLabel);
+        for (const f of byName) {
+            if (!resolvedCharacterFiles.includes(f)) resolvedCharacterFiles.push(f);
+        }
+    }
+
+    const effectiveItem = { ...item, character_files: resolvedCharacterFiles };
+    const conflicts = getPushConflictPaths(recipientDirs, effectiveItem);
+    const allowNonDestructiveAccept = !!item.is_public_announcement && !forceOverwrite;
+    if (!forceOverwrite && conflicts.length > 0 && !allowNonDestructiveAccept) {
+        return {
+            ok: false,
+            status: 409,
+            conflict: true,
+            reason: 'Local files already exist. Use overwrite to apply this push.',
+            conflicts,
+        };
+    }
+
+    const lorebookData = JSON.parse(fs.readFileSync(sourceLorebookPath, 'utf8'));
+    const creatorStamp = normalizeCreatorHandle(item.effective_creator, item.creator_handle);
+    const originalCreatorStamp = normalizeCreatorHandle(
+        item.original_creator_handle || item.original_creator || item.effective_creator,
+        creatorStamp,
+    );
+    const destLorebookExists = fs.existsSync(destLorebookPath);
+    if (forceOverwrite || !destLorebookExists) {
+        if (!lorebookData.extensions) lorebookData.extensions = {};
+        lorebookData.extensions[NS('locked')] = true;
+        lorebookData.extensions[NS('hidden')] = true;
+        lorebookData.extensions[NS('creator')] = creatorStamp;
+        lorebookData.extensions[NS('original_creator')] = originalCreatorStamp;
+        // True-Symlink: store source lorebook info so the /get endpoint can resolve from master
+        lorebookData.extensions[NS('source_lorebook')] = item.source_lorebook_name || '';
+        lorebookData.extensions[NS('source_handle')] = item.creator_handle || '';
+        writeFileAtomicSync(destLorebookPath, JSON.stringify(lorebookData, null, 4));
+        console.log(`[Push] Lorebook written: ${destLorebookPath}`);
+    } else if (allowNonDestructiveAccept) {
+        // Keep local lorebook content intact, but enforce visibility/ownership flags.
+        try {
+            const destData = JSON.parse(fs.readFileSync(destLorebookPath, 'utf8'));
+            if (!destData.extensions) destData.extensions = {};
+            destData.extensions[NS('locked')] = true;
+            destData.extensions[NS('hidden')] = true;
+            destData.extensions[NS('creator')] = creatorStamp;
+            destData.extensions[NS('original_creator')] = originalCreatorStamp;
+            // True-Symlink: store source lorebook info
+            destData.extensions[NS('source_lorebook')] = item.source_lorebook_name || '';
+            destData.extensions[NS('source_handle')] = item.creator_handle || '';
+            writeFileAtomicSync(destLorebookPath, JSON.stringify(destData, null, 4));
+            console.log(`[Push] Lorebook relinked (non-destructive): ${destLorebookPath}`);
+        } catch (err) {
+            console.warn(`[Push] Failed non-destructive lorebook relink for ${destLorebookPath}:`, err.message);
+        }
+    }
+
+    const appliedCharacters = [];
+    for (const charFile of effectiveItem.character_files || []) {
+        const srcChar = path.join(sourceDirs.characters, charFile);
+        const destChar = path.join(recipientDirs.characters, charFile);
+        if (!fs.existsSync(srcChar)) {
+            console.warn(`[Push] Source character not found, skipping: ${srcChar}`);
+            continue;
+        }
+
+        // Always create symlink pointer for pushed characters, regardless of announcement mode
+        // For existing files in non-destructive mode, we'll update metadata below
+        const charAlreadyExists = fs.existsSync(destChar);
+        
+        if (!charAlreadyExists || !allowNonDestructiveAccept) {
+            // Write full character data with symlink metadata overlay.
+            // Deep-clone the source so all fields (system_prompt, alternate_greetings,
+            // character_book, depth_prompt, etc.) are preserved in the recipient's PNG.
+            // Symlink resolution on read will auto-sync from master for future updates.
+            try {
+                const sourcePngBuffer = fs.readFileSync(srcChar);
+                const sourceDataStr = readCharacterCard(sourcePngBuffer);
+                const sourceData = JSON.parse(sourceDataStr);
+                const sourceExt = sourceData?.data?.extensions || {};
+
+                // Deep clone ALL source data — no fields lost
+                const pushedData = JSON.parse(JSON.stringify(sourceData));
+                if (!pushedData.data) pushedData.data = {};
+                if (!pushedData.data.extensions) pushedData.data.extensions = {};
+
+                // Override lorebook binding with the pushed name
+                pushedData.data.extensions.world = item.pushed_lorebook_name;
+
+                // Stamp push + symlink metadata
+                pushedData.data.extensions[NS('pushed')] = true;
+                pushedData.data.extensions[NS('creator')] = creatorStamp;
+                pushedData.data.extensions[NS('original_creator')] = originalCreatorStamp;
+                pushedData.data.extensions[NS('symlink_mode')] = true;
+                pushedData.data.extensions[NS('symlink_to')] = `${item.creator_handle}/${charFile}`;
+                pushedData.data.extensions[NS('symlink_avatar')] = charFile;
+                pushedData.data.extensions[NS('symlink_linked_at')] = Date.now();
+                pushedData.data.extensions[NS('master_id')] = sourceExt[NS('master_id')] || null;
+
+                const basePng = charAlreadyExists ? fs.readFileSync(destChar) : sourcePngBuffer;
+                const pushedPng = writeCharacterCard(basePng, JSON.stringify(pushedData));
+                fs.writeFileSync(destChar, pushedPng);
+                appliedCharacters.push(charFile);
+                console.log(`[Push] Character written with full data + symlink: ${destChar}`);
+            } catch (err) {
+                console.warn(`[Push] Character push failed for ${charFile}:`, err.message);
+                if (!allowNonDestructiveAccept) {
+                    throw err;
+                }
+            }
+            continue;
+        }
+
+        if (allowNonDestructiveAccept && charAlreadyExists) {
+            // Non-destructive accept (public announcement on existing file): update metadata only
+            try {
+                const destPngBuffer = fs.readFileSync(destChar);
+                const destDataStr = readCharacterCard(destPngBuffer);
+                const destData = JSON.parse(destDataStr);
+                if (!destData.data) destData.data = {};
+                if (!destData.data.extensions) destData.data.extensions = {};
+                destData.data.extensions.world = item.pushed_lorebook_name;
+                destData.data.extensions[NS('pushed')] = true;
+                destData.data.extensions[NS('creator')] = creatorStamp;
+                destData.data.extensions[NS('original_creator')] = originalCreatorStamp;
+                const relinkedPng = writeCharacterCard(destPngBuffer, JSON.stringify(destData));
+                fs.writeFileSync(destChar, relinkedPng);
+                appliedCharacters.push(charFile);
+                console.log(`[Push] Character relinked (non-destructive): ${destChar}`);
+            } catch (err) {
+                console.warn(`[Push] Failed non-destructive character relink for ${charFile}:`, err.message);
+            }
+            continue;
+        }
+    }
+
+    return { ok: true, lorebook: item.pushed_lorebook_name, characters: appliedCharacters };
+}
+
+function approveSubmissionForAdmin(submission, adminHandle) {
+    const submissionDisplayName = String(submission.content_name || '').trim();
+    const submissionSourceName = String(submission.source_lorebook_name || submission.content_name || '').trim();
+    const submissionCharacterName = String(submission.character_name || '').trim();
+    const submissionNames = [...new Set([submissionDisplayName, submissionSourceName, submissionCharacterName].filter(Boolean))];
+
+    const pending = readPendingPushes(adminHandle);
+    const candidates = pending
+        .filter(item => item.status === 'pending')
+        .filter(item => item.creator_handle === submission.submitter_handle)
+        .filter(item => submissionNames.some(name =>
+            item.source_lorebook_name === name
+            || item.pushed_lorebook_name === name
+            || item.source_names?.lorebook === name
+            || item.source_names?.character_label === name
+            || item.pushed_lorebook_name?.includes(name),
+        ))
+        .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+
+    let item = candidates[0];
+
+    // Fallback path: if no queue item exists, import directly from submitter source files by content name.
+    if (!item) {
+        console.log(`[SubmissionApproval] No pending push match for submission display="${submissionDisplayName}" source="${submissionSourceName}" from ${submission.submitter_handle}. Using fallback import.`);
+        const sourceDirs = getUserDirectories(submission.submitter_handle);
+        const fallbackSourceName = submissionSourceName;
+        const fallbackPushedName = submissionDisplayName || fallbackSourceName;
+        const fallbackCharacterName = submissionCharacterName || fallbackSourceName;
+        if (!fallbackSourceName) {
+            return { ok: false, status: 400, reason: 'Submission is missing source_lorebook_name.' };
+        }
+        const sourceLorebookPath = path.join(sourceDirs.worlds, sanitize(`${fallbackSourceName}.json`));
+        if (!fs.existsSync(sourceLorebookPath)) {
+            console.warn(`[SubmissionApproval] Source lorebook not found: ${sourceLorebookPath}`);
+            return { ok: false, status: 404, reason: 'No matching pending push item or source lorebook was found for this submission.' };
+        }
+
+        const allPng = fs.readdirSync(sourceDirs.characters).filter(f => f.endsWith('.png'));
+        const characterFiles = allPng.filter(f => {
+            try {
+                const buf = fs.readFileSync(path.join(sourceDirs.characters, f));
+                const raw = readCharacterCard(buf);
+                const parsed = JSON.parse(raw);
+                const charWorld = parsed?.data?.extensions?.world;
+                if (charWorld === fallbackSourceName) {
+                    console.log(`[SubmissionApproval] Found character bound to "${fallbackSourceName}": ${f}`);
+                    return true;
+                }
+                return false;
+            } catch (err) {
+                console.warn(`[SubmissionApproval] Failed to read character card ${f}:`, err.message);
+                return false;
+            }
+        });
+
+        console.log(`[SubmissionApproval] Fallback import: lorebook="${fallbackSourceName}", characters=[${characterFiles.join(', ')}]`);
+
+        item = {
+            creator_handle: submission.submitter_handle,
+            effective_creator: submission.submitter_handle,
+            pushed_by_handle: submission.submitter_handle,
+            pushed_by_name: submission.submitter_name || submission.submitter_handle,
+            pushed_by_role: 'user',
+            original_creator_handle: submission.submitter_handle,
+            original_creator_name: submission.submitter_name || submission.submitter_handle,
+            source_lorebook_name: fallbackSourceName,
+            pushed_lorebook_name: fallbackPushedName,
+            source_names: {
+                lorebook: fallbackSourceName,
+                character_label: fallbackCharacterName,
+            },
+            character_files: characterFiles,
+        };
+    } else {
+        console.log(`[SubmissionApproval] Found pending push match: push_id=${item.push_id}, lorebook="${item.pushed_lorebook_name}", characters=[${(item.character_files || []).join(', ')}]`);
+    }
+
+    const applyResult = applyQueuedPushToRecipient(adminHandle, item, true);
+    if (!applyResult.ok) {
+        console.warn(`[SubmissionApproval] applyQueuedPushToRecipient failed:`, applyResult);
+        return { ok: false, status: applyResult.status || 500, reason: applyResult.reason || applyResult.error || 'Failed to apply submitted content.' };
+    }
+
+    console.log(`[SubmissionApproval] Successfully applied to ${adminHandle}: lorebook="${applyResult.lorebook}", characters=[${(applyResult.characters || []).join(', ')}]`);
+
+    if (item.push_id) {
+        const idx = pending.findIndex(x => x.push_id === item.push_id);
+        if (idx !== -1) {
+            pending[idx].status = 'accepted';
+            pending[idx].unread = false;
+            pending[idx].processed_at = Date.now();
+            pending[idx].processed_by = adminHandle;
+            writePendingPushes(adminHandle, pending);
+        }
+    }
+
+    return { ok: true, applied: applyResult, push_id: item.push_id || null };
+}
+
+/**
+ * Reads a World Info file and returns its contents
+ * @param {import('../users.js').UserDirectoryList} directories User directories
+ * @param {string} worldInfoName Name of the World Info file
+ * @param {boolean} allowDummy If true, returns an empty object if the file doesn't exist
+ * @returns {object} World Info file contents
+ */
+export function readWorldInfoFile(directories, worldInfoName, allowDummy) {
+    const dummyObject = allowDummy ? { entries: {} } : null;
+
+    if (!worldInfoName) {
+        return dummyObject;
+    }
+
+    const filename = sanitize(`${worldInfoName}.json`);
+    const pathToWorldInfo = path.join(directories.worlds, filename);
+
+    if (!fs.existsSync(pathToWorldInfo)) {
+        console.error(`World info file ${filename} doesn't exist.`);
+        return dummyObject;
+    }
+
+    const worldInfoText = fs.readFileSync(pathToWorldInfo, 'utf8');
+    const worldInfo = JSON.parse(worldInfoText);
+    return worldInfo;
+}
+
+// Determine the metadata namespace used for push/lock flags.  By default
+// we fall back to the package name (non‑alphanumeric chars stripped) or
+// "dreamtavern" if that cannot be determined.  Administrators may override
+// via config `push.namespace`.
+function getPushNamespace() {
+    const cfg = getConfigValue('push.namespace', null);
+    if (cfg) return cfg;
+    try {
+        const pkgPath = path.join(process.cwd(), 'package.json');
+        if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (pkg && pkg.name) {
+                return pkg.name.replace(/\W+/g, '').toLowerCase();
+            }
+        }
+    } catch {
+        // silent
+    }
+    return 'dreamtavern';
+}
+const PUSH_NS = getPushNamespace();
+const NS = suffix => `${PUSH_NS}_${suffix}`;
+/**
+ * @param {object} userProfile User profile object
+ * @returns {{ locked: boolean, reason?: string }}
+ */
+function checkLock(filePath, userProfile) {
+    if (!fs.existsSync(filePath)) return { locked: false };
+
+    try {
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const ext = data?.extensions || {};
+
+        if (!isTrueishFlag(getPushExtensionBySuffix(ext, 'locked'))) return { locked: false };
+
+        // Admin can always edit
+        if (userProfile?.admin) return { locked: false };
+
+        // Creator can edit their own
+        const creator = normalizeHandle(getPushExtensionBySuffix(ext, 'creator'));
+        const originalCreator = normalizeHandle(getPushExtensionBySuffix(ext, 'original_creator') || creator);
+        const userHandle = normalizeHandle(userProfile?.handle);
+        if (creator === userHandle || originalCreator === userHandle) return { locked: false };
+
+        return { locked: true, reason: 'This lorebook is locked. Only the creator or an admin can modify it.' };
+    } catch {
+        return { locked: false };
+    }
+}
+
+
+function cleanupDeclinedAdminPush(recipientProfile, item) {
+    try {
+        // Only cleanup for user -> admin decline cases.
+        if (!recipientProfile?.admin) return;
+        if (!item?.creator_handle || item.creator_handle === recipientProfile.handle) return;
+        if (!String(item.pushed_lorebook_name || '').startsWith('dd-')) return;
+
+        const adminDirs = getUserDirectories(recipientProfile.handle);
+        const lorebookPath = path.join(adminDirs.worlds, sanitize(`${item.pushed_lorebook_name}.json`));
+        if (fs.existsSync(lorebookPath)) {
+            fs.unlinkSync(lorebookPath);
+        }
+
+        for (const charFile of item.character_files || []) {
+            const charPath = path.join(adminDirs.characters, charFile);
+            if (!fs.existsSync(charPath)) continue;
+
+            // Delete only if this character card is bound to the declined pushed lorebook.
+            try {
+                const charBuf = fs.readFileSync(charPath);
+                const charDataStr = readCharacterCard(charBuf);
+                const charData = JSON.parse(charDataStr);
+                const ext = charData?.data?.extensions || {};
+                if (
+                    ext.world === item.pushed_lorebook_name
+                    && ext[NS('pushed')]
+                    && ext[NS('creator')] === (item.effective_creator || item.creator_handle)
+                ) {
+                    fs.unlinkSync(charPath);
+                }
+            } catch {
+                // Keep files we cannot confidently identify as declined-push artifacts.
+            }
+        }
+    } catch (err) {
+        console.warn('[PushAction] Decline cleanup failed:', err.message);
+    }
+}
+export const router = express.Router();
+
+router.post('/list', async (request, response) => {
+    try {
+        const data = [];
+        const jsonFiles = (await fs.promises.readdir(request.user.directories.worlds, { withFileTypes: true }))
+            .filter((file) => file.isFile() && path.extname(file.name).toLowerCase() === '.json')
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const file of jsonFiles) {
+            try {
+                const filePath = path.join(request.user.directories.worlds, file.name);
+                const fileContents = await fs.promises.readFile(filePath, 'utf8');
+                const fileContentsParsed = tryParse(fileContents) || {};
+                const fileExtensions = fileContentsParsed?.extensions || {};
+                const fileNameWithoutExt = path.parse(file.name).name;
+                const fileData = {
+                    file_id: fileNameWithoutExt,
+                    name: fileContentsParsed?.name || fileNameWithoutExt,
+                    extensions: _.isObjectLike(fileExtensions) ? fileExtensions : {},
+                };
+                data.push(fileData);
+            } catch (err) {
+                console.warn(`Error reading or parsing World Info file ${file.name}:`, err);
+            }
+        }
+
+        // Hide pushed lorebooks from non-admin/non-creator users
+        // ADMIN-* → hidden from all non-admins
+        // dd-{handle}-* → visible only to that handle + admins
+        // hidden flag (namespace dynamic) → visible only to creator + admins
+        const allHandles = (await getAllUsers())
+            .filter(u => u.enabled)
+            .map(u => u.handle);
+        const pushedWorldOwnership = getPushedWorldOwnershipMap(request.user.directories, request.user.profile);
+        const filtered = data.filter(entry => {
+            const fileId = entry.file_id || '';
+            const ext = entry.extensions || {};
+            const pushedOwnership = pushedWorldOwnership.get(fileId);
+            if (pushedOwnership?.hasPushed && !pushedOwnership.owner) return false;
+            if (!isLorebookHidden(fileId, ext)) return true;
+            return canUserAccessHiddenLorebook(fileId, ext, request.user.profile, allHandles);
+        });
+
+        return response.send(filtered);
+    } catch (err) {
+        console.error('Error reading World Info directory:', err);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/get', async (request, response) => {
+    if (!request.body?.name) {
+        return response.sendStatus(400);
+    }
+
+    let file = readWorldInfoFile(request.user.directories, request.body.name, true);
+
+    // ── True-Symlink lorebook resolution ──
+    // If this lorebook was pushed and has source info, resolve from the creator's master copy.
+    // This ensures recipients always see the latest lorebook entries from the creator.
+    const sourceLorebookName = file?.extensions?.[NS('source_lorebook')];
+    const sourceHandle = file?.extensions?.[NS('source_handle')];
+    if (sourceLorebookName && sourceHandle) {
+        try {
+            const creatorDirs = getUserDirectories(sourceHandle);
+            const masterFile = readWorldInfoFile(creatorDirs, sourceLorebookName, false);
+            if (masterFile && masterFile.entries) {
+                // Use master's entries and data, but preserve local lock/hidden/creator metadata
+                const localExtensions = file.extensions || {};
+                masterFile.extensions = masterFile.extensions || {};
+                masterFile.extensions[NS('locked')] = localExtensions[NS('locked')];
+                masterFile.extensions[NS('hidden')] = localExtensions[NS('hidden')];
+                masterFile.extensions[NS('creator')] = localExtensions[NS('creator')];
+                masterFile.extensions[NS('original_creator')] = localExtensions[NS('original_creator')];
+                masterFile.extensions[NS('source_lorebook')] = sourceLorebookName;
+                masterFile.extensions[NS('source_handle')] = sourceHandle;
+                file = masterFile;
+                console.debug(`[Symlink] Lorebook resolved: ${request.body.name} → ${sourceHandle}/${sourceLorebookName}`);
+            }
+        } catch (symlinkErr) {
+            // Master lorebook not found or read error — fall back to local copy
+            console.warn(`[Symlink] Lorebook resolution failed for ${request.body.name}:`, symlinkErr.message);
+        }
+    }
+
+    // Hidden pushed lorebooks are UI-hidden for non-owners but still returned for prompt building.
+    const allHandles = (await getAllUsers())
+        .map(u => u.handle);
+    if (isLorebookHidden(request.body.name, file?.extensions || {})) {
+        const canAccess = canUserAccessHiddenLorebook(
+            request.body.name,
+            file?.extensions || {},
+            request.user.profile,
+            allHandles,
+        );
+        if (!canAccess) {
+            file._stw_hidden_restricted = true;
+        }
+    }
+
+    return response.send(file);
+});
+
+router.post('/delete', (request, response) => {
+    if (!request.body?.name) {
+        return response.sendStatus(400);
+    }
+
+    const worldInfoName = request.body.name;
+    const filename = sanitize(`${worldInfoName}.json`);
+    const pathToWorldInfo = path.join(request.user.directories.worlds, filename);
+
+    if (!fs.existsSync(pathToWorldInfo)) {
+        throw new Error(`World info file ${filename} doesn't exist.`);
+    }
+
+    // Lock check
+    const lock = checkLock(pathToWorldInfo, request.user.profile);
+    if (lock.locked) {
+        return response.status(403).send(lock.reason);
+    }
+
+    fs.unlinkSync(pathToWorldInfo);
+
+    return response.sendStatus(200);
+});
+
+router.post('/import', (request, response) => {
+    if (!request.file) return response.sendStatus(400);
+
+    const filename = `${path.parse(sanitize(request.file.originalname)).name}.json`;
+
+    let fileContents = null;
+
+    if (request.body.convertedData) {
+        fileContents = request.body.convertedData;
+    } else {
+        const pathToUpload = path.join(request.file.destination, request.file.filename);
+        fileContents = fs.readFileSync(pathToUpload, 'utf8');
+        fs.unlinkSync(pathToUpload);
+    }
+
+    try {
+        const worldContent = JSON.parse(fileContents);
+        if (!('entries' in worldContent)) {
+            throw new Error('File must contain a world info entries list');
+        }
+    } catch (err) {
+        return response.status(400).send('Is not a valid world info file');
+    }
+
+    const pathToNewFile = path.join(request.user.directories.worlds, filename);
+    const worldName = path.parse(pathToNewFile).name;
+
+    if (!worldName) {
+        return response.status(400).send('World file must have a name');
+    }
+
+    writeFileAtomicSync(pathToNewFile, fileContents);
+    return response.send({ name: worldName });
+});
+
+router.post('/edit', (request, response) => {
+    if (!request.body) {
+        return response.sendStatus(400);
+    }
+
+    if (!request.body.name) {
+        return response.status(400).send('World file must have a name');
+    }
+
+    try {
+        if (!('entries' in request.body.data)) {
+            throw new Error('World info must contain an entries list');
+        }
+    } catch (err) {
+        return response.status(400).send('Is not a valid world info file');
+    }
+
+    const filename = sanitize(`${request.body.name}.json`);
+    const pathToFile = path.join(request.user.directories.worlds, filename);
+
+    // Lock check
+    const lock = checkLock(pathToFile, request.user.profile);
+    if (lock.locked) {
+        return response.status(403).send(lock.reason);
+    }
+
+    writeFileAtomicSync(pathToFile, JSON.stringify(request.body.data, null, 4));
+
+    // ── One-way lorebook sync (fire-and-forget) ──
+    // If this user has pushed this lorebook before, propagate the edit
+    // to every recipient who still has the file.
+    const lorebookName = request.body.name;
+    const creatorHandle = request.user.profile.handle;
+    setImmediate(() => {
+        try {
+            const manifest = readPushManifest(creatorHandle);
+            const records = manifest.filter(r => r.source_lorebook === lorebookName);
+            if (records.length === 0) return;
+
+            for (const record of records) {
+                const pushedFilename = sanitize(`${record.pushed_lorebook_name}.json`);
+                for (const recipient of record.recipients) {
+                    try {
+                        const recipDirs = getUserDirectories(recipient);
+                        const destPath = path.join(recipDirs.worlds, pushedFilename);
+                        if (!fs.existsSync(destPath)) continue; // user deleted it
+
+                        // Build updated copy: creator's data + preserved lock metadata
+                        const synced = JSON.parse(JSON.stringify(request.body.data));
+                        if (!synced.extensions) synced.extensions = {};
+                        synced.extensions[NS('locked')] = true;
+                        synced.extensions[NS('hidden')] = true;
+                        synced.extensions[NS('creator')] = creatorHandle;
+
+                        writeFileAtomicSync(destPath, JSON.stringify(synced, null, 4));
+                    } catch (e) {
+                        console.warn(`[Sync] Lorebook sync to ${recipient} failed:`, e.message);
+                    }
+                }
+            }
+            console.log(`[Sync] Lorebook "${lorebookName}" synced to recipients`);
+        } catch (err) {
+            console.warn('[Sync] Lorebook sync error:', err.message);
+        }
+    });
+
+    return response.send({ ok: true });
+});
+
+// Push lorebook + associated character(s) to target users as pending queue items.
+router.post('/push', async (request, response) => {
+    const { name, targets, charLabel, notes = '', version = '' } = request.body;
+    const userIsAdmin = request.user.profile?.admin;
+    const creatorHandle = request.user.profile?.handle;
+    const pusherName = request.user.profile?.name || creatorHandle;
+
+    if (!name) return response.status(400).send('Lorebook name is required');
+
+    const sourcePath = path.join(request.user.directories.worlds, sanitize(`${name}.json`));
+    if (!fs.existsSync(sourcePath)) {
+        return response.status(404).send('Lorebook not found in your collection');
+    }
+
+    const sourceLorebook = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+    if (!sourceLorebook.extensions) sourceLorebook.extensions = {};
+    const isUserPushedBook = name.startsWith('dd-');
+
+    const enabledUsers = await getAllUsers();
+    const enabledHandles = enabledUsers.map(u => u.handle);
+    const userByHandle = new Map(enabledUsers.map(u => [u.handle, u]));
+
+    let targetHandles = normalizeTargets(targets, creatorHandle, enabledHandles);
+    if (!targetHandles) return response.status(400).send('targets must be "all" or an array of handles');
+
+    if (!userIsAdmin) {
+        const adminHandles = enabledUsers.filter(u => u.admin).map(u => u.handle);
+        const invalidTargets = targetHandles.filter(h => !adminHandles.includes(h));
+        if (invalidTargets.length > 0) {
+            return response.status(403).send('Non-admin users can only push to admin accounts');
+        }
+    }
+
+    const characterFiles = await findCharactersByWorld(request.user.directories, name);
+    if (characterFiles.length === 0 && charLabel) {
+        const byName = findCharacterFilesByName(request.user.directories, charLabel);
+        for (const f of byName) {
+            if (!characterFiles.includes(f)) characterFiles.push(f);
+        }
+    }
+    const existingCreator = String(sourceLorebook.extensions[NS('creator')] || '').trim();
+    const existingOriginalCreator = String(sourceLorebook.extensions[NS('original_creator')] || '').trim();
+    const inferredFromName = findCreatorFromDdName(name, enabledHandles);
+    const inferredFromChars = findCreatorFromCharacterFiles(request.user.directories, characterFiles);
+    const effectiveCreatorHandle = normalizeCreatorHandle(
+        existingOriginalCreator || inferredFromName || inferredFromChars || existingCreator,
+        creatorHandle,
+    );
+    const effectiveCreatorName = userByHandle.get(effectiveCreatorHandle)?.name || effectiveCreatorHandle || creatorHandle;
+    sourceLorebook.extensions[NS('creator')] = effectiveCreatorHandle;
+    sourceLorebook.extensions[NS('original_creator')] = effectiveCreatorHandle;
+    writeFileAtomicSync(sourcePath, JSON.stringify(sourceLorebook, null, 4));
+    const labelToUse = charLabel || name;
+    const metadataCharacterName = findCharacterNameFromFiles(request.user.directories, characterFiles, labelToUse);
+    const pushedLorebookName = userIsAdmin
+        ? (isUserPushedBook ? name : `ADMIN-${labelToUse}`)
+        : `dd-${creatorHandle}-${labelToUse}`;
+
+    // Rename the actual file to match the pushed naming convention
+    const renameSuccess = renameLoreBookIfNeeded(request.user.directories.worlds, name, pushedLorebookName);
+    if (!renameSuccess && name !== pushedLorebookName) {
+        return response.status(500).send(`Failed to prepare lorebook for push: could not rename file`);
+    }
+
+    const results = { queued: [], failed: [], items: [] };
+
+    for (const handle of targetHandles) {
+        try {
+            const isOriginalCreatorRecipient = handle === effectiveCreatorHandle;
+            const announcementMode = userIsAdmin && !isOriginalCreatorRecipient;
+            const deliveredNotes = announcementMode ? '' : (notes || '');
+            const pending = readPendingPushes(handle);
+            const item = {
+                push_id: makeId('push'),
+                status: 'pending',
+                unread: true,
+                created_at: Date.now(),
+                processed_at: null,
+                processed_by: null,
+                creator_handle: creatorHandle,
+                effective_creator: effectiveCreatorHandle,
+                pushed_by_handle: creatorHandle,
+                pushed_by_name: pusherName,
+                pushed_by_role: userIsAdmin ? 'admin' : 'user',
+                original_creator_handle: effectiveCreatorHandle,
+                original_creator_name: effectiveCreatorName,
+                source_lorebook_name: renameSuccess ? pushedLorebookName : name,
+                pushed_lorebook_name: pushedLorebookName,
+                source_type: 'character_lorebook_bundle',
+                source_names: {
+                    lorebook: name,
+                    character_label: labelToUse,
+                },
+                character_files: characterFiles,
+                preview: {
+                    character_count: characterFiles.length,
+                    note: deliveredNotes,
+                    version: version || '',
+                },
+                notes: deliveredNotes,
+                is_public_announcement: announcementMode,
+                announcement_title: announcementMode ? 'NEW CHARACTER!! 🎉' : '',
+                announcement_character_name: metadataCharacterName,
+                version: version || '',
+                recipient_handle: handle,
+            };
+            pending.push(item);
+            writePendingPushes(handle, pending);
+            // Enhanced notification with hidden lorebook details
+            let notifyText;
+            if (announcementMode) {
+                notifyText = `NEW CHARACTER!! 🎉 - ${metadataCharacterName || labelToUse} (includes "${pushedLorebookName}")`;
+            } else {
+                if (pushedLorebookName.startsWith('ADMIN-')) {
+                    notifyText = `New push: "${pushedLorebookName}" (admin-managed, hidden from dropdown)`;
+                } else if (pushedLorebookName.startsWith('dd-')) {
+                    notifyText = `New push: "${pushedLorebookName}" (your submission, visible to you)`;
+                } else {
+                    notifyText = `New push queued: ${pushedLorebookName}`;
+                }
+            }
+            writePushNotification(handle, notifyText);
+            results.queued.push(handle);
+            results.items.push({ handle, push_id: item.push_id });
+        } catch (err) {
+            console.error(`[PushQueue] Failed to queue "${name}" for ${handle}:`, err);
+            results.failed.push(handle);
+        }
+    }
+
+    return response.json(results);
+});
+
+// Bulk-push 1-10 lorebook-linked items to selected users as pending queue items (admin only).
+router.post('/bulk-push', async (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Bulk push is admin-only');
+    }
+
+    const { lorebooks, targets, notes = '', version = '' } = request.body;
+    if (!Array.isArray(lorebooks) || lorebooks.length < 1 || lorebooks.length > 10) {
+        return response.status(400).send('Provide an array of 1-10 lorebook names');
+    }
+
+    const creatorHandle = request.user.profile.handle;
+    const pusherName = request.user.profile?.name || creatorHandle;
+    const enabledUsers = await getAllUsers();
+    const enabledHandles = enabledUsers.map(u => u.handle);
+    const userByHandle = new Map(enabledUsers.map(u => [u.handle, u]));
+    let targetHandles = normalizeTargets(targets, creatorHandle, enabledHandles);
+    if (!targetHandles || targetHandles.length === 0) {
+        return response.status(400).send('No target users selected');
+    }
+
+    const allResults = [];
+    for (const lorebookName of lorebooks) {
+        const result = { lorebook: lorebookName, queued: [], failed: [] };
+        try {
+            const sourcePath = path.join(request.user.directories.worlds, sanitize(`${lorebookName}.json`));
+            if (!fs.existsSync(sourcePath)) {
+                result.failed.push(`Source lorebook "${lorebookName}" not found`);
+                allResults.push(result);
+                continue;
+            }
+
+            const sourceLorebook = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+            if (!sourceLorebook.extensions) sourceLorebook.extensions = {};
+            const isUserPushedBook = lorebookName.startsWith('dd-');
+            const characterFiles = await findCharactersByWorld(request.user.directories, lorebookName);
+            const existingCreator = String(sourceLorebook.extensions[NS('creator')] || '').trim();
+            const existingOriginalCreator = String(sourceLorebook.extensions[NS('original_creator')] || '').trim();
+            const inferredFromName = findCreatorFromDdName(lorebookName, enabledHandles);
+            const inferredFromChars = findCreatorFromCharacterFiles(request.user.directories, characterFiles);
+            const effectiveCreatorHandle = normalizeCreatorHandle(
+                existingOriginalCreator || inferredFromName || inferredFromChars || existingCreator,
+                creatorHandle,
+            );
+            const effectiveCreatorName = userByHandle.get(effectiveCreatorHandle)?.name || effectiveCreatorHandle || creatorHandle;
+            sourceLorebook.extensions[NS('creator')] = effectiveCreatorHandle;
+            sourceLorebook.extensions[NS('original_creator')] = effectiveCreatorHandle;
+            writeFileAtomicSync(sourcePath, JSON.stringify(sourceLorebook, null, 4));
+            const pushedLorebookName = isUserPushedBook ? lorebookName : `ADMIN-${lorebookName}`;
+
+            // Rename the file if needed (admin approval of user submission)
+            const bulkRenameSuccess = renameLoreBookIfNeeded(request.user.directories.worlds, lorebookName, pushedLorebookName);
+            if (!bulkRenameSuccess && lorebookName !== pushedLorebookName) {
+                result.failed.push(`Failed to prepare "${lorebookName}" for distribution: could not rename file`);
+                allResults.push(result);
+                continue;
+            }
+
+            const metadataCharacterName = findCharacterNameFromFiles(request.user.directories, characterFiles, lorebookName);
+
+            for (const handle of targetHandles) {
+                try {
+                    const isOriginalCreatorRecipient = handle === effectiveCreatorHandle;
+                    const announcementMode = !isOriginalCreatorRecipient;
+                    const deliveredNotes = announcementMode ? '' : (notes || '');
+                    const pending = readPendingPushes(handle);
+                    const item = {
+                        push_id: makeId('push'),
+                        status: 'pending',
+                        unread: true,
+                        created_at: Date.now(),
+                        processed_at: null,
+                        processed_by: null,
+                        creator_handle: creatorHandle,
+                        effective_creator: effectiveCreatorHandle,
+                        pushed_by_handle: creatorHandle,
+                        pushed_by_name: pusherName,
+                        pushed_by_role: 'admin',
+                        original_creator_handle: effectiveCreatorHandle,
+                        original_creator_name: effectiveCreatorName,
+                        source_lorebook_name: bulkRenameSuccess ? pushedLorebookName : lorebookName,
+                        pushed_lorebook_name: pushedLorebookName,
+                        source_type: 'character_lorebook_bundle',
+                        source_names: {
+                            lorebook: lorebookName,
+                            character_label: metadataCharacterName || lorebookName,
+                        },
+                        character_files: characterFiles,
+                        preview: {
+                            character_count: characterFiles.length,
+                            note: deliveredNotes,
+                            version: version || '',
+                        },
+                        notes: deliveredNotes,
+                        is_public_announcement: announcementMode,
+                        announcement_title: announcementMode ? 'NEW CHARACTER!! 🎉' : '',
+                        announcement_character_name: metadataCharacterName || lorebookName,
+                        version: version || '',
+                        recipient_handle: handle,
+                    };
+                    pending.push(item);
+                    writePendingPushes(handle, pending);
+                    // Enhanced notification with distribution info
+                    let notifyText;
+                    if (announcementMode) {
+                        const lorebookHidden = pushedLorebookName.startsWith('ADMIN-') || pushedLorebookName.startsWith('dd-');
+                        const hiddenNote = lorebookHidden ? ' (lorebook hidden from your dropdown)' : '';
+                        notifyText = `NEW CHARACTER!! 🎉 - ${metadataCharacterName || lorebookName}${hiddenNote}`;
+                    } else {
+                        notifyText = `Distribution approved: "${pushedLorebookName}" pushed to all users (as ${pushedLorebookName.startsWith('dd-') ? 'user submission' : 'admin content'})`;
+                    }
+                    writePushNotification(handle, notifyText);
+                    result.queued.push({ handle, push_id: item.push_id });
+                } catch (err) {
+                    console.error(`[BulkPushQueue] Failed for ${lorebookName} -> ${handle}:`, err);
+                    result.failed.push(handle);
+                }
+            }
+        } catch (err) {
+            console.error(`[BulkPushQueue] Error processing "${lorebookName}":`, err);
+            result.failed.push('internal error');
+        }
+
+        allResults.push(result);
+    }
+
+    return response.json({ results: allResults });
+});
+// Find characters linked to a lorebook (any authenticated user)
+router.post('/find-characters', async (request, response) => {
+    const { name } = request.body;
+    if (!name) {
+        return response.status(400).send('Lorebook name is required');
+    }
+
+    // Apply the same visibility rule as /get for hidden pushed lorebooks.
+    const file = readWorldInfoFile(request.user.directories, name, true);
+    const pushedWorldOwnership = getPushedWorldOwnershipMap(request.user.directories, request.user.profile);
+    const pushedOwnership = pushedWorldOwnership.get(name);
+    if (pushedOwnership?.hasPushed && !pushedOwnership.owner) {
+        return response.status(403).send('This lorebook is hidden. Only the creator or an admin can access it.');
+    }
+    const allHandles = (await getAllUsers())
+        .filter(u => u.enabled)
+        .map(u => u.handle);
+    if (isLorebookHidden(name, file?.extensions || {})) {
+        if (!canUserAccessHiddenLorebook(name, file?.extensions || {}, request.user.profile, allHandles)) {
+            return response.status(403).send('This lorebook is hidden. Only the creator or an admin can access it.');
+        }
+    }
+
+    const characters = await findCharactersByWorld(request.user.directories, name);
+    return response.send({ characters });
+});
+
+// Get admin user handles (for non-admin users to know who they can push to)
+router.post('/admin-handles', async (request, response) => {
+    try {
+        const allUsers = await getAllUsers();
+        const admins = allUsers
+            .filter(u => u.admin)
+            .map(u => ({ handle: u.handle, name: u.name, admin: true, enabled: true }));
+        return response.json(admins);
+    } catch (err) {
+        console.error('Failed to get admin handles:', err);
+        return response.sendStatus(500);
+    }
+});
+
+router.post('/push-detail', async (request, response) => {
+    const { push_id: pushId } = request.body || {};
+    if (!pushId) return response.status(400).send('push_id is required');
+
+    const handle = request.user.profile?.handle;
+    const pending = readPendingPushes(handle);
+    const item = pending.find(x => x.push_id === pushId);
+    if (!item) return response.status(404).send('Pending push not found');
+
+    if (item.unread) {
+        item.unread = false;
+        writePendingPushes(handle, pending);
+    }
+
+    const enabledUsers = await getAllUsers();
+    const userByHandle = new Map(enabledUsers.map(u => [u.handle, u]));
+
+    const originalCreatorHandle = String(item.original_creator_handle || item.effective_creator || item.creator_handle || '').trim();
+    const originalCreatorName = String(item.original_creator_name || userByHandle.get(originalCreatorHandle)?.name || '').trim();
+    const isAdminPush = String(item.pushed_by_role || '').toLowerCase() === 'admin'
+        || (!!item.creator_handle && item.creator_handle !== originalCreatorHandle);
+    const pushedByLabel = isAdminPush
+        ? 'Admin'
+        : String(item.pushed_by_name || item.creator_handle || 'User');
+
+    return response.json({
+        ...item,
+        pushed_by_label: pushedByLabel,
+        original_creator_handle: originalCreatorHandle || null,
+        original_creator_name: originalCreatorName || null,
+    });
+});
+
+router.post('/push-action', (request, response) => {
+    const { push_id: pushId, action } = request.body || {};
+    if (!pushId || !action) return response.status(400).send('push_id and action are required');
+    if (!['accept', 'overwrite', 'decline'].includes(action)) return response.status(400).send('Invalid action');
+
+    const handle = request.user.profile?.handle;
+    const pending = readPendingPushes(handle);
+    const idx = pending.findIndex(x => x.push_id === pushId);
+    if (idx === -1) return response.status(404).send('Pending push not found');
+
+    const item = pending[idx];
+    if (item.status !== 'pending') {
+        return response.status(409).json({ ok: false, reason: 'Push item already processed', item });
+    }
+
+    // Public announcement imports are accept/decline only.
+    // Coerce accidental overwrite requests to accept semantics.
+    const effectiveAction = (item.is_public_announcement && action === 'overwrite') ? 'accept' : action;
+
+    if (effectiveAction === 'decline') {
+        // On decline, clean up user-pushed lorebook/character artifacts from the admin side.
+        cleanupDeclinedAdminPush(request.user.profile, item);
+
+        item.status = 'declined';
+        item.unread = false;
+        item.processed_at = Date.now();
+        item.processed_by = handle;
+        pending[idx] = item;
+        writePendingPushes(handle, pending);
+        return response.json({ ok: true, item, action: effectiveAction });
+    }
+
+    const applyResult = applyQueuedPushToRecipient(handle, item, effectiveAction === 'overwrite');
+    if (!applyResult.ok) {
+        return response.status(applyResult.status || 500).json(applyResult);
+    }
+
+    item.status = effectiveAction === 'overwrite' ? 'overwritten' : 'accepted';
+    item.unread = false;
+    item.processed_at = Date.now();
+    item.processed_by = handle;
+    pending[idx] = item;
+    writePendingPushes(handle, pending);
+
+    try {
+        recordPush(item.creator_handle, {
+            source_lorebook: item.source_lorebook_name,
+            pushed_lorebook_name: item.pushed_lorebook_name,
+            character_files: item.character_files || [],
+            recipients: [handle],
+        });
+    } catch (err) {
+        console.warn('[PushAction] Failed to record push manifest:', err.message);
+    }
+
+    return response.json({ ok: true, item, applied: applyResult, action: effectiveAction });
+});
+
+// Poll for push notifications and pending queue summary.
+
+
+
+router.post('/push-notifications', (request, response) => {
+    try {
+        const handle = request.user.profile?.handle;
+        const pending = readPendingPushes(handle)
+            .filter(item => isPendingStatus(item.status))
+            .map(item => ({ ...item, unread: isUnreadFlag(item.unread) }))
+            .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+
+        const notifDir = path.join(path.dirname(request.user.directories.worlds), 'push-notifications');
+        const legacy = [];
+        if (fs.existsSync(notifDir)) {
+            const files = fs.readdirSync(notifDir).filter(f => f.endsWith('.json')).sort();
+            for (const file of files) {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(notifDir, file), 'utf8'));
+                    legacy.push(data);
+                    fs.unlinkSync(path.join(notifDir, file));
+                } catch {
+                    // skip bad file
+                }
+            }
+        }
+
+        const submissionUpdates = readAdminSubmissions()
+            .filter(x => x.submitter_handle === handle && x.status !== 'pending')
+            .map(x => ({
+                submission_id: x.submission_id,
+                status: x.status,
+                reply: x.reply || '',
+                updated_at: x.reviewed_at || x.created_at,
+            }))
+            .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+
+        const inboxSummary = summarizeUserInbox(readUserInbox(handle));
+        const pendingUnread = pending.filter(item => isUnreadFlag(item.unread)).length;
+
+        // For admin users, include pending submission count plus unread admin notes for the admin inbox badge.
+        let adminPendingSubmissions = 0;
+        let adminUnreadNotes = 0;
+        if (request.user.profile?.admin) {
+            adminPendingSubmissions = readAdminSubmissions().filter(x => x.status === 'pending').length;
+            adminUnreadNotes = summarizeAdminNotes(readAdminNotes().filter(x => !x.target_admin || x.target_admin === handle)).unread_count;
+        }
+
+        return response.json({
+            pending_count: pending.length,
+            pending_unread_count: pendingUnread,
+            inbox_unread_count: inboxSummary.unread_count,
+            unread_count: pendingUnread + inboxSummary.unread_count,
+            admin_pending_submissions: adminPendingSubmissions + adminUnreadNotes,
+            admin_unread_notes: adminUnreadNotes,
+            pending,
+            submission_updates: submissionUpdates,
+            legacy,
+        });
+    } catch (err) {
+        console.error('Failed to read push notifications:', err);
+        return response.json({
+            pending_count: 0,
+            pending_unread_count: 0,
+            inbox_unread_count: 0,
+            unread_count: 0,
+            pending: [],
+            submission_updates: [],
+            legacy: [],
+        });
+    }
+});
+
+router.post('/push-notifications-clear', (request, response) => {
+    const handle = request.user.profile?.handle;
+    const action = String(request.body?.action || 'mark_all_read');
+    if (!['mark_all_read', 'clear_resolved', 'clear_read'].includes(action)) {
+        return response.status(400).send('Invalid action');
+    }
+
+    let pending = readPendingPushes(handle);
+    if (action === 'mark_all_read') {
+        pending = pending.map(item => ({ ...item, unread: false }));
+    } else if (action === 'clear_read') {
+        pending = pending.filter(item => isUnreadFlag(item.unread));
+    } else if (action === 'clear_resolved') {
+        pending = pending.filter(item => isPendingStatus(item.status));
+    }
+    writePendingPushes(handle, pending);
+
+    const pendingActive = pending
+        .filter(item => isPendingStatus(item.status))
+        .map(item => ({ ...item, unread: isUnreadFlag(item.unread) }));
+    const pendingUnread = pendingActive.filter(item => isUnreadFlag(item.unread)).length;
+    const inboxSummary = summarizeUserInbox(readUserInbox(handle));
+    const adminPendingSubmissions = request.user.profile?.admin
+        ? readAdminSubmissions().filter(x => x.status === 'pending').length
+        : 0;
+    const adminUnreadNotes = request.user.profile?.admin
+        ? summarizeAdminNotes(readAdminNotes().filter(x => !x.target_admin || x.target_admin === handle)).unread_count
+        : 0;
+
+    return response.json({
+        ok: true,
+        pending_count: pendingActive.length,
+        pending_unread_count: pendingUnread,
+        inbox_unread_count: inboxSummary.unread_count,
+        unread_count: pendingUnread + inboxSummary.unread_count,
+        admin_pending_submissions: adminPendingSubmissions + adminUnreadNotes,
+        admin_unread_notes: adminUnreadNotes,
+    });
+});
+
+router.post('/user-inbox', (request, response) => {
+    const handle = request.user.profile?.handle;
+    const items = readUserInbox(handle).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    const summary = summarizeUserInbox(items);
+    return response.json({
+        ...summary,
+        items,
+    });
+});
+
+router.post('/user-inbox-detail', (request, response) => {
+    const handle = request.user.profile?.handle;
+    const inboxId = request.body?.inbox_id;
+    if (!inboxId) return response.status(400).send('inbox_id is required');
+
+    const items = readUserInbox(handle);
+    const idx = items.findIndex(x => x.inbox_id === inboxId);
+    if (idx === -1) return response.status(404).send('Inbox item not found');
+
+    if (!items[idx].read_at) {
+        items[idx].read_at = Date.now();
+        writeUserInbox(handle, items);
+    }
+
+    return response.json(items[idx]);
+});
+
+router.post('/user-inbox-action', (request, response) => {
+    const handle = request.user.profile?.handle;
+    const action = request.body?.action;
+    const inboxId = request.body?.inbox_id;
+
+    const validActions = ['mark_read', 'mark_unread', 'delete', 'clear_read', 'clear_all'];
+    if (!validActions.includes(action)) {
+        return response.status(400).send('Invalid action');
+    }
+
+    let items = readUserInbox(handle);
+
+    if (['mark_read', 'mark_unread', 'delete'].includes(action) && !inboxId) {
+        return response.status(400).send('inbox_id is required');
+    }
+
+    if (action === 'mark_read') {
+        const idx = items.findIndex(x => x.inbox_id === inboxId);
+        if (idx === -1) return response.status(404).send('Inbox item not found');
+        items[idx].read_at = items[idx].read_at || Date.now();
+    }
+
+    if (action === 'mark_unread') {
+        const idx = items.findIndex(x => x.inbox_id === inboxId);
+        if (idx === -1) return response.status(404).send('Inbox item not found');
+        items[idx].read_at = null;
+    }
+
+    if (action === 'delete') {
+        const next = items.filter(x => x.inbox_id !== inboxId);
+        if (next.length === items.length) return response.status(404).send('Inbox item not found');
+        items = next;
+    }
+
+    if (action === 'clear_read') {
+        items = items.filter(x => !x.read_at);
+    }
+
+    if (action === 'clear_all') {
+        items = [];
+    }
+
+    writeUserInbox(handle, items);
+    const summary = summarizeUserInbox(items);
+    return response.json({ ok: true, ...summary });
+});
+
+router.post('/admin-note', async (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Admin note is admin-only');
+    }
+
+    const actorHandle = request.user.profile?.handle;
+    const actorName = request.user.profile?.name || actorHandle;
+    const targets = request.body?.targets;
+    const subject = String(request.body?.subject || '').trim();
+    const body = String(request.body?.body || '').trim();
+    const priority = normalizeInboxPriority(String(request.body?.priority || 'normal'));
+    const context = request.body?.context && typeof request.body.context === 'object' ? request.body.context : null;
+
+    if (!subject || !body) {
+        return response.status(400).send('subject and body are required');
+    }
+
+    const enabledUsers = await getAllUsers();
+    const enabledHandles = new Set(enabledUsers.filter(u => u.enabled).map(u => u.handle));
+    const normalizedTargets = normalizeTargets(targets, actorHandle, [...enabledHandles]);
+    if (!normalizedTargets || normalizedTargets.length === 0) {
+        return response.status(400).send('No valid targets selected');
+    }
+
+    const delivered = [];
+    const failed = [];
+
+    for (const handle of normalizedTargets) {
+        try {
+            if (!enabledHandles.has(handle)) {
+                failed.push(handle);
+                continue;
+            }
+            const created = appendUserInbox(handle, {
+                type: 'admin_note',
+                title: subject,
+                body,
+                priority,
+                from_handle: actorHandle,
+                from_name: actorName,
+                context,
+            });
+            writePushNotification(handle, `Admin note: ${subject}`);
+            delivered.push({ handle, inbox_id: created.inbox_id });
+        } catch (err) {
+            console.warn(`[AdminNote] Failed for ${handle}:`, err.message);
+            failed.push(handle);
+        }
+    }
+
+    return response.json({ ok: true, delivered, failed });
+});
+
+router.post('/user-admin-note', async (request, response) => {
+    const userHandle = request.user.profile?.handle;
+    const userName = request.user.profile?.name || userHandle;
+    const message = String(request.body?.message || '').trim();
+    const targetAdmin = String(request.body?.target_admin || '').trim();
+    const inResponseTo = request.body?.in_response_to_inbox_id;
+
+    if (!message) {
+        return response.status(400).send('message is required');
+    }
+
+    if (!targetAdmin) {
+        return response.status(400).send('target_admin is required');
+    }
+
+    try {
+        const note = appendAdminNote({
+            type: 'user_note',
+            from_handle: userHandle,
+            from_name: userName,
+            target_admin: targetAdmin,
+            message,
+            priority: 'normal',
+            in_response_to_inbox_id: inResponseTo || null,
+        });
+
+        writePushNotification(targetAdmin, `User note from ${userName || userHandle}`);
+        return response.json({ ok: true, note_id: note.note_id });
+    } catch (err) {
+        console.error('[UserAdminNote] Failed:', err);
+        return response.status(500).send('Failed to send note to admins');
+    }
+});
+
+router.post('/users/get', async (request, response) => {
+    try {
+        const users = await getAllUsers();
+        let safeUsers = users.map(u => ({
+            handle: u.handle,
+            name: u.name || u.handle,
+            enabled: u.enabled,
+            admin: u.admin || false,
+        }));
+
+        if (safeUsers.length === 0) {
+            const dataRoot = path.join(process.cwd(), 'data');
+            /** @type {Set<string>} */
+            const discoveredHandles = new Set();
+
+            try {
+                const entries = fs.readdirSync(dataRoot, { withFileTypes: true });
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    const handle = String(entry.name || '').trim();
+                    if (!handle || handle.startsWith('_')) continue;
+                    discoveredHandles.add(handle);
+                }
+            } catch {
+                // no-op
+            }
+
+            const currentHandle = String(request.user.profile?.handle || '').trim();
+            if (currentHandle) discoveredHandles.add(currentHandle);
+
+            safeUsers = [...discoveredHandles].map(handle => ({
+                handle,
+                name: handle,
+                enabled: true,
+                admin: handle === currentHandle ? !!request.user.profile?.admin : false,
+            }));
+        }
+
+        return response.json(safeUsers);
+    } catch (err) {
+        console.error('[UsersGet] Failed:', err);
+        return response.status(500).send('Failed to retrieve users');
+    }
+});
+
+router.post('/submit', async (request, response) => {
+    const {
+        content_type = 'character_lorebook_bundle',
+        content_name = '',
+        source_lorebook_name = '',
+        character_name = '',
+        notes = '',
+        priority = 'normal',
+    } = request.body || {};
+
+    const submitterHandle = request.user.profile?.handle;
+    const displayName = String(content_name || '').trim();
+    const sourceLorebookName = String(source_lorebook_name || content_name || '').trim();
+    const characterName = String(character_name || '').trim();
+
+    if (!displayName) return response.status(400).send('content_name is required');
+    if (!sourceLorebookName) return response.status(400).send('source_lorebook_name is required');
+
+    // Non-admin submitters are normalized to dd-{handle}-{bookname}.
+    const desiredSourceName = request.user.profile?.admin
+        ? displayName
+        : (displayName.startsWith('dd-') ? displayName : `dd-${submitterHandle}-${displayName}`);
+    const submissionTitle = desiredSourceName;
+
+    // If submitter renamed the lorebook in the submit popup, perform actual file rename
+    // and character world-binding rewrite before storing the submission.
+    let effectiveSourceLorebookName = sourceLorebookName;
+    let renameMeta = { renamed: false, updated_characters: [] };
+    if (desiredSourceName !== sourceLorebookName) {
+        const renameResult = await renameLorebookForSubmission(request, sourceLorebookName, desiredSourceName, characterName);
+        if (!renameResult.ok) {
+            return response.status(renameResult.status || 500).send(renameResult.reason || 'Failed to rename lorebook for submission.');
+        }
+        effectiveSourceLorebookName = String(renameResult.source_lorebook_name || desiredSourceName || sourceLorebookName).trim();
+        renameMeta = {
+            renamed: !!renameResult.renamed,
+            updated_characters: Array.isArray(renameResult.updated_characters) ? renameResult.updated_characters : [],
+        };
+    }
+
+    const submission = {
+        submission_id: makeId('submission'),
+        content_type,
+        content_name: submissionTitle,
+        source_lorebook_name: effectiveSourceLorebookName,
+        character_name: characterName,
+        notes: String(notes || ''),
+        priority: ['low', 'normal', 'high'].includes(priority) ? priority : 'normal',
+        submitter_handle: request.user.profile?.handle,
+        submitter_name: request.user.profile?.name || request.user.profile?.handle,
+        status: 'pending',
+        created_at: Date.now(),
+        reviewed_at: null,
+        reviewed_by: null,
+        reply: '',
+    };
+
+    const all = readAdminSubmissions();
+    all.push(submission);
+    writeAdminSubmissions(all);
+
+    // Notify admins with details about the submission and renaming
+    try {
+        const admins = (await getAllUsers()).filter(u => u.admin).map(u => u.handle);
+        const submitterName = request.user.profile?.name || submitterHandle;
+        const finalName = effectiveSourceLorebookName;
+        const wasRenamed = renameMeta.renamed;
+        const renameInfo = wasRenamed ? ` (renamed from "${sourceLorebookName}")` : '';
+        const adminNotification = `New user submission from ${submitterName}: "${finalName}"${renameInfo}`;
+
+        for (const adminHandle of admins) {
+            if (adminHandle !== request.user.profile?.handle) {
+                writePushNotification(adminHandle, adminNotification);
+            }
+        }
+    } catch {
+        // no-op
+    }
+
+    // Notify the submitter that their submission was received
+    try {
+        const userNotification = `Submitted: "${effectiveSourceLorebookName}" (will be distributed as dd-${submitterHandle}-*)`;
+        writePushNotification(submitterHandle, userNotification);
+    } catch {
+        // no-op
+    }
+
+    return response.json({
+        ok: true,
+        submission,
+        renamed_source_lorebook: renameMeta.renamed,
+        rebound_character_files: renameMeta.updated_characters,
+        submission_details: {
+            content_name: submission.content_name,
+            source_lorebook_name: effectiveSourceLorebookName,
+            was_renamed: renameMeta.renamed,
+            original_name: sourceLorebookName,
+            final_name: effectiveSourceLorebookName,
+            naming_info: `Your book will be identified as "dd-${submitterHandle}-${effectiveSourceLorebookName.replace(`dd-${submitterHandle}-`, '')}" when distributed`,
+            characters_updated: renameMeta.updated_characters.length,
+            status: 'pending_admin_review',
+            next_step: 'Admin will review and approve your submission',
+        },
+    });
+});
+
+router.post('/admin-inbox', (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Admin inbox is admin-only');
+    }
+    const handle = request.user.profile?.handle;
+    const submissions = readAdminSubmissions()
+        .map(item => ({ ...item, inbox_item_type: 'submission' }));
+    const notes = readAdminNotes()
+        .filter(item => !item.target_admin || item.target_admin === handle)
+        .map(item => ({ ...item, inbox_item_type: 'admin_note' }));
+    const items = [...submissions, ...notes]
+        .map(normalizeAdminInboxItem)
+        .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    const noteSummary = summarizeAdminNotes(notes);
+    return response.json({
+        total: items.length,
+        pending: submissions.filter(x => x.status === 'pending').length + noteSummary.pending_count,
+        unread_notes: noteSummary.unread_count,
+        items,
+    });
+});
+
+router.post('/admin-inbox-clear', (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Admin inbox is admin-only');
+    }
+
+    const handle = request.user.profile?.handle;
+    const action = String(request.body?.action || 'clear_processed');
+    if (!['clear_processed', 'clear_all'].includes(action)) {
+        return response.status(400).send('Invalid action');
+    }
+
+    const beforeSubmissions = readAdminSubmissions();
+    const beforeNotes = readAdminNotes();
+    let nextSubmissions = beforeSubmissions;
+    let nextNotes = beforeNotes;
+    if (action === 'clear_processed') {
+        nextSubmissions = beforeSubmissions.filter(item => item.status === 'pending');
+        nextNotes = beforeNotes.filter(item => String(item.status || 'pending') === 'pending');
+    } else if (action === 'clear_all') {
+        nextSubmissions = [];
+        nextNotes = [];
+    }
+
+    writeAdminSubmissions(nextSubmissions);
+    writeAdminNotes(nextNotes);
+    const visibleNotes = nextNotes.filter(item => !item.target_admin || item.target_admin === handle);
+    return response.json({
+        ok: true,
+        removed: Math.max(0, (beforeSubmissions.length + beforeNotes.length) - (nextSubmissions.length + nextNotes.length)),
+        total: nextSubmissions.length + visibleNotes.length,
+        pending: nextSubmissions.filter(x => x.status === 'pending').length + summarizeAdminNotes(visibleNotes).pending_count,
+    });
+});
+
+router.post('/admin-inbox-detail', async (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Admin inbox is admin-only');
+    }
+
+    const submissionId = request.body?.submission_id;
+    const noteId = request.body?.note_id;
+    if (!submissionId && !noteId) return response.status(400).send('submission_id or note_id is required');
+
+    if (noteId) {
+        const notes = readAdminNotes();
+        const idx = notes.findIndex(x => x.note_id === noteId);
+        if (idx === -1) return response.status(404).send('Admin note not found');
+        if (!notes[idx].read_at) {
+            notes[idx].read_at = Date.now();
+            writeAdminNotes(notes);
+        }
+        return response.json({
+            ...notes[idx],
+            inbox_item_type: 'admin_note',
+            item_id: notes[idx].note_id,
+        });
+    }
+
+    const submission = readAdminSubmissions().find(x => x.submission_id === submissionId);
+    if (!submission) return response.status(404).send('Submission not found');
+
+    // Enrich with bound character names from the submitter's files.
+    let boundCharacters = [];
+    try {
+        if (submission.submitter_handle && submission.content_name) {
+            const submitterDirs = getUserDirectories(submission.submitter_handle);
+            const lookupLorebookName = String(submission.source_lorebook_name || submission.content_name || '');
+            boundCharacters = await findCharactersByWorld(submitterDirs, lookupLorebookName);
+        }
+    } catch (err) {
+        console.warn('[AdminInboxDetail] Failed to look up bound characters:', err.message);
+    }
+
+    return response.json({ ...submission, inbox_item_type: 'submission', item_id: submission.submission_id, bound_characters: boundCharacters });
+});
+
+router.post('/admin-inbox-action', (request, response) => {
+    if (!request.user.profile?.admin) {
+        return response.status(403).send('Admin inbox is admin-only');
+    }
+
+    const submissionId = request.body?.submission_id;
+    const noteId = request.body?.note_id;
+    const action = request.body?.action;
+    const reply = String(request.body?.reply || '');
+
+    if ((!submissionId && !noteId) || !action) {
+        return response.status(400).send('submission_id or note_id, and action are required');
+    }
+
+    if (noteId) {
+        const notes = readAdminNotes();
+        const idx = notes.findIndex(x => x.note_id === noteId);
+        if (idx === -1) return response.status(404).send('Admin note not found');
+
+        if (action === 'delete') {
+            notes.splice(idx, 1);
+            writeAdminNotes(notes);
+            return response.json({ ok: true, deleted: true, note_id: noteId });
+        }
+        if (!['reviewed'].includes(action)) return response.status(400).send('Invalid action');
+
+        notes[idx].status = 'reviewed';
+        notes[idx].read_at = notes[idx].read_at || Date.now();
+        notes[idx].reviewed_at = Date.now();
+        notes[idx].reviewed_by = request.user.profile?.handle;
+        if (reply) {
+            notes[idx].admin_reply = reply;
+        }
+        writeAdminNotes(notes);
+
+        try {
+            if (reply && notes[idx].from_handle) {
+                const actorHandle = request.user.profile?.handle;
+                const actorName = request.user.profile?.name || actorHandle;
+                appendUserInbox(notes[idx].from_handle, {
+                    type: 'admin_note_reply',
+                    title: 'Reply from admin',
+                    body: reply,
+                    priority: notes[idx].priority || 'normal',
+                    from_handle: actorHandle,
+                    from_name: actorName,
+                    status: 'reviewed',
+                    context: {
+                        note_id: notes[idx].note_id,
+                        target_admin: notes[idx].target_admin || null,
+                    },
+                });
+                writePushNotification(notes[idx].from_handle, 'Admin replied to your note');
+            }
+        } catch (err) {
+            console.warn('[AdminInbox] Failed to reply to admin note submitter:', err.message);
+        }
+
+        return response.json({ ok: true, note: notes[idx] });
+    }
+
+    const actionToStatus = {
+        approve: 'approved',
+        reviewed: 'reviewed',
+        reject: 'rejected',
+        delete: null,
+    };
+    if (!actionToStatus.hasOwnProperty(action)) return response.status(400).send('Invalid action');
+
+    const all = readAdminSubmissions();
+    const idx = all.findIndex(x => x.submission_id === submissionId);
+    if (idx === -1) return response.status(404).send('Submission not found');
+
+    // Delete action: remove the submission entirely (only for already-processed submissions)
+    if (action === 'delete') {
+        if (all[idx].status === 'pending') {
+            return response.status(400).send('Cannot delete a pending submission. Approve, review, or reject it first.');
+        }
+        all.splice(idx, 1);
+        writeAdminSubmissions(all);
+        return response.json({ ok: true, deleted: true });
+    }
+
+    if (action === 'approve') {
+        let applyApproval;
+        try {
+            applyApproval = approveSubmissionForAdmin(all[idx], request.user.profile?.handle);
+        } catch (err) {
+            console.error('[AdminInbox] approveSubmissionForAdmin threw an exception:', err);
+            return response.status(500).json({
+                ok: false,
+                error: `Approval failed with error: ${err.message}`,
+            });
+        }
+        if (!applyApproval.ok) {
+            return response.status(applyApproval.status || 500).json({
+                ok: false,
+                error: applyApproval.reason || 'Approval failed to apply submitted content',
+            });
+        }
+        all[idx].applied_push_id = applyApproval.push_id;
+        all[idx].applied_at = Date.now();
+        all[idx].applied_characters = applyApproval.applied?.characters || [];
+        all[idx].applied_lorebook = applyApproval.applied?.lorebook || null;
+    }
+
+    all[idx].status = actionToStatus[action];
+    all[idx].reviewed_at = Date.now();
+    all[idx].reviewed_by = request.user.profile?.handle;
+    all[idx].reply = reply;
+    writeAdminSubmissions(all);
+
+    try {
+        const submission = all[idx];
+        const shouldNotifySubmitter = !!submission?.submitter_handle && (!!reply || submission.status !== 'pending');
+        if (shouldNotifySubmitter) {
+            const actorHandle = request.user.profile?.handle;
+            const actorName = request.user.profile?.name || actorHandle;
+            const statusTitle = `Submission ${submission.status}`;
+            const statusBody = reply
+                ? reply
+                : `Your submission "${submission.content_name}" was marked ${submission.status}.`;
+
+            appendUserInbox(submission.submitter_handle, {
+                type: 'submission_reply',
+                title: statusTitle,
+                body: statusBody,
+                priority: submission.priority || 'normal',
+                from_handle: actorHandle,
+                from_name: actorName,
+                status: submission.status,
+                context: {
+                    submission_id: submission.submission_id,
+                    content_type: submission.content_type,
+                    content_name: submission.content_name,
+                    source_lorebook_name: submission.source_lorebook_name || submission.content_name,
+                    character_name: submission.character_name || null,
+                },
+            });
+            // Enhanced notification with distribution name details
+            if (action === 'approve') {
+                const contentName = submission.content_name || '';
+                const isUserSubmission = contentName.startsWith('dd-');
+                const finalDistributionName = isUserSubmission ? contentName : `ADMIN-${contentName}`;
+                writePushNotification(submission.submitter_handle, `APPROVED: "${contentName}" will be distributed as "${finalDistributionName}"`);
+            } else if (action === 'decline') {
+                const declineReason = reply || 'No reason provided';
+                writePushNotification(submission.submitter_handle, `DECLINED: "${submission.content_name}" - ${declineReason}`);
+            } else {
+                writePushNotification(submission.submitter_handle, `${statusTitle}: ${submission.content_name}`);
+            }
+        }
+    } catch (err) {
+        console.warn('[AdminInbox] Failed to notify submitter:', err.message);
+    }
+
+    return response.json({ ok: true, submission: all[idx] });
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

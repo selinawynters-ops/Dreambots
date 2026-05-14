@@ -5,19 +5,38 @@ let loaderPopup;
 
 let preloaderYoinked = false;
 
+function setLoaderScrollLock(active) {
+    document.body?.classList.toggle('loader-active', active);
+}
+
 export function showLoader() {
     // Two loaders don't make sense. Don't await, we can overlay the old loader while it closes
     if (loaderPopup) loaderPopup.complete(POPUP_RESULT.CANCELLED);
+    setLoaderScrollLock(true);
 
     loaderPopup = new Popup(`
         <div id="loader">
-            <div id="load-spinner" class="magic-orb-container">
-                <div class="magic-ring"></div>
-                <div class="magic-orb"></div>
+            <div class="dt-loader-scene">
+                <div class="dt-loader-stars" aria-hidden="true"></div>
+                <div class="dt-loader-center">
+                    <div id="load-spinner" class="dt-loader-figure-wrap">
+                        <div class="dt-loader-ring dt-loader-ring-3"></div>
+                        <div class="dt-loader-ring dt-loader-ring-1"></div>
+                        <div class="dt-loader-ring dt-loader-ring-2"></div>
+                        <div class="dt-loader-glow-base"></div>
+                        <img class="dt-loader-figure-img" src="img/logo.png" alt="DreamTavern">
+                    </div>
+                    <div class="dt-loader-brand">
+                        <p class="dt-loader-title">DreamTavern</p>
+                        <p class="dt-loader-subtitle">Enter the Dream Realm</p>
+                    </div>
+                    <div class="dt-loader-divider"></div>
+                    <p class="loading-text"><span class="dt-loader-dots">The veil thins</span></p>
+                </div>
             </div>
-            <div class="loading-text">Loading DreamTavern...</div>
         </div>`, POPUP_TYPE.DISPLAY, null, { transparent: true, animation: 'none', wide: true, large: true });
 
+    loaderPopup.dlg.classList.add('loader-dialogue-popup');
     // No close button, loaders are not closable
     loaderPopup.closeButton.style.display = 'none';
 
@@ -74,7 +93,11 @@ export async function hideLoader() {
 }
 
 function yoinkPreloader() {
-    if (preloaderYoinked) return;
-    document.getElementById('preloader').remove();
+    if (preloaderYoinked) {
+        setLoaderScrollLock(false);
+        return;
+    }
+    document.getElementById('preloader')?.remove();
+    setLoaderScrollLock(false);
     preloaderYoinked = true;
 }
