@@ -11,14 +11,19 @@
  *    - Non-admin users cannot push lorebooks to others
  *
  * 2. HIDDEN LOREBOOK SUPPORT FOR NON-ADMINS:
+ *    - Stored pushed lorebooks use real names such as dd-{handle}-{BookName}
+ *      for user/private pushes or ADMIN-{BookName} / ADMIN{handle}-{BookName}
+ *      for admin-managed pushes. The 9z prefix is not a saved lorebook name.
  *    - Non-admin users see hidden character-seeded lorebooks as "(hidden entries)"
- *    - Prefix lorebook names with "9z" for WorldInfoInfo extension detection
- *    - MutationObserver strips "9z" prefix from UI display
+ *    - WORLD_INFO_ACTIVATED temporarily prefixes hidden activation payload names
+ *      with "9z" only so the WorldInfoInfo extension can detect hidden groups
+ *    - MutationObserver strips the temporary "9z" marker from UI display
  *    - Badge counts remain accurate (full array length preserved)
  *
  * 3. WORLDINFOINFO EXTENSION INTEGRATION:
  *    - ensureWiiPanelObserver() - Sets up mutation observer for panel changes
- *    - Automatically strips "9z" prefix from lorebook headers in extension panel
+ *    - Automatically strips the temporary "9z" activation marker from lorebook
+ *      headers in the extension panel
  *    - Seamless integration without modifying extension code
  *
  * 4. PERMISSION-BASED UI:
@@ -44,7 +49,7 @@ import { isMobile } from './RossAscends-mods.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
 import { getTokenCountAsync } from './tokenizers.js';
 import { power_user } from './power-user.js';
-import { isAdmin, getCurrentUserHandle } from './user.js';
+import { isAdmin, isTrueAdmin, getCurrentUserHandle } from './user.js';
 import { getTagKeyForEntity } from './tags.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS } from './constants.js';
 import { getRegexedString, regex_placement } from './extensions/regex/engine.js';
@@ -714,7 +719,7 @@ const saveWorldDebounced = debounce(async (name, data) => await _save(name, data
 const saveSettingsDebounced = debounce(() => {
     Object.assign(world_info, { globalSelect: selected_world_info });
     saveSettings();
-}, debounce_timeout.relaxed);
+}, debounce_timeout.standard);
 const sortFn = (a, b) => b.order - a.order;
 let updateEditor = (navigation, flashOnNav = true) => { console.debug('Triggered WI navigation', navigation, flashOnNav); };
 
@@ -724,13 +729,24 @@ export const SORT_ORDER_KEY = 'world_info_sort_order';
 export const METADATA_KEY = 'world_info';
 const CHAT_LOREBOOK_LIMIT = 4;
 
+// Resolve any incoming lorebook reference back to the exact entry from
+// world_names. This is whitespace-tolerant: a lorebook file like
+// "Foo .json" yields world_names entry "Foo " (trailing space), and chat
+// metadata that previously stored the trimmed form ("Foo") still resolves.
+// Returns null if no matching lorebook exists.
+function canonicalWorldName(name) {
+    const raw = String(name ?? '');
+    const trimmed = raw.trim();
+    if (!trimmed || !Array.isArray(world_names)) return null;
+    return world_names.find(w => w === raw)
+        ?? world_names.find(w => String(w).trim() === trimmed)
+        ?? null;
+}
+
 function getChatLorebooks() {
     const rawValue = chat_metadata[METADATA_KEY];
-    const availableWorlds = Array.isArray(world_names) ? world_names : [];
-    const names = normalizeArray((Array.isArray(rawValue) ? rawValue : [rawValue])
-        .map((name) => String(name || '').trim())
-        .filter(Boolean));
-    return names.filter((name) => availableWorlds.includes(name));
+    const list = Array.isArray(rawValue) ? rawValue : [rawValue];
+    return [...new Set(list.map(canonicalWorldName).filter(Boolean))];
 }
 
 function getVisibleChatLorebooks() {
@@ -753,13 +769,14 @@ function getPrimaryVisibleChatLorebook() {
 }
 
 function setChatLorebooks(names, { preserveHidden = true } = {}) {
-    const visible = normalizeArray((Array.isArray(names) ? names : [names])
-        .map((name) => String(name || '').trim())
-        .filter(Boolean))
-        .filter((name) => !isHiddenPushedLorebookForDropdown(name))
+    const inputs = Array.isArray(names) ? names : [names];
+    const visible = [...new Set(inputs
+        .map(canonicalWorldName)
+        .filter(Boolean)
+        .filter((name) => !isHiddenPushedLorebookForDropdown(name)))]
         .slice(0, CHAT_LOREBOOK_LIMIT);
     const hidden = preserveHidden ? getHiddenChatLorebooks() : [];
-    const next = normalizeArray([...visible, ...hidden]);
+    const next = [...new Set([...visible, ...hidden])];
 
     if (next.length === 0) {
         delete chat_metadata[METADATA_KEY];
@@ -1563,10 +1580,10 @@ export const wi_anchor_position = {
 export const worldInfoCache = new StructuredCloneMap({ cloneOnGet: true, cloneOnSet: false });
 
 /**
- * MutationObserver that strips the "9z" prefix the WORLD_INFO_ACTIVATED
- * handler adds to hidden lorebook names.  The prefix is needed so the
- * WorldInfoInfo extension's built-in `isHiddenWorld()` recognises them,
- * but we don't want the raw "9z" to appear in the panel header.
+ * MutationObserver that strips the temporary "9z" activation marker the
+ * WORLD_INFO_ACTIVATED handler adds to hidden lorebook names. Stored pushed
+ * lorebook files keep their real dd-* / ADMIN-* names; "9z" exists only in the
+ * event payload so WorldInfoInfo's built-in `isHiddenWorld()` recognises them.
  */
 let _wiiObserverReady = false;
 function ensureWiiPanelObserver() {
@@ -1660,10 +1677,11 @@ export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanD
             return isConventionHiddenBook || isFlagHiddenBook;
         });
 
-        // Prefix hidden lorebook names with "9z" so the WorldInfoInfo
-        // extension's built-in isHiddenWorld() recognises them, but keep the
-        // raw lorebook name in the event payload so each hidden book remains
-        // its own group in the activation panel.
+        // Prefix hidden activation payload names with the temporary "9z"
+        // marker so the WorldInfoInfo extension's built-in isHiddenWorld()
+        // recognises them. The stored lorebook names remain dd-* / ADMIN-*;
+        // keep the original source in _stwii_source_world so each hidden book
+        // remains its own group in the activation panel.
         for (const entry of arg) {
             const w = entry.world || '';
             const normalizedWorldName = normalizeHiddenLorebookName(w);
@@ -1778,8 +1796,43 @@ export function setWorldInfoSettings(settings, data) {
 
     refreshWorldNameCaches(data);
 
-    // Add to existing selected WI if it exists
-    selected_world_info = selected_world_info.concat(settings.world_info?.globalSelect?.filter((e) => world_names.includes(e)) ?? []);
+    // Heal charLore entries on load:
+    //  - strip stray image extensions from the character key — the push-import path
+    //    wrote "Foo.png", but the editor always keys by getCharaFilename (no extension),
+    //    so a "Foo.png" entry is invisible to it;
+    //  - resolve aux-book names to their canonical on-disk world names, so
+    //    whitespace-trimmed legacy entries (disk has "Foo .json") still match;
+    //  - merge any duplicate that collides with an already-correct twin.
+    // Idempotent: once healed, re-running this is a no-op.
+    if (Array.isArray(world_info.charLore)) {
+        const healedCharLore = [];
+        const byName = new Map();
+        for (const charEntry of world_info.charLore) {
+            if (!charEntry || typeof charEntry !== 'object') continue;
+            const fixedName = String(charEntry.name ?? '').replace(/\.(png|jpe?g|webp|gif|avif|bmp)$/i, '');
+            const books = Array.isArray(charEntry.extraBooks)
+                ? charEntry.extraBooks.map(b => canonicalWorldName(b) ?? b)
+                : [];
+            const existing = byName.get(fixedName);
+            if (existing) {
+                existing.extraBooks = [...new Set([...existing.extraBooks, ...books])];
+            } else {
+                const healed = { ...charEntry, name: fixedName, extraBooks: books };
+                byName.set(fixedName, healed);
+                healedCharLore.push(healed);
+            }
+        }
+        world_info.charLore = healedCharLore;
+    }
+
+    // Add to existing selected WI if it exists. Resolve via canonicalWorldName
+    // so that any whitespace-trimmed legacy entries still match an existing
+    // lorebook file (e.g. "Foo" stored in settings while disk has "Foo .json").
+    selected_world_info = selected_world_info.concat(
+        (settings.world_info?.globalSelect ?? [])
+            .map(canonicalWorldName)
+            .filter(Boolean),
+    );
 
     if (world_names.length > 0) {
         $('#world_info').empty();
@@ -1829,7 +1882,9 @@ export function setWorldInfoSettings(settings, data) {
  * @param {boolean} [loadIfNotSelected=false] - Indicates whether to load the file even if it's not currently selected
  */
 export function reloadEditor(file, loadIfNotSelected = false) {
-    const currentIndex = Number($('#world_editor_select').val());
+    // empty selection (placeholder '') must not coerce to index 0
+    const editorVal = String($('#world_editor_select').val() ?? '');
+    const currentIndex = editorVal === '' ? -1 : Number(editorVal);
     const selectedIndex = world_names.indexOf(file);
     if (selectedIndex !== -1 && (loadIfNotSelected || currentIndex === selectedIndex)) {
         $('#world_editor_select').val(selectedIndex).trigger('change');
@@ -2847,9 +2902,13 @@ export async function updateWorldInfoList() {
     if (result.ok) {
         const data = await result.json();
         const editorSelectedOption = $('#world_editor_select').find(':selected');
-        const editorSelected = String(
+        // placeholder has value '' and Number('') === 0 — without this guard an
+        // empty selection resolves to world_names[0] and the first book gets
+        // phantom-selected on every list refresh
+        const editorSelectedVal = String(editorSelectedOption.val() ?? '');
+        const editorSelected = editorSelectedVal === '' ? '' : String(
             editorSelectedOption.data('worldName')
-            || world_names?.[Number(editorSelectedOption.val())]
+            || world_names?.[Number(editorSelectedVal)]
             || '',
         );
         refreshWorldNameCaches(data);
@@ -3427,6 +3486,7 @@ export const originalWIDataKeyMap = {
     'displayIndex': 'extensions.display_index',
     'excludeRecursion': 'extensions.exclude_recursion',
     'preventRecursion': 'extensions.prevent_recursion',
+    'keywordOnly': 'extensions.keyword_only',
     'delayUntilRecursion': 'extensions.delay_until_recursion',
     'selectiveLogic': 'selectiveLogic',
     'comment': 'comment',
@@ -3675,7 +3735,7 @@ export function parseRegexFromString(input) {
  * @param {object} params.data - The data object containing entries.
  */
 function enableKeysInputHelper({ template, entry, entryPropName, originalDataValueName, name, data }) {
-    const isFancyInput = !isMobile() && !power_user.wi_key_input_plaintext;
+    const isFancyInput = !power_user.wi_key_input_plaintext;
     const input = isFancyInput ? template.find(`select[name="${entryPropName}"]`) : template.find(`textarea[name="${entryPropName}"]`);
     input.data('uid', entry.uid);
     input.on('click', function (event) {
@@ -4509,6 +4569,9 @@ export async function getWorldEntry(name, data, entry) {
         handleMatchCheckboxHelper({ template: editTemplate, entry, fieldName: 'excludeRecursion', data, name });
         handleMatchCheckboxHelper({ template: editTemplate, entry, fieldName: 'preventRecursion', data, name });
 
+        // Keyword-only override (forces Constant or Vectorized entries into keyword-gated activation)
+        handleMatchCheckboxHelper({ template: editTemplate, entry, fieldName: 'keywordOnly', data, name });
+
         // Delay until recursion
         const delayUntilRecursionInput = editTemplate.find('input[name="delay_until_recursion"]');
         delayUntilRecursionInput.data('uid', entry.uid);
@@ -4814,6 +4877,7 @@ export const newWorldInfoEntryDefinition = {
     ignoreBudget: { default: false, type: 'boolean' },
     excludeRecursion: { default: false, type: 'boolean' },
     preventRecursion: { default: false, type: 'boolean' },
+    keywordOnly: { default: false, type: 'boolean' },
     matchPersonaDescription: { default: false, type: 'boolean' },
     matchCharacterDescription: { default: false, type: 'boolean' },
     matchCharacterPersonality: { default: false, type: 'boolean' },
@@ -5505,14 +5569,14 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
                 continue;
             }
 
-            if (buffer.getExternallyActivated(entry)) {
+            if (buffer.getExternallyActivated(entry) && !entry.keywordOnly) {
                 log('externally activated');
                 activatedNow.add(buffer.getExternallyActivated(entry));
                 continue;
             }
 
             // Now do checks for immediate activations
-            if (entry.constant) {
+            if (entry.constant && !entry.keywordOnly) {
                 log('activated because of constant');
                 activatedNow.add(entry);
                 continue;
@@ -5521,6 +5585,13 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
             if (isSticky) {
                 log('activated because active sticky');
                 activatedNow.add(entry);
+                continue;
+            }
+
+            // Vectorized entries sleep unless the vectors extension activated them (native behavior).
+            // Keyword-only vectorized entries are exempt: they fall through to pure key-gated activation.
+            if (entry.vectorized && !entry.keywordOnly && !buffer.getExternallyActivated(entry)) {
+                log('skipped because vectorized');
                 continue;
             }
 
@@ -6293,6 +6364,7 @@ export function convertCharacterBook(characterBook) {
             position: entry.extensions?.position ?? (entry.position === 'before_char' ? world_info_position.before : world_info_position.after),
             excludeRecursion: entry.extensions?.exclude_recursion ?? false,
             preventRecursion: entry.extensions?.prevent_recursion ?? false,
+            keywordOnly: entry.extensions?.keyword_only ?? false,
             delayUntilRecursion: entry.extensions?.delay_until_recursion ?? false,
             disable: !entry.enabled,
             addMemo: !!entry.comment,
@@ -6778,7 +6850,9 @@ export async function moveWorldInfoEntry(sourceName, targetName, uid, { deleteOr
         console.log(`[WI Move] ${entryToMove.comment} ${deleteOriginal ? 'moved' : 'copied'} successfully to '${targetName}'.`);
 
         // Check if the currently viewed book in the editor is the source or target and reload it
-        const currentEditorBookIndex = Number($('#world_editor_select').val());
+        // (empty selection coerces to 0 — guard so book 0 isn't mistaken for "open")
+        const moveEditorVal = String($('#world_editor_select').val() ?? '');
+        const currentEditorBookIndex = moveEditorVal === '' ? NaN : Number(moveEditorVal);
         if (!isNaN(currentEditorBookIndex)) {
             const currentEditorBookName = world_names[currentEditorBookIndex];
             if (currentEditorBookName === sourceName || currentEditorBookName === targetName) {
@@ -6859,7 +6933,7 @@ export function charSetAuxWorlds(fileName, books) {
 }
 
 function updateAuxBooks(fileName, computeNext) {
-    if (!fileName) return;
+    if (!fileName) { return; }
 
     if (menu_type === 'create') {
         const current = create_save.extra_books ?? [];
@@ -7291,6 +7365,77 @@ function bindPushUiDrag(pref) {
     });
 }
 
+function isIOSWebKitDevice() {
+    return /iP(hone|ad|od)/i.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function setImportantStyle(element, property, value) {
+    if (!element?.style) return;
+    if (element.style.getPropertyValue(property) === value &&
+        element.style.getPropertyPriority(property) === 'important') {
+        return;
+    }
+    element.style.setProperty(property, value, 'important');
+}
+
+function normalizeIOSPushDrawerRow(element, showState = true) {
+    if (!isIOSWebKitDevice() || !element) return;
+
+    if (!showState || element.classList.contains('displayNone')) {
+        setImportantStyle(element, 'display', 'none');
+        return;
+    }
+
+    setImportantStyle(element, 'display', 'flex');
+    setImportantStyle(element, 'flex-direction', 'row');
+    setImportantStyle(element, 'align-items', 'center');
+    setImportantStyle(element, 'column-gap', '10px');
+    setImportantStyle(element, 'white-space', 'normal');
+
+    const icon = Array.from(element.children).find(child => child.tagName === 'I');
+    if (icon) {
+        setImportantStyle(icon, 'display', 'flex');
+        setImportantStyle(icon, 'align-items', 'center');
+        setImportantStyle(icon, 'justify-content', 'center');
+        setImportantStyle(icon, 'flex', '0 0 20px');
+        setImportantStyle(icon, 'width', '20px');
+        setImportantStyle(icon, 'min-width', '20px');
+        setImportantStyle(icon, 'height', '20px');
+        setImportantStyle(icon, 'line-height', '1');
+        setImportantStyle(icon, 'align-self', 'center');
+    }
+}
+
+function normalizeIOSPushDrawerLayout() {
+    if (!isIOSWebKitDevice()) return;
+
+    [
+        'option_push_heading',
+        'option_push_queue',
+        'option_push_inbox',
+        'option_admin_del_mgr',
+        'option_admin_note',
+        'option_submit_to_admin',
+        'option_user_inbox',
+        'option_user_admin_note',
+        'option_del_request',
+        'option_coauthor',
+        'option_push_notifs',
+        'option_push_diag',
+    ].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) {
+            normalizeIOSPushDrawerRow(element, !element.classList.contains('displayNone'));
+        }
+    });
+
+    const separator = document.getElementById('option_push_separator');
+    if (separator && !separator.classList.contains('displayNone')) {
+        setImportantStyle(separator, 'display', 'block');
+    }
+}
+
 function bindPushControlAction(selector, showState, handler) {
     const button = $(selector);
     let lastActivationAt = 0;
@@ -7319,9 +7464,11 @@ function bindPushControlAction(selector, showState, handler) {
     };
 
     button
-        .toggle(showState)
         .toggleClass('displayNone', !showState)
+        .css('display', '')
         .off('click pointerdown pointermove pointerup pointercancel touchstart touchmove touchend touchcancel');
+
+    button.each((_index, element) => normalizeIOSPushDrawerRow(element, showState));
 
     button.on('pointerdown', (event) => {
         if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
@@ -7422,6 +7569,7 @@ function createEmptyPushNotificationState() {
         inbox_unread_count: 0,
         admin_pending_submissions: 0,
         admin_unread_notes: 0,
+        coauthor_pending_count: 0,
         pending: [],
         submission_updates: [],
         legacy: [],
@@ -7511,6 +7659,7 @@ function updatePushNotificationBadge(state) {
     updatePushBadge(document.getElementById('option_submit_badge'), Number(state?.inbox_unread_count || 0));
     updatePushBadge(document.getElementById('topbar_admin_inbox_badge'), Number(state?.admin_pending_submissions || 0));
     updatePushBadge(document.getElementById('option_admin_inbox_badge'), Number(state?.admin_pending_submissions || 0));
+    updatePushBadge(document.getElementById('option_coauthor_badge'), Number(state?.coauthor_pending_count || 0));
 
     // Compatibility control: despite the legacy id, this button opens the user inbox modal.
     const submitBtn = document.getElementById('topbar_submit');
@@ -7542,6 +7691,13 @@ function updatePushNotificationBadge(state) {
     const drawerSubmitBtn = document.getElementById('option_submit_to_admin');
     if (drawerSubmitBtn) {
         drawerSubmitBtn.title = 'Submit to Admin';
+    }
+
+    const drawerCoAuthorBtn = document.getElementById('option_coauthor');
+    if (drawerCoAuthorBtn && Number(state?.coauthor_pending_count || 0) > 0) {
+        drawerCoAuthorBtn.title = `Co-Author Station (${state.coauthor_pending_count} pending item${state.coauthor_pending_count !== 1 ? 's' : ''})`;
+    } else if (drawerCoAuthorBtn) {
+        drawerCoAuthorBtn.title = 'Co-Author Station';
     }
 
     const drawerNotificationsBtn = document.getElementById('option_push_notifs');
@@ -8079,7 +8235,7 @@ async function openAdminNoteModal() {
 function decoratePushPopup(popup, mode = 'default') {
     if (!popup?.dlg) return;
 
-    const mobileScrollModes = new Set(['queue', 'submit']);
+    const mobileScrollModes = new Set(['queue', 'submit', 'notifications', 'user-inbox', 'user-inbox-detail']);
     const bodyEl = popup.dlg.querySelector('.popup-body');
     const contentEl = popup.dlg.querySelector('.popup-content');
     const setImportantStyle = (element, property, value) => element.style.setProperty(property, value, 'important');
@@ -8088,7 +8244,7 @@ function decoratePushPopup(popup, mode = 'default') {
         if (!(bodyEl instanceof HTMLElement) || !(contentEl instanceof HTMLElement)) return;
 
         const isCompactViewport = window.matchMedia('(max-width: 640px), (max-height: 760px)').matches;
-        const shouldUseBodyScroll = isCompactViewport && mobileScrollModes.has(mode);
+        const shouldUseBodyScroll = mobileScrollModes.has(mode);
 
         if (!shouldUseBodyScroll) {
             popup.dlg.style.removeProperty('top');
@@ -8124,13 +8280,23 @@ function decoratePushPopup(popup, mode = 'default') {
 
         const viewportHeight = Math.max(320, Math.floor((window.visualViewport?.height || window.innerHeight) - 16));
 
-        setImportantStyle(popup.dlg, 'top', '8px');
-        setImportantStyle(popup.dlg, 'left', '50%');
-        setImportantStyle(popup.dlg, 'right', 'auto');
-        setImportantStyle(popup.dlg, 'bottom', 'auto');
-        setImportantStyle(popup.dlg, 'transform', 'translateX(-50%)');
-        setImportantStyle(popup.dlg, 'width', '92vw');
-        setImportantStyle(popup.dlg, 'max-width', '92vw');
+        if (isCompactViewport) {
+            setImportantStyle(popup.dlg, 'top', '8px');
+            setImportantStyle(popup.dlg, 'left', '50%');
+            setImportantStyle(popup.dlg, 'right', 'auto');
+            setImportantStyle(popup.dlg, 'bottom', 'auto');
+            setImportantStyle(popup.dlg, 'transform', 'translateX(-50%)');
+            setImportantStyle(popup.dlg, 'width', '92vw');
+            setImportantStyle(popup.dlg, 'max-width', '92vw');
+        } else {
+            popup.dlg.style.removeProperty('top');
+            popup.dlg.style.removeProperty('left');
+            popup.dlg.style.removeProperty('right');
+            popup.dlg.style.removeProperty('bottom');
+            popup.dlg.style.removeProperty('transform');
+            popup.dlg.style.removeProperty('width');
+            popup.dlg.style.removeProperty('max-width');
+        }
         setImportantStyle(popup.dlg, 'height', 'auto');
         setImportantStyle(popup.dlg, 'max-height', `${viewportHeight}px`);
         setImportantStyle(popup.dlg, 'overflow', 'hidden');
@@ -8157,6 +8323,9 @@ function decoratePushPopup(popup, mode = 'default') {
 
         dlg.addClass('push-aurora-popup');
         dlg.attr('data-push-popup-mode', mode);
+        if (mobileScrollModes.has(mode)) {
+            dlg.removeClass('vertical_scrolling_dialogue_popup');
+        }
 
         const root = dlg.closest('.popup, .dialogue_popup, .popup_holder');
         if (root.length) {
@@ -8219,6 +8388,17 @@ function decoratePushPopup(popup, mode = 'default') {
             await previousOnClose(...args);
         }
     };
+}
+
+async function closePushPopupIfStillOpen(popup) {
+    const dlg = popup?.dlg;
+    if (!dlg?.isConnected) return;
+
+    try {
+        await popup.completeCancelled();
+    } catch (err) {
+        console.warn('Push popup close failed:', err);
+    }
 }
 
 function renderPushTargetRail(users) {
@@ -8507,7 +8687,9 @@ async function openPushDetailModal(pushId) {
                     }
 
                     if (secondaryLorebooks.length > 0) {
-                        charSetAuxWorlds(importedFileName, secondaryLorebooks);
+                        // Key by getCharaFilename (extension stripped) — the same key the
+                        // character editor uses — not the raw avatar (e.g. "Foo.png").
+                        charSetAuxWorlds(getCharaFilename(charIndex), secondaryLorebooks);
                     }
 
                     // Show world button lit up
@@ -8770,7 +8952,7 @@ async function openDeletionRequestModal() {
                         <i class="fa-solid fa-magnifying-glass" style="position:absolute; left:12px; top:50%; transform:translateY(-50%); color:#6868aa; font-size:16px; pointer-events:none; z-index:1;"></i>
                         <input id="del_req_search" type="text" class="text_pole" autocomplete="off"
                             placeholder="Search characters..."
-                            style="padding-left:36px !important; font-size:17px !important; width:100%; box-sizing:border-box; margin:0;" />
+                            style="padding-left:36px !important; font-size:calc(var(--mainFontSize) * 1.13) !important; width:100%; box-sizing:border-box; margin:0;" />
                         <div id="del_req_dropdown" style="
                             display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:200;
                             background:#181828; border:1px solid #3a3a5a; border-radius:8px;
@@ -9085,6 +9267,7 @@ async function openSubmitToAdminModal() {
         const selected = $charSelect.val() || [];
         const count = selected.length;
         $(dlg).find('#push_submit_count').text(`${count} / 10 selected`);
+        $charSelect.next('.select2-container').toggleClass('push-chips-overflow', count > 2);
 
         if (count === 0) {
             lbDiv.hide().empty();
@@ -9313,6 +9496,9 @@ async function openSubmitToAdminModal() {
 
     if (successCount > 0) {
         toastr.success(`Submitted ${successCount} character(s) to admin inbox.${failCount > 0 ? ` (${failCount} failed)` : ''}`, 'Submit');
+        if (failCount === 0) {
+            await closePushPopupIfStillOpen(popup);
+        }
     } else {
         toastr.error('All submissions failed.', 'Submit');
     }
@@ -9874,12 +10060,15 @@ async function openAdminPushDeletionModal() {
         if (!confirmed) return;
 
         const adminHandle = getCurrentUserHandle();
-        const exemptHandles = new Set([adminHandle, 'default-user']);
+        const exemptHandles = new Set([adminHandle].filter(Boolean));
         let totalSuccess = 0;
         let totalFail = 0;
+        let totalSkippedExempt = 0;
 
         for (const [file, info] of byFile.entries()) {
             const validHandles = info.handles.filter(h => !exemptHandles.has(h));
+            const skipped = info.handles.length - validHandles.length;
+            if (skipped > 0) totalSkippedExempt += skipped;
             if (!validHandles.length) continue;
             try {
                 const delRes = await fetch('/api/worldinfo/admin-delete-chars-bulk', {
@@ -9909,6 +10098,17 @@ async function openAdminPushDeletionModal() {
         }
         if (totalFail > 0) {
             toastr.warning(`${totalFail} deletion(s) failed`, 'Partial Success');
+        }
+        if (totalSuccess === 0 && totalFail === 0 && totalSkippedExempt > 0) {
+            toastr.info(
+                `${totalSkippedExempt} selection${totalSkippedExempt !== 1 ? 's were' : ' was'} skipped because they belong to your own admin account. Delete them from your own character list instead.`,
+                'Nothing Deleted',
+            );
+        } else if (totalSkippedExempt > 0) {
+            toastr.info(
+                `${totalSkippedExempt} selection${totalSkippedExempt !== 1 ? 's' : ''} skipped (admin self-account).`,
+                'Some Skipped',
+            );
         }
 
         const searchVal = $('#push_admin_del_search').val() || '';
@@ -10004,8 +10204,8 @@ async function openAdminInboxModal() {
 }
 
 async function openTopbarPushModal() {
-    if (!isAdmin()) {
-        toastr.warning('Only admins can queue pushes.', 'Push');
+    if (!isTrueAdmin()) {
+        toastr.warning('Only the primary admin can push directly. Use "Submit to Admin" to send your character/lorebook for approval.', 'Push');
         return;
     }
 
@@ -10099,6 +10299,7 @@ async function openTopbarPushModal() {
         const selected = $charSelect.val() || [];
         const count = selected.length;
         $(dlg).find('#topbar_push_count').text(`${count} / 10 selected`);
+        $charSelect.next('.select2-container').toggleClass('push-chips-overflow', count > 2);
 
         if (count === 0) {
             lbDiv.hide().empty();
@@ -10316,6 +10517,8 @@ async function openTopbarPushModal() {
             }
             if (detailedFailures.length > 0) {
                 toastr.error(detailedFailures.join('<br>'), 'Push Failed', { timeOut: 12000, escapeHtml: false, closeButton: true });
+            } else if (msgs.length > 0) {
+                await closePushPopupIfStillOpen(popup);
             }
         } else {
             toastr.error(await pushRes.text() || 'Push failed', 'Push Failed', { timeOut: 12000, closeButton: true });
@@ -10514,35 +10717,46 @@ async function runPushWorkflowDiagnostics() {
 }
 async function setupPushWorkflowControls() {
     const admin = isAdmin();
+    // Only the TRUE admin (default-user) gets the direct-distribution controls.
+    // Admin-permission users go through the submission/approval workflow just like
+    // regular users — they must submit characters/lorebooks to default-user for
+    // approval before anything is pushed to other users.
+    const trueAdmin = isTrueAdmin();
     // Push workflow now lives exclusively in the Options menu.
 
     const drawerActions = [
-        ['#option_push_queue', admin, async () => {
+        ['#option_push_queue', trueAdmin, async () => {
             await openTopbarPushModal();
         }],
-        ['#option_push_inbox', admin, async () => {
+        ['#option_push_inbox', trueAdmin, async () => {
             await openAdminInboxModal();
         }],
-        ['#option_admin_del_mgr', admin, async () => {
+        ['#option_admin_del_mgr', trueAdmin, async () => {
             await openAdminPushDeletionModal();
         }],
-        ['#option_admin_note', admin, async () => {
+        ['#option_admin_note', trueAdmin, async () => {
             await openAdminNoteModal();
         }],
-        ['#option_submit_to_admin', !admin, async () => {
+        ['#option_submit_to_admin', !trueAdmin, async () => {
             await openSubmitToAdminModal();
         }],
-        ['#option_user_inbox', !admin, async () => {
+        ['#option_user_inbox', !trueAdmin, async () => {
             await openUserInboxModal();
         }],
-        ['#option_user_admin_note', !admin, async () => {
+        ['#option_user_admin_note', !trueAdmin, async () => {
             await openUserSendAdminNoteModal();
         }],
-        ['#option_del_request', !admin, async () => {
+        ['#option_del_request', !trueAdmin, async () => {
             await openDeletionRequestModal();
         }],
         ['#option_coauthor', true, async () => {
-            const dest = admin ? '/coauthor-admin.html' : '/coauthor.html';
+            let dest = admin ? '/coauthor-admin.html' : '/coauthor.html';
+            if (!admin) {
+                const state = await getPushNotificationState();
+                if (Number(state?.coauthor_pending_count || 0) > 0) {
+                    dest = '/coauthor-admin.html?tab=pending';
+                }
+            }
             window.open(dest, '_blank', 'noopener,noreferrer');
         }],
         ['#option_push_notifs', true, async () => {
@@ -10566,8 +10780,12 @@ async function setupPushWorkflowControls() {
     }
 
     $('#option_push_separator, #option_push_heading')
-        .show()
-        .removeClass('displayNone');
+        .removeClass('displayNone')
+        .css('display', '');
+
+    normalizeIOSPushDrawerLayout();
+    requestAnimationFrame(normalizeIOSPushDrawerLayout);
+    setTimeout(normalizeIOSPushDrawerLayout, 250);
 
     const state = await getPushNotificationState();
     updatePushNotificationBadge(state);
@@ -10774,7 +10992,7 @@ function initLoreTreasuryInline() {
     document.head.appendChild(ltStyle);
 
     // ── Shared style fragments ────────────────────────────────────────────────
-    const S_INPUT = 'width:100%;background:#0a0a1a;border:1px solid #3a3a5c;border-radius:6px;color:#c8d0f0;padding:10px 13px;font-size:17px;outline:none;box-sizing:border-box;font-family:inherit;';
+    const S_INPUT = 'width:100%;background:#0a0a1a;border:1px solid #3a3a5c;border-radius:6px;color:#c8d0f0;padding:10px 13px;font-size:calc(var(--mainFontSize) * 1.13);outline:none;box-sizing:border-box;font-family:inherit;';
     const S_LIST  = 'display:none;position:absolute;left:0;right:0;top:100%;margin-top:3px;z-index:200;background:#111122;border:1px solid #4a4a7c;border-radius:6px;max-height:220px;overflow-y:auto;box-shadow:0 8px 28px rgba(0,0,0,0.65);';
     const S_LABEL = 'font-size:13px;color:#666688;display:block;margin-bottom:7px;text-transform:uppercase;letter-spacing:0.07em;';
     const S_BTN   = 'background:none;border:1px solid #3a3a5c;border-radius:6px;color:#c0c8e8;cursor:pointer;padding:11px 16px;font-size:16px;display:flex;align-items:center;justify-content:center;gap:6px;font-family:inherit;transition:background 0.15s,border-color 0.15s;';
